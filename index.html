@@ -66,6 +66,25 @@ const fmt = n => new Intl.NumberFormat("id-ID", {
 const fmtNum = n => new Intl.NumberFormat("id-ID", {
   maximumFractionDigits: 0
 }).format(n || 0);
+// Currency-aware number formatting: IDR stays whole numbers, any other currency (foreign PO/PS
+// amounts) gets 2 decimal places (cents) so overseas prices aren't silently rounded off.
+const fmtCur = (n, currency) => new Intl.NumberFormat("id-ID", {
+  minimumFractionDigits: currency && currency !== "IDR" ? 2 : 0,
+  maximumFractionDigits: currency && currency !== "IDR" ? 2 : 0
+}).format(n || 0);
+// Full money string including currency prefix — use this instead of fmt() wherever the amount
+// isn't guaranteed to be IDR (e.g. Purchase Order Overseas), so the display always matches the
+// document's actual currency instead of silently falling back to Rupiah formatting.
+const fmtMoney = (n, currency) => !currency || currency === "IDR" ? fmt(n) : `${currency} ${fmtCur(n, currency)}`;
+// Display-only label mapping — the stored value stays "TEMPO" internally (used in comparisons,
+// getDueStatus, etc.) but Purchase Order screens/prints show it in English as "CREDIT".
+const payLabel = tp => tp === "TEMPO" ? "CREDIT" : tp;
+// Render free-text notes with real line breaks preserved (textarea input already allows multiple
+// lines; without this, browsers collapse \n in plain text nodes onto a single visual line).
+const catatanStyle = {
+  whiteSpace: "pre-wrap",
+  wordBreak: "break-word"
+};
 // Convert a number into Indonesian words (terbilang), e.g. 1500000 -> "Satu Juta Lima Ratus Ribu Rupiah"
 const terbilang = n => {
   n = Math.round(Math.abs(n || 0));
@@ -88,6 +107,13 @@ const terbilang = n => {
 };
 const today = () => new Date().toISOString().split("T")[0];
 const uid = () => Math.random().toString(36).slice(2, 9).toUpperCase();
+// Whole-day difference between a stored date string and today, for stale/follow-up checks.
+const daysSince = dateStr => {
+  if (!dateStr) return 0;
+  const d = new Date(dateStr + "T00:00:00");
+  if (isNaN(d.getTime())) return 0;
+  return Math.floor((new Date(today() + "T00:00:00") - d) / 86400000);
+};
 // Look up a saved digital signature (data URL) for a given username, for use on printed docs.
 const getSignature = (store, username) => {
   const emp = (store?.employees || []).find(e => e.username === username);
@@ -341,12 +367,12 @@ const ROLE_DEFS = {
   purchasing: {
     label: "Purchasing",
     color: "#f97316",
-    modules: ["dashboard", "po_local", "supplier", "attendance"]
+    modules: ["dashboard", "po_local", "supplier", "part_request", "attendance"]
   },
   purchasing_overseas: {
     label: "Purchasing Overseas",
     color: "#fb923c",
-    modules: ["dashboard", "po_overseas", "supplier", "attendance"]
+    modules: ["dashboard", "po_overseas", "supplier", "part_request", "attendance"]
   },
   storage: {
     label: "Storage / Gudang",
@@ -383,7 +409,7 @@ const ROLE_DEFS = {
   workshop_manager: {
     label: "Workshop Manager",
     color: "#0ea5e9",
-    modules: ["dashboard", "workshop_dashboard", "maintenance_schedule", "kpi_mekanik", "sales_order", "item_requisition", "goods_receipt", "parts_use", "delivery_order", "mekanik_report", "master_mill", "attendance", "master_coa"]
+    modules: ["dashboard", "workshop_dashboard", "maintenance_schedule", "kpi_mekanik", "sales_order", "item_requisition", "part_request", "goods_receipt", "parts_use", "delivery_order", "mekanik_report", "master_mill", "attendance", "master_coa"]
   }
 };
 
@@ -434,6 +460,37 @@ const INSPECTION_CHECKLIST = [{
   category: "LOG BOOK",
   items: ["Check Log Book"]
 }];
+// TRUCK CRANE variant of the checklist — per Template Job Report Truck Crane.xls (Fassi-style truck
+// mounted crane: no CABIN/GRAPPLE/ELECTRIC SYSTEM/LOG BOOK groups, adds OUTRIGGER/HOOK/WINCH instead).
+const INSPECTION_CHECKLIST_TRUCK = [{
+  category: "BASE CRANE",
+  items: ["Base", "Cylinder Swing", "Cylinder Swing Bolt", "Stud Bolt", "Collum", "Bushing", "Control Valve", "Main Pump", "Hoses", "PTO", "Hydraulic Tank", "Ball Valve"]
+}, {
+  category: "MAIN BOOM",
+  items: ["Arm Boom", "Cylinder Main Boom", "Pin", "Hoses"]
+}, {
+  category: "OUTER BOOM",
+  items: ["Arm", "Cylinder", "Pin", "Hoses"]
+}, {
+  category: "TELESCOPIC",
+  items: ["Arm", "Cylinder", "Pin", "Hoses", "Nipples"]
+}, {
+  category: "OUTRIGGER",
+  items: ["Cylinder", "Block Valve", "Foot Step", "Hoses", "Valve Diverter"]
+}, {
+  category: "HOOK",
+  items: ["Lock", "Pin", "Swivel"]
+}, {
+  category: "WINCH",
+  items: ["Motor Hydraulic", "Wire", "Hoses", "Safety Valve", "Sensor"]
+}];
+// Truck Crane hydraulic readings use In/Out (Arm & Telescopic) and Rh/Lh (Swing) instead of the
+// Static Crane's Raise/Down + Grapple Open/Close, and adds a Time field alongside Pressure (BAR).
+const INSPECTION_HYDRAULIC_FIELDS_TRUCK = [["boomRaise", "Boom Raise"], ["boomDown", "Boom Down"], ["armOuterIn", "Arm/Outer In"], ["armOuterOut", "Arm/Outer Out"], ["telescopicIn", "Telescopic In"], ["telescopicOut", "Telescopic Out"], ["swingRH", "Swing Rh"], ["swingLH", "Swing Lh"]];
+const emptyHidraulikValuesTruck = () => Object.fromEntries(INSPECTION_HYDRAULIC_FIELDS_TRUCK.map(([key]) => [key, ""]));
+const getInspectionChecklist = tipeCrane => tipeCrane === "Truck Crane" ? INSPECTION_CHECKLIST_TRUCK : INSPECTION_CHECKLIST;
+const getInspectionHydraulicFields = tipeCrane => tipeCrane === "Truck Crane" ? INSPECTION_HYDRAULIC_FIELDS_TRUCK : INSPECTION_HYDRAULIC_FIELDS;
+const emptyHidraulikValuesFor = tipeCrane => tipeCrane === "Truck Crane" ? emptyHidraulikValuesTruck() : emptyHidraulikValues();
 // Add individual sales manager sub-roles for clarity in labels (still role=sales_manager)
 
 const ALL_MODULES = [{
@@ -589,11 +646,34 @@ function getAllowedModules(role, customModules) {
   }
   // Form Cuti (leave request) is available to every user regardless of role or custom module config.
   if (!list.includes("cuti")) list = [...list, "cuti"];
+  // Master Part must be visible/searchable for every user (many modules reference parts by
+  // number/name), regardless of role default or an individually-configured custom module list.
+  if (!list.includes("master_part")) list = [...list, "master_part"];
   return list;
 }
 // Payroll hard rule: only owner/gm regardless of role list
 function hasPayrollAccess(role) {
   return role === "owner" || role === "gm" || role === "hrd_payroll";
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// DATABASE CLIENT ACCESS — a client can now be assigned to multiple sales managers
+// (by username, the stable identifier) via HO1/HO2/HO3, instead of the old single
+// free-text `salesManager` name field which broke whenever a user's display name
+// didn't exactly match (e.g. "Hengky" vs the real user "Hengky Sebastian").
+// ════════════════════════════════════════════════════════════════════════════
+function customerAccessibleBy(customer, session) {
+  if (!customer) return false;
+  if (["owner", "gm", "finance_director"].includes(session.role)) return true;
+  if (session.role !== "sales_manager") return true; // non-sales roles already see/use all clients
+  if (Array.isArray(customer.salesManagerUsernames) && customer.salesManagerUsernames.length > 0) {
+    return customer.salesManagerUsernames.includes(session.username);
+  }
+  // Legacy fallback for records never migrated to the username-based list: fuzzy-match the old
+  // free-text name (handles "Hengky" matching real user "Hengky Sebastian" in either direction).
+  const legacy = (customer.salesManager || "").trim();
+  if (!legacy) return false;
+  return legacy === session.nama || session.nama.startsWith(legacy) || legacy.startsWith(session.nama);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -603,10 +683,9 @@ const DEFAULT_USER_SEED = [{
   username: "owner",
   nama: "Pemilik Perusahaan",
   role: "owner"
-}, {
-  username: "gm",
-  nama: "General Manager",
-  role: "gm"
+  // NOTE: the standalone generic "gm" demo account has been retired — HO2 (Jeffry Husin, see
+  // USER_DAN_AKSES_SEED) is the sole GM going forward; the "gm" role string is still used
+  // internally for permission checks and is normalized onto HO2's session at login.
 }, {
   username: "findir",
   nama: "Finance Director",
@@ -1209,6 +1288,26 @@ function useStore() {
     npwp: "",
     logo: ""
   });
+  // Real login accounts (Supabase `profiles`) — shared so any module can reference the actual
+  // user/role/username list (Database Client access assignment, User Management, Cuti-on-behalf,
+  // etc.) without each duplicating its own query.
+  const [authUsers, setAuthUsers] = useState([]);
+  const refreshAuthUsers = () => sb.from("profiles").select("*").order("nama").then(({
+    data,
+    error
+  }) => {
+    if (!error) setAuthUsers((data || []).map(p => ({
+      id: p.id,
+      nama: p.nama,
+      username: p.username,
+      role: p.role,
+      aktif: p.aktif,
+      customModules: p.custom_modules
+    })));
+  });
+  useEffect(() => {
+    authReadyPromise.then(refreshAuthUsers);
+  }, []);
   return {
     parts,
     setParts,
@@ -1283,7 +1382,9 @@ function useStore() {
     leaveRequests,
     setLeaveRequests,
     companySettings,
-    setCompanySettings
+    setCompanySettings,
+    authUsers,
+    refreshAuthUsers
   };
 }
 
@@ -1734,7 +1835,11 @@ function Table({
   }, h)), (onEdit || onDelete) && /*#__PURE__*/React.createElement("th", {
     style: {
       padding: "10px 12px",
-      color: theme.muted
+      color: theme.muted,
+      position: "sticky",
+      right: 0,
+      background: theme.bg,
+      boxShadow: "-4px 0 6px -4px rgba(0,0,0,0.3)"
     }
   }, "Aksi"))), /*#__PURE__*/React.createElement("tbody", null, rows.length === 0 ? /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
     colSpan: headers.length + 1,
@@ -1761,7 +1866,11 @@ function Table({
     style: {
       padding: "10px 12px",
       display: "flex",
-      gap: 8
+      gap: 8,
+      position: "sticky",
+      right: 0,
+      background: theme.bg,
+      boxShadow: "-4px 0 6px -4px rgba(0,0,0,0.3)"
     }
   }, onEdit && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
@@ -1921,7 +2030,11 @@ function LoginPage({
         userId: profile.id,
         nama: profile.nama,
         username: profile.username,
-        role: profile.role,
+        // HO2 (Jeffry Husin) IS the GM — the separate generic "GM" demo account is retired, and
+        // every existing role==="gm" permission/approval check across the app must automatically
+        // grant HO2 full authority. Normalize here at the single point where role enters the
+        // session, regardless of which literal role string ends up stored on the profile.
+        role: profile.username === "ho2" || profile.role === "ho2" ? "gm" : profile.role,
         customModules: profile.custom_modules || null,
         loginAt: new Date().toISOString()
       };
@@ -2323,10 +2436,22 @@ function MasterPart({
       wiped: true
     });
   };
+  // Auto-generate a unique Part Number when the user leaves it blank on a new part.
+  const genPartNumber = () => {
+    let n = parts.length + 1;
+    let candidate;
+    do {
+      candidate = "PN-" + new Date().getFullYear() + "-" + String(n).padStart(4, "0");
+      n++;
+    } while (parts.find(p => p.partNumber === candidate));
+    return candidate;
+  };
   const save = () => {
-    if (!form.partNumber || !form.partName) return alert("Part Number dan Part Name wajib diisi");
+    if (!form.partName) return alert("Part Name wajib diisi");
+    const partNumber = editIdx !== null ? form.partNumber : form.partNumber.trim() || genPartNumber();
     const item = {
       ...form,
+      partNumber,
       hargaBeli: parseFloat(form.hargaBeli) || 0,
       hargaJual: parseFloat(form.hargaJual) || 0,
       stok: form.kategori === "Service" ? null : parseInt(form.stok) || 0
@@ -2337,7 +2462,7 @@ function MasterPart({
         a[editIdx] = item;
         setParts(a);
       } else {
-        if (parts.find(p => p.partNumber === form.partNumber)) return alert("Part Number sudah ada");
+        if (parts.find(p => p.partNumber === item.partNumber)) return alert("Part Number sudah ada");
         setParts([...parts, item]);
       }
       logAudit(store, session, {
@@ -2349,7 +2474,7 @@ function MasterPart({
     } else {
       // Non-GM roles: every add/edit goes through GM approval
       const action = editIdx !== null ? "Edit" : "Tambah";
-      if (action === "Tambah" && parts.find(p => p.partNumber === form.partNumber)) return alert("Part Number sudah ada");
+      if (action === "Tambah" && parts.find(p => p.partNumber === item.partNumber)) return alert("Part Number sudah ada");
       submitEditRequest(store, session, {
         module: "Master Part",
         action,
@@ -2688,13 +2813,13 @@ function MasterPart({
       gap: 14
     }
   }, /*#__PURE__*/React.createElement(Input, {
-    label: "Part Number",
+    label: editIdx !== null ? "Part Number" : "Part Number (kosongkan untuk auto-generate)",
     value: form.partNumber,
     onChange: v => setForm({
       ...form,
       partNumber: v
     }),
-    required: true,
+    disabled: editIdx !== null,
     placeholder: "PN-009"
   }), /*#__PURE__*/React.createElement(Select, {
     label: "Kategori",
@@ -3093,6 +3218,7 @@ function MasterUnit({
       bom: [...f.bom, {
         partNumber: part.partNumber,
         partName: part.partName,
+        description: part.description || "",
         qty: parseInt(bomItem.qty) || 1
       }]
     }));
@@ -3109,11 +3235,23 @@ function MasterUnit({
     const p = parts.find(x => x.partNumber === b.partNumber);
     return s + (p?.hargaBeli || 0) * b.qty;
   }, 0);
+  // Auto-generate a unique Unit Code when the user leaves it blank on a new unit.
+  const genUnitCode = () => {
+    let n = units.length + 1;
+    let candidate;
+    do {
+      candidate = "UC-" + new Date().getFullYear() + "-" + String(n).padStart(4, "0");
+      n++;
+    } while (units.find(u => u.unitCode === candidate));
+    return candidate;
+  };
   const save = () => {
-    if (!form.unitCode || !form.unitName) return alert("Unit Code dan Unit Name wajib diisi");
+    if (!form.unitName) return alert("Unit Name wajib diisi");
     if (form.bom.length === 0) return alert("BOM minimal 1 part");
+    const unitCode = editIdx !== null ? form.unitCode : form.unitCode.trim() || genUnitCode();
     const item = {
       ...form,
+      unitCode,
       hargaJual: parseFloat(form.hargaJual) || 0
     };
     if (editIdx !== null) {
@@ -3121,7 +3259,7 @@ function MasterUnit({
       a[editIdx] = item;
       setUnits(a);
     } else {
-      if (units.find(u => u.unitCode === form.unitCode)) return alert("Unit Code sudah ada");
+      if (units.find(u => u.unitCode === item.unitCode)) return alert("Unit Code sudah ada");
       setUnits([...units, item]);
     }
     setModal(false);
@@ -3405,13 +3543,13 @@ function MasterUnit({
       gap: 14
     }
   }, /*#__PURE__*/React.createElement(Input, {
-    label: "Unit Code",
+    label: editIdx !== null ? "Unit Code" : "Unit Code (kosongkan untuk auto-generate)",
     value: form.unitCode,
     onChange: v => setForm({
       ...form,
       unitCode: v
     }),
-    required: true,
+    disabled: editIdx !== null,
     placeholder: "UNIT-CR50"
   }), /*#__PURE__*/React.createElement(Input, {
     label: "Harga Jual Unit (Rp)",
@@ -3479,8 +3617,8 @@ function MasterUnit({
     onClick: addBom,
     size: "sm"
   }, "+ Add")), form.bom.length > 0 && /*#__PURE__*/React.createElement(Table, {
-    headers: ["Part Number", "Part Name", "Qty", ""],
-    rows: form.bom.map((b, i) => [b.partNumber, b.partName, fmtNum(b.qty), /*#__PURE__*/React.createElement(Btn, {
+    headers: ["Part Number", "Part Name", "Description", "Qty", ""],
+    rows: form.bom.map((b, i) => [b.partNumber, b.partName, b.description || parts.find(p => p.partNumber === b.partNumber)?.description || "-", fmtNum(b.qty), /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "danger",
       onClick: () => removeBom(i)
@@ -3571,7 +3709,8 @@ function CustomerDB({
     customers,
     setCustomers,
     editRequests,
-    setEditRequests
+    setEditRequests,
+    authUsers
   } = store;
   const blankForm = {
     id: "",
@@ -3588,11 +3727,89 @@ function CustomerDB({
     taxPayer: "",
     nitku: "",
     taxAddress: "",
-    salesManager: session.nama
+    salesManager: session.nama,
+    salesManagerUsernames: session.role === "sales_manager" ? [session.username] : []
   };
   const [modal, setModal] = useState(false);
   const [form, setForm] = useState(blankForm);
   const [editIdx, setEditIdx] = useState(null);
+  const [accessModal, setAccessModal] = useState(null); // customer currently being (re)assigned by HO
+  const salesManagerUsers = (authUsers || []).filter(u => u.role === "sales_manager" && u.aktif !== false);
+  const toggleAccessUser = (customer, username) => {
+    const current = customer.salesManagerUsernames || [];
+    const next = current.includes(username) ? current.filter(u => u !== username) : [...current, username];
+    const idx = customers.indexOf(customer);
+    if (idx < 0) return;
+    const arr = [...customers];
+    const assignedNamas = next.map(u => salesManagerUsers.find(x => x.username === u)?.nama).filter(Boolean);
+    arr[idx] = {
+      ...customer,
+      salesManagerUsernames: next,
+      salesManager: assignedNamas.join(", ") || customer.salesManager
+    };
+    setCustomers(arr);
+    setAccessModal(arr[idx]);
+  };
+  const requestAccess = customer => {
+    submitEditRequest(store, session, {
+      module: "Client Access Request",
+      action: "Request Access",
+      targetId: customer.id,
+      targetLabel: customer.nama,
+      payload: {
+        customerId: customer.id,
+        username: session.username,
+        nama: session.nama
+      },
+      approverLabel: "GM"
+    });
+    alert(`Permintaan akses ke client "${customer.nama}" diajukan dan menunggu approval GM.`);
+  };
+  const pendingAccessRequests = editRequests.filter(r => r.module === "Client Access Request" && r.status === "Menunggu Approval GM");
+  const approveAccessRequest = req => {
+    const idx = customers.findIndex(c => c.id === req.targetId);
+    if (idx >= 0) {
+      const c = customers[idx];
+      const current = c.salesManagerUsernames || [];
+      if (!current.includes(req.payload.username)) {
+        const next = [...current, req.payload.username];
+        const arr = [...customers];
+        const assignedNamas = next.map(u => salesManagerUsers.find(x => x.username === u)?.nama || (u === req.payload.username ? req.payload.nama : null)).filter(Boolean);
+        arr[idx] = {
+          ...c,
+          salesManagerUsernames: next,
+          salesManager: assignedNamas.join(", ") || c.salesManager
+        };
+        setCustomers(arr);
+      }
+    }
+    const reqArr = [...editRequests];
+    reqArr[editRequests.indexOf(req)] = {
+      ...req,
+      status: "Disetujui GM"
+    };
+    setEditRequests(reqArr);
+    logAudit(store, session, {
+      module: "Client Access Request",
+      docNomor: req.targetLabel,
+      action: "Approve",
+      detail: `Akses diberikan ke ${req.payload.nama}`
+    });
+  };
+  const rejectAccessRequest = req => {
+    const reqArr = [...editRequests];
+    reqArr[editRequests.indexOf(req)] = {
+      ...req,
+      status: "Ditolak GM"
+    };
+    setEditRequests(reqArr);
+    logAudit(store, session, {
+      module: "Client Access Request",
+      docNomor: req.targetLabel,
+      action: "Reject",
+      detail: `Permintaan akses dari ${req.payload.nama} ditolak`
+    });
+  };
   const [picForm, setPicForm] = useState({
     nama: "",
     jabatan: "",
@@ -3685,17 +3902,17 @@ function CustomerDB({
     logAudit(store, session, {
       module: "Database Client",
       docNomor: reviewReq.targetLabel,
-      action: "Reject Edit",
+      action: reviewReq.action === "Tambah" ? "Reject Tambah (Client Baru)" : "Reject Edit",
       detail: ""
     });
     setReviewReq(null);
   };
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
-  // Sales managers see only their own clients; every other role with access to this module sees all clients
-  // (previously any non-owner/gm/findir role — e.g. service_manager, sales_admin, or a custom-access user like
-  // invoice1/Oktavia — was wrongly filtered to salesManager === their own name, which is never true for them,
-  // so the list appeared empty. Only the sales_manager role should be scoped to its own clients.)
-  const visible = session.role === "sales_manager" ? customers.filter(c => c.salesManager === session.nama) : customers;
+  // Every role can BROWSE every client (sales managers included) — access is now about who can
+  // EDIT/own a client, not who can see it exists. HO1/HO2/HO3 assign sales manager(s) per client
+  // (multiple allowed), and a sales manager without assigned access can request it (see
+  // requestAccess/pendingAccessRequests above), subject to HO1/HO2/HO3 approval.
+  const visible = customers;
   const [search, setSearch] = useState("");
   const filtered = visible.filter(c => c.nama.toLowerCase().includes(search.toLowerCase()));
   const CUSTOMER_TEMPLATE_HEADERS = ["id", "salesManager", "nama", "category", "currency", "picNama", "picJabatan", "picNoHp", "alamat", "telepon", "email", "shippingAddress", "billingAddress", "npwp", "taxPayer", "nitku", "taxAddress"];
@@ -3764,6 +3981,10 @@ function CustomerDB({
     setEditIdx(null);
   };
   const onEdit = i => {
+    if (!isOwnerLike && !customerAccessibleBy(filtered[i], session)) {
+      alert("Anda belum memiliki akses ke client ini. Gunakan tombol \"Request Akses\" untuk mengajukan akses ke HO1/HO2/HO3.");
+      return;
+    }
     setForm({
       ...blankForm,
       ...filtered[i],
@@ -4038,21 +4259,117 @@ function CustomerDB({
       logAudit(store, session, {
         module: "Database Client",
         docNomor: req.targetLabel,
-        action: "Reject Edit",
+        action: req.action === "Tambah" ? "Reject Tambah (Client Baru)" : "Reject Edit",
         detail: ""
       });
     }
+  }, "✗ Tolak"))))), pendingAccessRequests.length > 0 && /*#__PURE__*/React.createElement(Card, {
+    title: "Pending Access Requests (Client)"
+  }, pendingAccessRequests.map(req => /*#__PURE__*/React.createElement("div", {
+    key: req.id,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      padding: "8px 0",
+      borderBottom: `1px solid ${theme.border}`
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: theme.text
+    }
+  }, req.payload.nama), " ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted,
+      fontSize: 12
+    }
+  }, "meminta akses ke client \"", req.targetLabel, "\"")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "success",
+    onClick: () => approveAccessRequest(req)
+  }, "✓ Approve"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "danger",
+    onClick: () => rejectAccessRequest(req)
   }, "✗ Tolak"))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
-    headers: isOwnerLike ? ["ID", "Nama Client", "PIC Utama", "Telepon", "Email", "Sales Manager"] : ["ID", "Nama Client", "PIC Utama", "Telepon", "Email"],
+    headers: isOwnerLike ? ["ID", "Nama Client", "PIC Utama", "Telepon", "Email", "Sales Manager", "Akses"] : ["ID", "Nama Client", "PIC Utama", "Telepon", "Email", "Akses"],
     rows: filtered.map(c => {
-      const picLabel = c.pics && c.pics.length ? `${c.pics[0].nama}${c.pics.length > 1 ? ` (+${c.pics.length - 1})` : ""}` : "-";
+      const picLabelText = c.pics && c.pics.length ? `${c.pics[0].nama}${c.pics.length > 1 ? ` (+${c.pics.length - 1})` : ""}` : "-";
+      const picLabel = /*#__PURE__*/React.createElement("span", {
+        title: picLabelText,
+        style: {
+          display: "inline-block",
+          maxWidth: 140,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          verticalAlign: "bottom"
+        }
+      }, picLabelText);
+      const hasAccess = isOwnerLike || customerAccessibleBy(c, session);
+      const accessCell = isOwnerLike ? /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "ghost",
+        onClick: () => setAccessModal(c)
+      }, "⚙ Kelola Akses") : session.role !== "sales_manager" ? "-" : hasAccess ? /*#__PURE__*/React.createElement(Badge, {
+        color: theme.success || "#2e7d32"
+      }, "✓ Assigned") : (editRequests.some(r => r.module === "Client Access Request" && r.targetId === c.id && r.payload && r.payload.username === session.username && r.status === "Menunggu Approval GM") ? /*#__PURE__*/React.createElement(Badge, {
+        color: theme.muted
+      }, "Menunggu Approval") : /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "ghost",
+        onClick: () => requestAccess(c)
+      }, "Request Akses"));
       return isOwnerLike ? [c.id, c.nama, picLabel, c.telepon, c.email, /*#__PURE__*/React.createElement(Badge, {
         color: theme.accent
-      }, c.salesManager)] : [c.id, c.nama, picLabel, c.telepon, c.email];
+      }, c.salesManager), accessCell] : [c.id, c.nama, picLabel, c.telepon, c.email, accessCell];
     }),
     onEdit: onEdit,
     onDelete: isOwnerLike ? onDelete : undefined
   })), /*#__PURE__*/React.createElement(Modal, {
+    open: !!accessModal,
+    title: `Kelola Akses: ${accessModal ? accessModal.nama : ""}`,
+    onClose: () => setAccessModal(null),
+    width: 460
+  }, accessModal && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "Pilih Sales Manager yang boleh mengakses/mengelola client ini (bisa lebih dari satu)."), salesManagerUsers.length === 0 ? /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: theme.muted
+    }
+  }, "Tidak ada user Sales Manager aktif.") : salesManagerUsers.map(u => /*#__PURE__*/React.createElement("label", {
+    key: u.username,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      padding: "6px 0",
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: (accessModal.salesManagerUsernames || []).includes(u.username),
+    onChange: () => toggleAccessUser(accessModal, u.username)
+  }), /*#__PURE__*/React.createElement("span", null, u.nama, " ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted,
+      fontSize: 12
+    }
+  }, "(", u.username, ")")))))), /*#__PURE__*/React.createElement(Modal, {
     open: modal,
     title: editIdx !== null ? "Edit Client" : "Tambah Client",
     onClose: () => setModal(false),
@@ -5119,18 +5436,20 @@ function MekanikReport({
     ...f,
     jenisPekerjaan: f.jenisPekerjaan.includes(j) ? f.jenisPekerjaan.filter(x => x !== j) : [...f.jenisPekerjaan, j]
   }));
-  const emptyInspectionItems = () => INSPECTION_CHECKLIST.flatMap(cat => cat.items.map(it => ({
+  const emptyInspectionItems = (tipeCrane = "Static Crane") => getInspectionChecklist(tipeCrane).flatMap(cat => cat.items.map(it => ({
     category: cat.category,
     item: it,
     kondisi: "",
     deskripsi: ""
   })));
   const [inspectionForm, setInspectionForm] = useState({
-    items: emptyInspectionItems(),
+    tipeCrane: "Static Crane",
+    items: emptyInspectionItems("Static Crane"),
     catatan: "",
-    hidraulik: emptyHidraulikValues()
+    hidraulik: emptyHidraulikValuesFor("Static Crane")
   });
   const [editingInspectionId, setEditingInspectionId] = useState(null);
+  const [editingBastId, setEditingBastId] = useState(null);
   const setHidraulikField = (key, value) => setInspectionForm(f => ({
     ...f,
     hidraulik: {
@@ -5138,6 +5457,12 @@ function MekanikReport({
       [key]: value
     }
   }));
+  const setInspectionTipeCrane = tipeCrane => setInspectionForm(f => f.tipeCrane === tipeCrane ? f : {
+    ...f,
+    tipeCrane,
+    items: emptyInspectionItems(tipeCrane),
+    hidraulik: emptyHidraulikValuesFor(tipeCrane)
+  });
   const setInspectionItem = (idx, field, value) => setInspectionForm(f => {
     const items = [...f.items];
     items[idx] = {
@@ -5220,37 +5545,46 @@ function MekanikReport({
         catatanHarian: []
       });
     }
-    if (type === "bast") setBastForm({
-      ...emptyBastForm,
-      // If the visit was created with the SO-pull and/or Master Mill-pull options, that data was
-      // frozen onto the visit record (see saveVisit) — carry it straight into the BAPP so the
-      // mekanik doesn't have to re-select the same Sales Order / Mill here.
-      soNomor: visit.soNomor || "",
-      tanggal: visit.tanggal || today(),
-      customerId: visit.customerId || "",
-      millId: visit.millId || "",
-      crane: visit.crane || "",
-      snCrane: visit.snCrane || "",
-      grapple: visit.grapple || "",
-      snGrapple: visit.snGrapple || "",
-      lokasiManual: !visit.millId ? visit.lokasi || "" : ""
-    });
+    if (type === "bast") {
+      const editingBast = editingRecord;
+      setEditingBastId(editingBast ? editingBast.id : null);
+      setBastForm(editingBast ? {
+        ...emptyBastForm,
+        ...editingBast
+      } : {
+        ...emptyBastForm,
+        // If the visit was created with the SO-pull and/or Master Mill-pull options, that data was
+        // frozen onto the visit record (see saveVisit) — carry it straight into the BAPP so the
+        // mekanik doesn't have to re-select the same Sales Order / Mill here.
+        soNomor: visit.soNomor || "",
+        tanggal: visit.tanggal || today(),
+        customerId: visit.customerId || "",
+        millId: visit.millId || "",
+        crane: visit.crane || "",
+        snCrane: visit.snCrane || "",
+        grapple: visit.grapple || "",
+        snGrapple: visit.snGrapple || "",
+        lokasiManual: !visit.millId ? visit.lokasi || "" : ""
+      });
+    }
     if (type === "inspection") {
       const editingInsp = editingRecord;
       setEditingInspectionId(editingInsp ? editingInsp.id : null);
       setInspectionForm(editingInsp ? {
+        tipeCrane: editingInsp.tipeCrane || "Static Crane",
         items: editingInsp.items.map(it => ({
           ...it
         })),
         catatan: editingInsp.catatan || "",
         hidraulik: {
-          ...emptyHidraulikValues(),
+          ...emptyHidraulikValuesFor(editingInsp.tipeCrane || "Static Crane"),
           ...(editingInsp.hidraulik || {})
         }
       } : {
-        items: emptyInspectionItems(),
+        tipeCrane: "Static Crane",
+        items: emptyInspectionItems("Static Crane"),
         catatan: "",
-        hidraulik: emptyHidraulikValues()
+        hidraulik: emptyHidraulikValuesFor("Static Crane")
       });
     }
   };
@@ -5380,18 +5714,34 @@ function MekanikReport({
     const mill = mills.find(m => m.millName === bastForm.millId);
     const unit = units.find(u => u.unitCode === bastForm.unitCode);
     const relatedDOs = deliveryOrders.filter(d => d.soNomor === bastForm.soNomor);
-    setBasts([...basts, {
-      id: "BAPP-" + uid(),
-      visitId: detailVisit.id,
-      ...bastForm,
-      customerNama: cust?.nama,
-      millName: mill?.millName || bastForm.lokasiManual,
-      unitName: unit?.unitName,
-      doNomor: relatedDOs.map(d => d.nomor).join(", ") || "-",
-      mekanikNama: session.nama,
-      tanggal: bastForm.tanggal || detailVisit.tanggal
-    }]);
+    if (editingBastId) {
+      const arr = [...basts];
+      const idx = arr.findIndex(b => b.id === editingBastId);
+      if (idx >= 0) arr[idx] = {
+        ...arr[idx],
+        ...bastForm,
+        customerNama: cust?.nama,
+        millName: mill?.millName || bastForm.lokasiManual,
+        unitName: unit?.unitName,
+        doNomor: relatedDOs.map(d => d.nomor).join(", ") || "-",
+        tanggal: bastForm.tanggal || detailVisit.tanggal
+      };
+      setBasts(arr);
+    } else {
+      setBasts([...basts, {
+        id: "BAPP-" + uid(),
+        visitId: detailVisit.id,
+        ...bastForm,
+        customerNama: cust?.nama,
+        millName: mill?.millName || bastForm.lokasiManual,
+        unitName: unit?.unitName,
+        doNomor: relatedDOs.map(d => d.nomor).join(", ") || "-",
+        mekanikNama: session.nama,
+        tanggal: bastForm.tanggal || detailVisit.tanggal
+      }]);
+    }
     setFormType(null);
+    setEditingBastId(null);
     setBastForm(emptyBastForm);
   };
   const visitDars = id => dars.filter(d => d.visitId === id);
@@ -5465,6 +5815,7 @@ function MekanikReport({
       const idx = arr.findIndex(r => r.id === editingInspectionId);
       if (idx >= 0) arr[idx] = {
         ...arr[idx],
+        tipeCrane: inspectionForm.tipeCrane,
         items: inspectionForm.items,
         catatan: inspectionForm.catatan,
         hidraulik: inspectionForm.hidraulik
@@ -5475,6 +5826,7 @@ function MekanikReport({
         id: "INSP-" + uid(),
         visitId: detailVisit.id,
         tanggal: detailVisit.tanggal,
+        tipeCrane: inspectionForm.tipeCrane,
         items: inspectionForm.items,
         catatan: inspectionForm.catatan,
         hidraulik: inspectionForm.hidraulik,
@@ -5484,18 +5836,19 @@ function MekanikReport({
     setFormType(null);
     setEditingInspectionId(null);
     setInspectionForm({
-      items: emptyInspectionItems(),
+      tipeCrane: "Static Crane",
+      items: emptyInspectionItems("Static Crane"),
       catatan: "",
-      hidraulik: emptyHidraulikValues()
+      hidraulik: emptyHidraulikValuesFor("Static Crane")
     });
   };
   const printInspection = r => {
     const rows = r.items.filter(it => it.kondisi).map(it => [it.category, it.item, it.kondisi, it.deskripsi || "-"]);
     const hidraulik = r.hidraulik || {};
-    const hidraulikRows = INSPECTION_HYDRAULIC_FIELDS.map(([key, label]) => [`${label} (BAR)`, hidraulik[key] ? `${hidraulik[key]} BAR` : "-"]);
+    const hidraulikRows = getInspectionHydraulicFields(r.tipeCrane || "Static Crane").map(([key, label]) => [`${label} (BAR)`, hidraulik[key] ? `${hidraulik[key]} BAR` : "-"]);
     printDocument({
       company: store.companySettings,
-      docTitle: "INSPECTION REPORT",
+      docTitle: `INSPECTION REPORT — ${r.tipeCrane || "Static Crane"}`,
       nomor: r.id,
       tanggal: r.tanggal,
       partyLabel: "Customer:",
@@ -5643,6 +5996,27 @@ function MekanikReport({
       disetujuiOleh: d.namaPenerima ? {
         nama: d.namaPenerima
       } : null
+    });
+  };
+  const printPartRec = rec => {
+    const v = visits.find(x => x.id === rec.visitId) || detailVisit || {};
+    printDocument({
+      company: store.companySettings,
+      docTitle: "PART RECOMMENDATION",
+      nomor: rec.id,
+      tanggal: rec.tanggal || v.tanggal,
+      partyLabel: "Customer:",
+      partyName: rec.customerNama || v.customerNama || "-",
+      partyExtra: `Lokasi: ${v.lokasi || "-"} · Unit: ${v.unitTerkait || "-"}`,
+      extraInfoRows: [["Mekanik", rec.mekanikNama], ["Status", rec.status]],
+      // Part Description must never appear on any client-facing print — only Part Number/Name/Qty/Alasan.
+      itemHeaders: ["Part Number", "Part Name", "Qty", "Alasan"],
+      items: rec.items.map(it => [it.partNumber, it.partName, fmtNum(it.qty), it.alasan || "-"]),
+      showPrice: false,
+      catatan: rec.catatan,
+      dibuatOleh: {
+        nama: rec.mekanikNama
+      }
     });
   };
   const printBast = b => {
@@ -5853,7 +6227,9 @@ function MekanikReport({
     }
   }, viewDar.pekerjaan))), /*#__PURE__*/React.createElement(Table, {
     headers: ["Tanggal", "Jam Mulai", "Jam Selesai", "Catatan Harian"],
-    rows: (viewDar.catatanHarian || []).map(c => [c.tanggal, c.jamMulai || viewDar.jamMulai || "-", c.jamSelesai || viewDar.jamSelesai || "-", c.catatan]),
+    rows: (viewDar.catatanHarian || []).map(c => [c.tanggal, c.jamMulai || viewDar.jamMulai || "-", c.jamSelesai || viewDar.jamSelesai || "-", /*#__PURE__*/React.createElement("span", {
+      style: catatanStyle
+    }, c.catatan)]),
     emptyMsg: "Tidak ada catatan harian"
   }), viewDar.namaPenerima && /*#__PURE__*/React.createElement("div", {
     style: {
@@ -5928,7 +6304,14 @@ function MekanikReport({
   }, viewRec.customerNama)), /*#__PURE__*/React.createElement(Table, {
     headers: ["Part Number", "Part Name", "Qty", "Alasan"],
     rows: viewRec.items.map(it => [it.partNumber, it.partName, fmtNum(it.qty), it.alasan])
-  }), viewRec.status === "Menunggu Approval Septi" && /*#__PURE__*/React.createElement("div", {
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(PrintBtn, {
+    onClick: () => printPartRec(viewRec)
+  })), viewRec.status === "Menunggu Approval Septi" && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
@@ -6142,12 +6525,14 @@ function MekanikReport({
       }
     }, /*#__PURE__*/React.createElement(Badge, {
       color: recStatusColor[recDoc.status]
-    }, recDoc.status), (isSepti || isOwnerLike) && recDoc.status === "Menunggu Approval Septi" && /*#__PURE__*/React.createElement("div", {
+    }, recDoc.status), /*#__PURE__*/React.createElement("div", {
       style: {
         display: "flex",
         gap: 6
       }
-    }, /*#__PURE__*/React.createElement(Btn, {
+    }, /*#__PURE__*/React.createElement(PrintBtn, {
+      onClick: () => printPartRec(recDoc)
+    }), (isSepti || isOwnerLike) && recDoc.status === "Menunggu Approval Septi" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "success",
       onClick: () => approveRec(recDoc)
@@ -6155,7 +6540,7 @@ function MekanikReport({
       size: "sm",
       variant: "danger",
       onClick: () => rejectRec(recDoc)
-    }, "✗ Tolak"))), /*#__PURE__*/React.createElement(Table, {
+    }, "✗ Tolak")))), /*#__PURE__*/React.createElement(Table, {
       headers: ["Part Number", "Part Name", "Qty", "Alasan"],
       rows: recDoc.items.map(it => [it.partNumber, it.partName, fmtNum(it.qty), it.alasan])
     }));
@@ -6173,7 +6558,9 @@ function MekanikReport({
       color: kondisiUnitColor[s.kondisiUnit]
     }, s.kondisiUnit), /*#__PURE__*/React.createElement(Badge, {
       color: keparahanColor[s.keparahan]
-    }, s.keparahan), s.catatanKondisi || "-", s.rekomendasiLanjutan || "-"]),
+    }, s.keparahan), /*#__PURE__*/React.createElement("span", {
+      style: catatanStyle
+    }, s.catatanKondisi || "-"), s.rekomendasiLanjutan || "-"]),
     emptyMsg: "Belum ada status report"
   })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
     style: {
@@ -6188,7 +6575,11 @@ function MekanikReport({
         display: "flex",
         gap: 6
       }
-    }, /*#__PURE__*/React.createElement(PrintBtn, {
+    }, (isOwnerLike || isSepti || isMekanik && session.username === detailVisit.mekanikUsername) && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => openForm(detailVisit, "bast", b)
+    }, "✏️"), /*#__PURE__*/React.createElement(PrintBtn, {
       onClick: () => printBast(b)
     }), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
@@ -6203,8 +6594,10 @@ function MekanikReport({
       fontSize: 13
     }
   }, "🔍 INSPECTION REPORT"), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Tanggal", "Komponen Diperiksa", "Mekanik", ""],
-    rows: visitInspections(detailVisit.id).map(r => [r.tanggal, r.items.filter(it => it.kondisi).length + " komponen", r.mekanikNama, /*#__PURE__*/React.createElement("div", {
+    headers: ["Tanggal", "Tipe Crane", "Komponen Diperiksa", "Mekanik", ""],
+    rows: visitInspections(detailVisit.id).map(r => [r.tanggal, /*#__PURE__*/React.createElement(Badge, {
+      color: (r.tipeCrane || "Static Crane") === "Truck Crane" ? theme.purple : theme.cyan
+    }, r.tipeCrane || "Static Crane"), r.items.filter(it => it.kondisi).length + " komponen", r.mekanikNama, /*#__PURE__*/React.createElement("div", {
       style: {
         display: "flex",
         gap: 6
@@ -6374,7 +6767,9 @@ function MekanikReport({
     onClick: addCatatanHarian
   }, "+ Add")), darForm.catatanHarian.length > 0 && /*#__PURE__*/React.createElement(Table, {
     headers: ["Tanggal", "Jam Mulai", "Jam Selesai", "Catatan", ""],
-    rows: darForm.catatanHarian.map((c, i) => [c.tanggal, c.jamMulai || "-", c.jamSelesai || "-", c.catatan, /*#__PURE__*/React.createElement(Btn, {
+    rows: darForm.catatanHarian.map((c, i) => [c.tanggal, c.jamMulai || "-", c.jamSelesai || "-", /*#__PURE__*/React.createElement("span", {
+      style: catatanStyle
+    }, c.catatan), /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "danger",
       onClick: () => removeCatatanHarian(i)
@@ -6586,8 +6981,11 @@ function MekanikReport({
     onClick: saveStatus
   }, "Simpan Status Report")))), /*#__PURE__*/React.createElement(Modal, {
     open: formType === "bast",
-    title: "Buat Berita Acara Penyelesaian Pekerjaan (BAPP)",
-    onClose: () => setFormType(null),
+    title: editingBastId ? "Edit Berita Acara Penyelesaian Pekerjaan (BAPP)" : "Buat Berita Acara Penyelesaian Pekerjaan (BAPP)",
+    onClose: () => {
+      setFormType(null);
+      setEditingBastId(null);
+    },
     width: 640
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -6869,12 +7267,15 @@ function MekanikReport({
     }
   }, /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
-    onClick: () => setFormType(null)
+    onClick: () => {
+      setFormType(null);
+      setEditingBastId(null);
+    }
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     onClick: saveBast
-  }, "Simpan BAPP")))), /*#__PURE__*/React.createElement(Modal, {
+  }, editingBastId ? "Simpan Perubahan" : "Simpan BAPP")))), /*#__PURE__*/React.createElement(Modal, {
     open: formType === "inspection",
-    title: editingInspectionId ? "Edit Inspection Report — Laporan Inspeksi" : "Inspection Report — Laporan Inspeksi",
+    title: (editingInspectionId ? "Edit Inspection Report" : "Inspection Report") + ` — ${inspectionForm.tipeCrane}`,
     onClose: () => {
       setFormType(null);
       setEditingInspectionId(null);
@@ -6886,13 +7287,24 @@ function MekanikReport({
       flexDirection: "column",
       gap: 18
     }
-  }, /*#__PURE__*/React.createElement("p", {
+  }, /*#__PURE__*/React.createElement(Select, {
+    label: "Tipe Crane",
+    value: inspectionForm.tipeCrane,
+    onChange: setInspectionTipeCrane,
+    options: [{
+      value: "Static Crane",
+      label: "Static Crane"
+    }, {
+      value: "Truck Crane",
+      label: "Truck Crane"
+    }]
+  }), /*#__PURE__*/React.createElement("p", {
     style: {
       margin: 0,
       fontSize: 12,
       color: theme.muted
     }
-  }, "Pilih kondisi untuk tiap komponen yang diperiksa. Komponen yang tidak diperiksa boleh dibiarkan kosong."), INSPECTION_CHECKLIST.map(cat => /*#__PURE__*/React.createElement("div", {
+  }, "Pilih kondisi untuk tiap komponen yang diperiksa. Komponen yang tidak diperiksa boleh dibiarkan kosong."), getInspectionChecklist(inspectionForm.tipeCrane).map(cat => /*#__PURE__*/React.createElement("div", {
     key: cat.category
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -6961,7 +7373,7 @@ function MekanikReport({
       gridTemplateColumns: "1fr 1fr",
       gap: 12
     }
-  }, INSPECTION_HYDRAULIC_FIELDS.map(([key, label]) => /*#__PURE__*/React.createElement(Input, {
+  }, getInspectionHydraulicFields(inspectionForm.tipeCrane).map(([key, label]) => /*#__PURE__*/React.createElement(Input, {
     key: key,
     label: `${label} (BAR)`,
     value: inspectionForm.hidraulik[key],
@@ -7149,7 +7561,7 @@ function PartRequestModule({
   } = store;
   const isMekanik = session.role === "mekanik";
   const isAsil = session.role === "service_manager";
-  const isApprover = session.role === "owner" || session.role === "gm";
+  const isApprover = session.role === "owner" || session.role === "gm" || session.role === "finance_director"; // HO1/HO2/HO3 super-user parity
   const [modal, setModal] = useState(false);
   const [form, setForm] = useState({
     partNumber: "",
@@ -7763,7 +8175,9 @@ function QuotationUnit({
     parts
   } = store;
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
-  const isApprover = session.role === "owner" || session.role === "gm";
+  // HO1/HO2/HO3 (owner/gm/finance_director) are all "super user" — all three must see the approval
+  // box, pending revisions, and internal Sales Discount data, not just owner/gm.
+  const isApprover = isOwnerLike;
   const [modal, setModal] = useState(false);
   const [revisionOf, setRevisionOf] = useState(null); // original quotation being revised, if any
   const [editingQ, setEditingQ] = useState(null); // quotation being edited in-place (same nomor, no new revision)
@@ -7774,6 +8188,8 @@ function QuotationUnit({
     items: [],
     catatan: "",
     pajak: 11,
+    clientDiskonMode: "persen",
+    clientDiskonValue: "0",
     termOfPayment: []
   });
   const [itemForm, setItemForm] = useState({
@@ -7821,6 +8237,8 @@ function QuotationUnit({
       items: [],
       catatan: "",
       pajak: 11,
+      clientDiskonMode: "persen",
+      clientDiskonValue: "0",
       termOfPayment: []
     });
     setSalesDiscount({
@@ -7846,6 +8264,8 @@ function QuotationUnit({
       })),
       catatan: q.catatan || "",
       pajak: q.pajakPct ?? 11,
+      clientDiskonMode: q.clientDiskonMode || "persen",
+      clientDiskonValue: q.clientDiskonPersen != null ? String(q.clientDiskonPersen) : q.clientDiskon ? String(q.clientDiskon) : "0",
       termOfPayment: (q.termOfPayment || []).map(t => ({
         ...t
       }))
@@ -7874,6 +8294,8 @@ function QuotationUnit({
       })),
       catatan: q.catatan || "",
       pajak: q.pajakPct ?? 11,
+      clientDiskonMode: q.clientDiskonMode || "persen",
+      clientDiskonValue: q.clientDiskonPersen != null ? String(q.clientDiskonPersen) : q.clientDiskon ? String(q.clientDiskon) : "0",
       termOfPayment: (q.termOfPayment || []).map(t => ({
         ...t
       }))
@@ -7959,17 +8381,23 @@ function QuotationUnit({
   }));
   const subtotal = form.items.reduce((s, i) => s + i.subtotal, 0);
   // Sales Discount is an internal-only kick-back record (GM/finance visibility only).
-  // It must NEVER reduce the quotation value shown/printed to the client.
+  // It must NEVER reduce the quotation value shown/printed to the client, and is completely
+  // separate/unrelated to the client-visible Discount below.
   const diskon = revisionOf && salesDiscount.aktif ? parseFloat(salesDiscount.nominal) || 0 : 0;
+  // Client-visible Discount — reduces the quotation total shown to the client. Calculated only
+  // from the total price (not per line-item), applied BEFORE tax: Subtotal - Discount, then + PPN.
+  const clientDiskonValueNum = parseFloat(form.clientDiskonValue) || 0;
+  const clientDiskon = form.clientDiskonMode === "persen" ? subtotal * clientDiskonValueNum / 100 : clientDiskonValueNum;
+  const subtotalAfterClientDiskon = Math.max(0, subtotal - clientDiskon);
   const pajak = parseFloat(form.pajak) || 0;
-  const total = subtotal + subtotal * pajak / 100;
+  const total = subtotalAfterClientDiskon + subtotalAfterClientDiskon * pajak / 100;
   const topPercentSum = (form.termOfPayment || []).reduce((s, t) => s + (parseFloat(t.percent) || 0), 0);
   const save = (asDraft = false) => {
     if (!form.customerId) return alert("Pilih client");
     if (form.items.length === 0) return alert("Tambahkan minimal 1 unit/part");
     const cust = customers.find(c => c.id === form.customerId);
-    if (!isOwnerLike && cust && cust.salesManager !== session.nama) {
-      return alert("Anda hanya dapat membuat quotation untuk client yang menjadi tanggung jawab Anda.");
+    if (!isOwnerLike && cust && !customerAccessibleBy(cust, session)) {
+      return alert("Anda belum memiliki akses ke client ini. Ajukan Request Akses di Database Client terlebih dahulu.");
     }
     if (editingQ) {
       // In-place edit: same nomor, no new revision row. A Draft stays Draft unless explicitly
@@ -7986,8 +8414,11 @@ function QuotationUnit({
           customerNama: cust?.nama,
           subtotal,
           diskon,
+          clientDiskon,
+          clientDiskonMode: form.clientDiskonMode,
+          clientDiskonPersen: form.clientDiskonMode === "persen" ? clientDiskonValueNum : null,
           pajakPct: pajak,
-          pajak: subtotal * pajak / 100,
+          pajak: subtotalAfterClientDiskon * pajak / 100,
           total,
           termOfPayment: form.termOfPayment || [],
           salesDiscount: salesDiscount.aktif ? salesDiscount : editingQ.salesDiscount || null,
@@ -8014,8 +8445,11 @@ function QuotationUnit({
       customerNama: cust?.nama,
       subtotal,
       diskon,
+      clientDiskon,
+      clientDiskonMode: form.clientDiskonMode,
+      clientDiskonPersen: form.clientDiskonMode === "persen" ? clientDiskonValueNum : null,
       pajakPct: pajak,
-      pajak: subtotal * pajak / 100,
+      pajak: subtotalAfterClientDiskon * pajak / 100,
       total,
       termOfPayment: form.termOfPayment || [],
       salesManagerUsername: session.username,
@@ -8069,7 +8503,9 @@ function QuotationUnit({
       ...q,
       status: "Disetujui GM",
       approvedByNama: session.nama,
-      approvedByUsername: session.username
+      approvedByUsername: session.username,
+      approvedDate: today(),
+      followUpExtendedAt: null
     };
     setQuotationsUnit(arr);
     logAudit(store, session, {
@@ -8096,6 +8532,42 @@ function QuotationUnit({
       detail: reason
     });
   };
+  // 14-day stale follow-up: a quotation Disetujui GM but not yet turned into an SO gets flagged
+  // 14 days after approval (or after the last Extend). Sales manager then chooses EXTEND (resets
+  // the 14-day timer) or CLOSED (requires a reason; distinct from becoming an SO).
+  const needsFollowUp = q => q.status === "Disetujui GM" && daysSince(q.followUpExtendedAt || q.approvedDate || q.tanggal) >= 14;
+  const extendFollowUp = q => {
+    const arr = [...quotationsUnit];
+    arr[quotationsUnit.indexOf(q)] = {
+      ...q,
+      followUpExtendedAt: today()
+    };
+    setQuotationsUnit(arr);
+    logAudit(store, session, {
+      module: "Unit Quotation",
+      docNomor: q.nomor,
+      action: "Extend Follow-up",
+      detail: `${q.customerNama} — follow-up diperpanjang 14 hari`
+    });
+  };
+  const closeQuotation = q => {
+    const reason = prompt("Alasan quotation ditutup (Closed):");
+    if (!reason) return;
+    const arr = [...quotationsUnit];
+    arr[quotationsUnit.indexOf(q)] = {
+      ...q,
+      status: "Closed",
+      closeReason: reason,
+      closeDate: today()
+    };
+    setQuotationsUnit(arr);
+    logAudit(store, session, {
+      module: "Unit Quotation",
+      docNomor: q.nomor,
+      action: "Closed",
+      detail: reason
+    });
+  };
   const deleteQuotation = q => {
     if (!isOwnerLike) return alert("Hanya Owner/GM/Finance Director yang dapat menghapus quotation.");
     if (!confirm(`Hapus quotation ${q.nomor}?`)) return;
@@ -8112,8 +8584,59 @@ function QuotationUnit({
     "Menunggu Approval GM": theme.yellow,
     "Disetujui GM": theme.green,
     "Ditolak GM": theme.red,
-    "Sudah jadi SO": theme.cyan
+    "Sudah jadi SO": theme.cyan,
+    Closed: theme.muted
   };
+  const buildRow = q => [/*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.accentLight,
+      fontWeight: 600,
+      cursor: "pointer"
+    },
+    onClick: () => setDetail(q)
+  }, q.nomor), q.tanggal, q.customerNama, q.salesManagerNama, fmt(q.total), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(Badge, {
+    color: statusColor[q.status]
+  }, q.status), needsFollowUp(q) && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 4
+    }
+  }, /*#__PURE__*/React.createElement(Badge, {
+    color: theme.yellow
+  }, "⚠ Follow-up 14 hari"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      flexWrap: "wrap"
+    }
+  }, (q.status === "Menunggu Approval GM" || q.status === "Draft") && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => openEdit(q)
+  }, "✎ Edit"), q.status === "Draft" && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "success",
+    onClick: () => submitDraft(q)
+  }, "📤 Ajukan ke GM"), q.status !== "Sudah jadi SO" && q.status !== "Draft" && q.status !== "Closed" && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => openRevision(q)
+  }, "↻ Revisi"), q.status === "Disetujui GM" && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => extendFollowUp(q)
+  }, "🔄 Extend"), q.status === "Disetujui GM" && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "warning",
+    onClick: () => closeQuotation(q)
+  }, "🔒 Closed"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "danger",
+    onClick: () => deleteQuotation(q)
+  }, "Hapus"))];
+  const onGoingQ = myQuotations.filter(q => !["Sudah jadi SO", "Closed"].includes(q.status));
+  const successQ = myQuotations.filter(q => q.status === "Sudah jadi SO");
+  const closedQ = myQuotations.filter(q => q.status === "Closed");
+  const staleQ = onGoingQ.filter(needsFollowUp);
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -8159,48 +8682,12 @@ function QuotationUnit({
     })), "Unit_Quotation.xlsx", "Unit Quotation")
   }), /*#__PURE__*/React.createElement(Btn, {
     onClick: openCreate
-  }, "+ Buat Quotation Unit"))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
-    placeholder: "Cari no. quotation / client / sales manager...",
-    value: quSearch,
-    onChange: setQuSearch,
+  }, "+ Buat Quotation Unit"))), isApprover && /*#__PURE__*/React.createElement(Card, {
     style: {
-      marginBottom: 12
+      background: theme.yellow + "11",
+      border: `1px solid ${theme.yellow}44`
     }
-  }), /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total", "Status", "Aksi"],
-    rows: myQuotations.map(q => [/*#__PURE__*/React.createElement("span", {
-      style: {
-        color: theme.accentLight,
-        fontWeight: 600,
-        cursor: "pointer"
-      },
-      onClick: () => setDetail(q)
-    }, q.nomor), q.tanggal, q.customerNama, q.salesManagerNama, fmt(q.total), /*#__PURE__*/React.createElement(Badge, {
-      color: statusColor[q.status]
-    }, q.status), /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: "flex",
-        gap: 6
-      }
-    }, (q.status === "Menunggu Approval GM" || q.status === "Draft") && /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "ghost",
-      onClick: () => openEdit(q)
-    }, "✎ Edit"), q.status === "Draft" && /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "success",
-      onClick: () => submitDraft(q)
-    }, "📤 Ajukan ke GM"), q.status !== "Sudah jadi SO" && q.status !== "Draft" && /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "ghost",
-      onClick: () => openRevision(q)
-    }, "↻ Revisi"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "danger",
-      onClick: () => deleteQuotation(q)
-    }, "Hapus"))]),
-    emptyMsg: "Belum ada quotation unit"
-  })), isApprover && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+  }, /*#__PURE__*/React.createElement("h3", {
     style: {
       margin: "0 0 12px",
       color: theme.text,
@@ -8257,7 +8744,81 @@ function QuotationUnit({
     size: "sm",
     variant: "danger",
     onClick: () => gmReject(q)
-  }, "✗ Tolak"))))), /*#__PURE__*/React.createElement(Modal, {
+  }, "✗ Tolak"))))), staleQ.length > 0 && /*#__PURE__*/React.createElement(Card, {
+    style: {
+      background: theme.red + "11",
+      border: `1px solid ${theme.red}44`
+    }
+  }, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.red,
+      fontSize: 15
+    }
+  }, "⚠ Follow-up Diperlukan — Belum ada kabar 14 hari sejak disetujui"), staleQ.map(q => /*#__PURE__*/React.createElement("div", {
+    key: q.nomor,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      padding: "10px 0",
+      borderBottom: `1px solid ${theme.border}33`
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, q.nomor), " — ", q.customerNama, " — ", fmt(q.total)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => extendFollowUp(q)
+  }, "🔄 Extend (14 hari lagi)"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "warning",
+    onClick: () => closeQuotation(q)
+  }, "🔒 Closed"))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari no. quotation / client / sales manager...",
+    value: quSearch,
+    onChange: setQuSearch,
+    style: {
+      marginBottom: 12
+    }
+  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.text,
+      fontSize: 15
+    }
+  }, "ON GOING"), /*#__PURE__*/React.createElement(Table, {
+    headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total", "Status", "Aksi"],
+    rows: onGoingQ.map(buildRow),
+    emptyMsg: "Tidak ada quotation on going"
+  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.cyan,
+      fontSize: 15
+    }
+  }, "QUOTATION SUCCESS (Sudah jadi SO)"), /*#__PURE__*/React.createElement(Table, {
+    headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total", "Status", "Aksi"],
+    rows: successQ.map(buildRow),
+    emptyMsg: "Belum ada quotation yang menjadi SO"
+  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.muted,
+      fontSize: 15
+    }
+  }, "QUOTATION CLOSED"), /*#__PURE__*/React.createElement(Table, {
+    headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total", "Status", "Aksi"],
+    rows: closedQ.map(buildRow),
+    emptyMsg: "Belum ada quotation yang closed"
+  })), /*#__PURE__*/React.createElement(Modal, {
     open: !!detail,
     title: `Detail ${detail?.nomor}`,
     onClose: () => setDetail(null),
@@ -8312,7 +8873,12 @@ function QuotationUnit({
       color: theme.red,
       fontSize: 13
     }
-  }, "Alasan ditolak: ", detail.rejectReason), isOwnerLike && detail.salesDiscount?.aktif && /*#__PURE__*/React.createElement(Card, {
+  }, "Alasan ditolak: ", detail.rejectReason), detail.status === "Closed" && detail.closeReason && /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "Alasan Closed (", detail.closeDate, "): ", detail.closeReason), isOwnerLike && detail.salesDiscount?.aktif && /*#__PURE__*/React.createElement(Card, {
     style: {
       background: theme.yellow + "11",
       border: `1px solid ${theme.yellow}44`
@@ -8348,10 +8914,14 @@ function QuotationUnit({
       itemHeaders: ["Kode", "Nama Item", "Qty", "Harga", "Subtotal"],
       items: detail.items.map(it => [it.unitCode, it.unitName, fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)]),
       subtotal: detail.subtotal,
-      // Sales Discount is internal-only — never shown or applied on the client-facing print.
-      diskon: 0,
+      // Sales Discount (internal kickback, `detail.diskon`/`detail.salesDiscount`) is internal-only
+      // and never shown or applied on the client-facing print — only the separate client-visible
+      // Discount (`detail.clientDiskon`) appears here.
+      diskon: detail.clientDiskon || 0,
+      diskonLabel: detail.clientDiskonPersen ? `Discount (${detail.clientDiskonPersen}%)` : "Discount",
       pajak: detail.pajak,
-      total: detail.subtotal + detail.pajak,
+      pajakLabel: "PPN",
+      total: detail.total,
       paymentTerms: detail.termOfPayment,
       catatan: detail.catatan,
       dibuatOleh: {
@@ -8398,7 +8968,7 @@ function QuotationUnit({
       ...form,
       customerId: v
     }),
-    options: (isOwnerLike ? customers : customers.filter(c => c.salesManager === session.nama)).map(c => ({
+    options: (isOwnerLike ? customers : customers.filter(c => customerAccessibleBy(c, session))).map(c => ({
       value: c.id,
       label: c.nama
     })),
@@ -8524,6 +9094,77 @@ function QuotationUnit({
       maxWidth: 200
     }
   }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: `1px solid ${theme.border}`,
+      borderRadius: 10,
+      padding: 14,
+      display: "flex",
+      flexDirection: "column",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      color: theme.muted,
+      fontSize: 13,
+      fontWeight: 600
+    }
+  }, "DISCOUNT (dari Total Price, terlihat oleh client)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      fontSize: 13,
+      color: theme.text,
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "radio",
+    checked: form.clientDiskonMode === "persen",
+    onChange: () => setForm({
+      ...form,
+      clientDiskonMode: "persen"
+    })
+  }), " Discount %"), /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      fontSize: 13,
+      color: theme.text,
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "radio",
+    checked: form.clientDiskonMode === "nominal",
+    onChange: () => setForm({
+      ...form,
+      clientDiskonMode: "nominal"
+    })
+  }), " Discount Nominal (Rp)")), /*#__PURE__*/React.createElement(Input, {
+    label: form.clientDiskonMode === "persen" ? "Discount (%)" : "Discount (Rp)",
+    value: form.clientDiskonValue,
+    onChange: v => setForm({
+      ...form,
+      clientDiskonValue: v
+    }),
+    type: "number",
+    min: "0",
+    style: {
+      maxWidth: 200
+    }
+  }), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.accentLight
+    }
+  }, "Subtotal ", fmt(subtotal), " − Discount ", fmt(clientDiskon), " + PPN ", fmt(subtotalAfterClientDiskon * pajak / 100), " = Total ", fmt(total))), /*#__PURE__*/React.createElement("div", {
     style: {
       border: `1px solid ${theme.border}`,
       borderRadius: 10,
@@ -8763,7 +9404,9 @@ function QuotationPS({
   const partRecs = normalizePartRecs(partRecsRaw);
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   const isAsil = session.role === "service_manager";
-  const isApprover = session.role === "owner" || session.role === "gm";
+  // HO1/HO2/HO3 (owner/gm/finance_director) are all "super user" — all three must see the approval
+  // box, pending revisions, and internal Sales Discount data, not just owner/gm.
+  const isApprover = isOwnerLike;
   const [qpsSearch, setQpsSearch] = useState("");
   const quotationsPSFiltered = qpsSearch.trim() ? quotationsPS.filter(q => [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(qpsSearch.trim().toLowerCase()))) : quotationsPS;
   const [modal, setModal] = useState(false);
@@ -8776,6 +9419,8 @@ function QuotationPS({
     items: [],
     catatan: "",
     pajak: 11,
+    clientDiskonMode: "persen",
+    clientDiskonValue: "0",
     fromRecIds: [],
     termOfPayment: []
   });
@@ -8825,6 +9470,8 @@ function QuotationPS({
       items: [],
       catatan: "",
       pajak: 11,
+      clientDiskonMode: "persen",
+      clientDiskonValue: "0",
       fromRecIds: [],
       termOfPayment: []
     });
@@ -8851,6 +9498,8 @@ function QuotationPS({
       })),
       catatan: q.catatan || "",
       pajak: q.pajakPct ?? 11,
+      clientDiskonMode: q.clientDiskonMode || "persen",
+      clientDiskonValue: q.clientDiskonPersen != null ? String(q.clientDiskonPersen) : q.clientDiskon ? String(q.clientDiskon) : "0",
       fromRecIds: [],
       termOfPayment: (q.termOfPayment || []).map(t => ({
         ...t
@@ -8880,6 +9529,8 @@ function QuotationPS({
       })),
       catatan: q.catatan || "",
       pajak: q.pajakPct ?? 11,
+      clientDiskonMode: q.clientDiskonMode || "persen",
+      clientDiskonValue: q.clientDiskonPersen != null ? String(q.clientDiskonPersen) : q.clientDiskon ? String(q.clientDiskon) : "0",
       fromRecIds: [],
       termOfPayment: (q.termOfPayment || []).map(t => ({
         ...t
@@ -8976,9 +9627,17 @@ function QuotationPS({
     setModal(true);
   };
   const subtotal = form.items.reduce((s, i) => s + i.subtotal, 0);
+  // Sales Discount is an internal-only kick-back record (GM/finance visibility only). It must
+  // NEVER reduce the quotation value shown/printed to the client, and is completely separate/
+  // unrelated to the client-visible Discount below.
   const diskon = revisionOf && salesDiscount.aktif ? parseFloat(salesDiscount.nominal) || 0 : 0;
+  // Client-visible Discount — reduces the quotation total shown to the client. Calculated only
+  // from the total price (not per line-item), applied BEFORE tax: Subtotal - Discount, then + PPN.
+  const clientDiskonValueNum = parseFloat(form.clientDiskonValue) || 0;
+  const clientDiskon = form.clientDiskonMode === "persen" ? subtotal * clientDiskonValueNum / 100 : clientDiskonValueNum;
+  const subtotalAfterClientDiskon = Math.max(0, subtotal - clientDiskon);
   const pajak = parseFloat(form.pajak) || 0;
-  const total = subtotal - diskon + subtotal * pajak / 100;
+  const total = subtotalAfterClientDiskon + subtotalAfterClientDiskon * pajak / 100;
   const topPercentSum = (form.termOfPayment || []).reduce((s, t) => s + (parseFloat(t.percent) || 0), 0);
   const save = (asDraft = false) => {
     if (!form.customerId) return alert("Pilih client");
@@ -8999,8 +9658,11 @@ function QuotationPS({
           customerNama: cust?.nama,
           subtotal,
           diskon,
+          clientDiskon,
+          clientDiskonMode: form.clientDiskonMode,
+          clientDiskonPersen: form.clientDiskonMode === "persen" ? clientDiskonValueNum : null,
           pajakPct: pajak,
-          pajak: subtotal * pajak / 100,
+          pajak: subtotalAfterClientDiskon * pajak / 100,
           total,
           salesDiscount: salesDiscount.aktif ? salesDiscount : editingQ.salesDiscount || null,
           status: newStatus
@@ -9026,8 +9688,11 @@ function QuotationPS({
       customerNama: cust?.nama,
       subtotal,
       diskon,
+      clientDiskon,
+      clientDiskonMode: form.clientDiskonMode,
+      clientDiskonPersen: form.clientDiskonMode === "persen" ? clientDiskonValueNum : null,
       pajakPct: pajak,
-      pajak: subtotal * pajak / 100,
+      pajak: subtotalAfterClientDiskon * pajak / 100,
       total,
       createdByUsername: session.username,
       createdByNama: session.nama,
@@ -9102,7 +9767,9 @@ function QuotationPS({
       ...q,
       status: "Disetujui GM",
       approvedByNama: session.nama,
-      approvedByUsername: session.username
+      approvedByUsername: session.username,
+      approvedDate: today(),
+      followUpExtendedAt: null
     };
     setQuotationsPS(arr);
     logAudit(store, session, {
@@ -9140,13 +9807,101 @@ function QuotationPS({
       detail: `${q.customerNama} — ${fmt(q.total)}`
     });
   };
+  const needsFollowUp = q => q.status === "Disetujui GM" && daysSince(q.followUpExtendedAt || q.approvedDate || q.tanggal) >= 14;
+  const extendFollowUp = q => {
+    const arr = [...quotationsPS];
+    arr[quotationsPS.indexOf(q)] = {
+      ...q,
+      followUpExtendedAt: today()
+    };
+    setQuotationsPS(arr);
+    logAudit(store, session, {
+      module: "Parts & Service Quotation",
+      docNomor: q.nomor,
+      action: "Extend Follow-up",
+      detail: `${q.customerNama} — follow-up diperpanjang 14 hari`
+    });
+  };
+  const closeQuotationPS = q => {
+    const reason = prompt("Alasan quotation ditutup (Closed):");
+    if (!reason) return;
+    const arr = [...quotationsPS];
+    arr[quotationsPS.indexOf(q)] = {
+      ...q,
+      status: "Closed",
+      closeReason: reason,
+      closeDate: today()
+    };
+    setQuotationsPS(arr);
+    logAudit(store, session, {
+      module: "Parts & Service Quotation",
+      docNomor: q.nomor,
+      action: "Closed",
+      detail: reason
+    });
+  };
   const statusColor = {
     Draft: theme.muted,
     "Menunggu Approval GM": theme.yellow,
     "Disetujui GM": theme.green,
     "Ditolak GM": theme.red,
-    "Sudah jadi SO": theme.cyan
+    "Sudah jadi SO": theme.cyan,
+    Closed: theme.muted
   };
+  const buildRowPS = q => [/*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.accentLight,
+      fontWeight: 600,
+      cursor: "pointer"
+    },
+    onClick: () => setDetail(q)
+  }, q.nomor), q.tanggal, q.customerNama, fmt(q.total), q.fromRecIds?.length ? /*#__PURE__*/React.createElement(Badge, {
+    color: theme.purple
+  }, "Dari Mekanik") : /*#__PURE__*/React.createElement(Badge, {
+    color: theme.muted
+  }, "Manual"), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(Badge, {
+    color: statusColor[q.status]
+  }, q.status), needsFollowUp(q) && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 4
+    }
+  }, /*#__PURE__*/React.createElement(Badge, {
+    color: theme.yellow
+  }, "⚠ Follow-up 14 hari"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      flexWrap: "wrap"
+    }
+  }, (q.status === "Menunggu Approval GM" || q.status === "Draft") && (isAsil || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => openEdit(q)
+  }, "✎ Edit"), q.status === "Draft" && (isAsil || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "success",
+    onClick: () => submitDraft(q)
+  }, "📤 Ajukan ke GM"), q.status !== "Sudah jadi SO" && q.status !== "Draft" && q.status !== "Closed" && (isAsil || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => openRevision(q)
+  }, "↻ Revisi"), q.status === "Disetujui GM" && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => extendFollowUp(q)
+  }, "🔄 Extend"), q.status === "Disetujui GM" && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "warning",
+    onClick: () => closeQuotationPS(q)
+  }, "🔒 Closed"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "danger",
+    onClick: () => deleteQuotationPS(q)
+  }, "Hapus"))];
+  const qpsOnGoing = quotationsPSFiltered.filter(q => !["Sudah jadi SO", "Closed"].includes(q.status));
+  const qpsSuccess = quotationsPSFiltered.filter(q => q.status === "Sudah jadi SO");
+  const qpsClosed = quotationsPSFiltered.filter(q => q.status === "Closed");
+  const qpsStaleQ = qpsOnGoing.filter(needsFollowUp);
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -9189,52 +9944,12 @@ function QuotationPS({
     onClick: () => setPullModal(true)
   }, "📥 Tarik dari Part Recommendation (", pendingRecs.length, ")"), /*#__PURE__*/React.createElement(Btn, {
     onClick: openCreate
-  }, "+ Buat Quotation")))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
-    placeholder: "Cari no. quotation / client...",
-    value: qpsSearch,
-    onChange: setQpsSearch,
+  }, "+ Buat Quotation")))), isApprover && /*#__PURE__*/React.createElement(Card, {
     style: {
-      marginBottom: 12
+      background: theme.yellow + "11",
+      border: `1px solid ${theme.yellow}44`
     }
-  }), /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. Quotation", "Tanggal", "Client", "Total", "Sumber", "Status", "Aksi"],
-    rows: quotationsPSFiltered.map(q => [/*#__PURE__*/React.createElement("span", {
-      style: {
-        color: theme.accentLight,
-        fontWeight: 600,
-        cursor: "pointer"
-      },
-      onClick: () => setDetail(q)
-    }, q.nomor), q.tanggal, q.customerNama, fmt(q.total), q.fromRecIds?.length ? /*#__PURE__*/React.createElement(Badge, {
-      color: theme.purple
-    }, "Dari Mekanik") : /*#__PURE__*/React.createElement(Badge, {
-      color: theme.muted
-    }, "Manual"), /*#__PURE__*/React.createElement(Badge, {
-      color: statusColor[q.status]
-    }, q.status), /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: "flex",
-        gap: 6
-      }
-    }, (q.status === "Menunggu Approval GM" || q.status === "Draft") && (isAsil || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "ghost",
-      onClick: () => openEdit(q)
-    }, "✎ Edit"), q.status === "Draft" && (isAsil || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "success",
-      onClick: () => submitDraft(q)
-    }, "📤 Ajukan ke GM"), q.status !== "Sudah jadi SO" && q.status !== "Draft" && (isAsil || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "ghost",
-      onClick: () => openRevision(q)
-    }, "↻ Revisi"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "danger",
-      onClick: () => deleteQuotationPS(q)
-    }, "Hapus"))]),
-    emptyMsg: "Belum ada quotation parts/service"
-  })), isApprover && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+  }, /*#__PURE__*/React.createElement("h3", {
     style: {
       margin: "0 0 12px",
       color: theme.text,
@@ -9291,7 +10006,81 @@ function QuotationPS({
     size: "sm",
     variant: "danger",
     onClick: () => gmReject(q)
-  }, "✗ Tolak"))))), /*#__PURE__*/React.createElement(Modal, {
+  }, "✗ Tolak"))))), qpsStaleQ.length > 0 && /*#__PURE__*/React.createElement(Card, {
+    style: {
+      background: theme.red + "11",
+      border: `1px solid ${theme.red}44`
+    }
+  }, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.red,
+      fontSize: 15
+    }
+  }, "⚠ Follow-up Diperlukan — Belum ada kabar 14 hari sejak disetujui"), qpsStaleQ.map(q => /*#__PURE__*/React.createElement("div", {
+    key: q.nomor,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      padding: "10px 0",
+      borderBottom: `1px solid ${theme.border}33`
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, q.nomor), " — ", q.customerNama, " — ", fmt(q.total)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => extendFollowUp(q)
+  }, "🔄 Extend (14 hari lagi)"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "warning",
+    onClick: () => closeQuotationPS(q)
+  }, "🔒 Closed"))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari no. quotation / client...",
+    value: qpsSearch,
+    onChange: setQpsSearch,
+    style: {
+      marginBottom: 12
+    }
+  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.text,
+      fontSize: 15
+    }
+  }, "ON GOING"), /*#__PURE__*/React.createElement(Table, {
+    headers: ["No. Quotation", "Tanggal", "Client", "Total", "Sumber", "Status", "Aksi"],
+    rows: qpsOnGoing.map(buildRowPS),
+    emptyMsg: "Tidak ada quotation on going"
+  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.cyan,
+      fontSize: 15
+    }
+  }, "QUOTATION SUCCESS (Sudah jadi SO)"), /*#__PURE__*/React.createElement(Table, {
+    headers: ["No. Quotation", "Tanggal", "Client", "Total", "Sumber", "Status", "Aksi"],
+    rows: qpsSuccess.map(buildRowPS),
+    emptyMsg: "Belum ada quotation yang menjadi SO"
+  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.muted,
+      fontSize: 15
+    }
+  }, "QUOTATION CLOSED"), /*#__PURE__*/React.createElement(Table, {
+    headers: ["No. Quotation", "Tanggal", "Client", "Total", "Sumber", "Status", "Aksi"],
+    rows: qpsClosed.map(buildRowPS),
+    emptyMsg: "Belum ada quotation yang closed"
+  })), /*#__PURE__*/React.createElement(Modal, {
     open: pullModal,
     title: "Pilih Part Recommendation dari Mekanik",
     onClose: () => setPullModal(false),
@@ -9412,8 +10201,13 @@ function QuotationPS({
       itemHeaders: ["Part Number", "Part Name", "Qty", "Harga", "Subtotal"],
       items: detail.items.map(it => [it.partNumber, it.partName, fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)]),
       subtotal: detail.subtotal,
-      diskon: detail.diskon,
+      // Sales Discount (internal kickback, `detail.diskon`/`detail.salesDiscount`) is internal-only
+      // and never shown or applied on the client-facing print — only the separate client-visible
+      // Discount (`detail.clientDiskon`) appears here.
+      diskon: detail.clientDiskon || 0,
+      diskonLabel: detail.clientDiskonPersen ? `Discount (${detail.clientDiskonPersen}%)` : "Discount",
       pajak: detail.pajak,
+      pajakLabel: "PPN",
       total: detail.total,
       catatan: detail.catatan,
       dibuatOleh: {
@@ -9527,8 +10321,8 @@ function QuotationPS({
     onClick: addItem,
     size: "sm"
   }, "+ Add")), form.items.length > 0 && /*#__PURE__*/React.createElement(Table, {
-    headers: ["Part", "Qty", "Harga", "Subtotal", ""],
-    rows: form.items.map((it, i) => [it.partName, it.qty, /*#__PURE__*/React.createElement("input", {
+    headers: ["Part Number", "Part Name", "Qty", "Harga", "Subtotal", ""],
+    rows: form.items.map((it, i) => [it.partNumber, it.partName, it.qty, /*#__PURE__*/React.createElement("input", {
       type: "number",
       value: it.harga ?? "",
       onChange: e => updateItemHarga(i, e.target.value),
@@ -9559,6 +10353,77 @@ function QuotationPS({
       maxWidth: 200
     }
   }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: `1px solid ${theme.border}`,
+      borderRadius: 10,
+      padding: 14,
+      display: "flex",
+      flexDirection: "column",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      color: theme.muted,
+      fontSize: 13,
+      fontWeight: 600
+    }
+  }, "DISCOUNT (dari Total Price, terlihat oleh client)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      fontSize: 13,
+      color: theme.text,
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "radio",
+    checked: form.clientDiskonMode === "persen",
+    onChange: () => setForm({
+      ...form,
+      clientDiskonMode: "persen"
+    })
+  }), " Discount %"), /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      fontSize: 13,
+      color: theme.text,
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "radio",
+    checked: form.clientDiskonMode === "nominal",
+    onChange: () => setForm({
+      ...form,
+      clientDiskonMode: "nominal"
+    })
+  }), " Discount Nominal (Rp)")), /*#__PURE__*/React.createElement(Input, {
+    label: form.clientDiskonMode === "persen" ? "Discount (%)" : "Discount (Rp)",
+    value: form.clientDiskonValue,
+    onChange: v => setForm({
+      ...form,
+      clientDiskonValue: v
+    }),
+    type: "number",
+    min: "0",
+    style: {
+      maxWidth: 200
+    }
+  }), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.accentLight
+    }
+  }, "Subtotal ", fmt(subtotal), " − Discount ", fmt(clientDiskon), " + PPN ", fmt(subtotalAfterClientDiskon * pajak / 100), " = Total ", fmt(total))), /*#__PURE__*/React.createElement("div", {
     style: {
       border: `1px solid ${theme.border}`,
       borderRadius: 10,
@@ -9783,7 +10648,10 @@ function SalesOrderModule({
     quotationsUnit,
     setQuotationsUnit,
     quotationsPS,
-    setQuotationsPS
+    setQuotationsPS,
+    itemRequisitions,
+    poLocal,
+    poOverseas
   } = store;
   const isEpy = session.role === "sales_admin";
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
@@ -9792,12 +10660,21 @@ function SalesOrderModule({
   const [pickQuot, setPickQuot] = useState(null); // { quot, type } — quotation chosen, now picking which items become the SO
   const [pickedItems, setPickedItems] = useState([]); // indices (into pickQuot.quot.items) currently checked
   const [shipForm, setShipForm] = useState({
+    noPoClient: "",
     tujuan: "",
     ekspedisi: "",
     pic: "",
     noTlp: "",
     alamat: ""
   });
+  // A Sales Order has "become a PO" once any Item Requisition tied to it has been pulled into a
+  // (local or overseas) Purchase Order — used to split the Kanban into ON GOING vs SO TO PO.
+  const soHasBecomePO = so => {
+    const relatedIR = (itemRequisitions || []).filter(ir => ir.soNomor === so.nomor).map(ir => ir.nomor);
+    if (relatedIR.length === 0) return false;
+    const allPO = [...(poLocal || []), ...(poOverseas || [])];
+    return allPO.some(po => (po.irNomors || []).some(n => relatedIR.includes(n)));
+  };
   const deleteSO = so => {
     if (!isOwnerLike) return alert("Hanya Owner/GM/Finance Director yang dapat menghapus Sales Order.");
     if (!confirm(`Hapus Sales Order ${so.nomor}?`)) return;
@@ -9823,6 +10700,7 @@ function SalesOrderModule({
     });
     setPickedItems(quot.items.map((_, i) => i)); // default: all items selected
     setShipForm({
+      noPoClient: "",
       tujuan: "",
       ekspedisi: "",
       pic: "",
@@ -9842,7 +10720,9 @@ function SalesOrderModule({
     const subtotal = items.reduce((s, i) => s + i.subtotal, 0);
     const pajakPct = quot.subtotal ? quot.pajak / quot.subtotal * 100 : 0;
     const pajak = subtotal * pajakPct / 100;
-    const diskonRatio = quot.subtotal ? (quot.diskon || 0) / quot.subtotal : 0;
+    // Only the client-visible Discount carries forward to the Sales Order (and its print) — the
+    // internal Sales Discount kickback (`quot.diskon`) must never leak beyond the Quotation module.
+    const diskonRatio = quot.subtotal ? (quot.clientDiskon || 0) / quot.subtotal : 0;
     const diskon = subtotal * diskonRatio;
     const total = subtotal - diskon + pajak;
     const so = {
@@ -9861,6 +10741,7 @@ function SalesOrderModule({
       salesManagerNama: quot.salesManagerNama || null,
       createdBy: session.nama,
       status: "Aktif",
+      noPoClient: shipForm.noPoClient || "",
       shippingTujuan: shipForm.tujuan,
       shippingEkspedisi: shipForm.ekspedisi,
       shippingPic: shipForm.pic,
@@ -9925,6 +10806,7 @@ function SalesOrderModule({
       nomor: so.nomor,
       tipe: so.tipe,
       sumberQuotation: so.sourceNomor,
+      noPoClient: so.noPoClient || "-",
       tanggal: so.tanggal,
       customer: so.customerNama,
       salesManager: so.salesManagerNama || "-",
@@ -9943,9 +10825,15 @@ function SalesOrderModule({
     style: {
       marginBottom: 12
     }
-  }), /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. SO", "Tipe", "Sumber Quotation", "Tanggal", "Client", "Total", "Status"],
-    rows: salesOrdersFiltered.map(so => [/*#__PURE__*/React.createElement("span", {
+  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.text,
+      fontSize: 15
+    }
+  }, "ON GOING"), /*#__PURE__*/React.createElement(Table, {
+    headers: ["No. SO", "Tipe", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Status"],
+    rows: salesOrdersFiltered.filter(so => !soHasBecomePO(so)).map(so => [/*#__PURE__*/React.createElement("span", {
       style: {
         color: theme.accentLight,
         fontWeight: 600,
@@ -9954,11 +10842,33 @@ function SalesOrderModule({
       onClick: () => setDetail(so)
     }, so.nomor), /*#__PURE__*/React.createElement(Badge, {
       color: so.tipe === "Unit" ? theme.purple : theme.cyan
-    }, so.tipe), so.sourceNomor, so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
+    }, so.tipe), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
       color: theme.green
     }, so.status)]),
-    onDelete: isOwnerLike ? i => deleteSO(salesOrders[i]) : undefined,
-    emptyMsg: "Belum ada Sales Order"
+    onDelete: isOwnerLike ? i => deleteSO(salesOrdersFiltered.filter(so => !soHasBecomePO(so))[i]) : undefined,
+    emptyMsg: "Belum ada Sales Order on going"
+  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.cyan,
+      fontSize: 15
+    }
+  }, "SALES ORDER TO PURCHASE ORDER"), /*#__PURE__*/React.createElement(Table, {
+    headers: ["No. SO", "Tipe", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Status"],
+    rows: salesOrdersFiltered.filter(so => soHasBecomePO(so)).map(so => [/*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.accentLight,
+        fontWeight: 600,
+        cursor: "pointer"
+      },
+      onClick: () => setDetail(so)
+    }, so.nomor), /*#__PURE__*/React.createElement(Badge, {
+      color: so.tipe === "Unit" ? theme.purple : theme.cyan
+    }, so.tipe), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
+      color: theme.green
+    }, so.status)]),
+    onDelete: isOwnerLike ? i => deleteSO(salesOrdersFiltered.filter(so => soHasBecomePO(so))[i]) : undefined,
+    emptyMsg: "Belum ada Sales Order yang sudah menjadi Purchase Order"
   })), /*#__PURE__*/React.createElement(Modal, {
     open: pullModal,
     title: "Pilih Quotation yang Sudah Disetujui GM",
@@ -10064,7 +10974,15 @@ function SalesOrderModule({
     type: "checkbox",
     checked: pickedItems.includes(i),
     onChange: () => togglePickedItem(i)
-  }), /*#__PURE__*/React.createElement("span", null, it.unitName || it.partName, " — Qty ", fmtNum(it.qty), " — ", fmt(it.subtotal))))), /*#__PURE__*/React.createElement("div", {
+  }), /*#__PURE__*/React.createElement("span", null, it.unitName || it.partName, " — Qty ", fmtNum(it.qty), " — ", fmt(it.subtotal))))), /*#__PURE__*/React.createElement(Input, {
+    label: "No. Purchase Order Client",
+    value: shipForm.noPoClient,
+    onChange: v => setShipForm({
+      ...shipForm,
+      noPoClient: v
+    }),
+    placeholder: "No. PO yang diterbitkan client"
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
       border: `1px solid ${theme.border}`,
       borderRadius: 10,
@@ -10153,7 +11071,17 @@ function SalesOrderModule({
       fontWeight: 700,
       fontSize: 16
     }
-  }, "Total: ", fmt(detail.total)), detail.shippingTujuan && /*#__PURE__*/React.createElement("div", {
+  }, "Total: ", fmt(detail.total)), detail.noPoClient && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 13,
+      color: theme.muted
+    }
+  }, "No. Purchase Order Client: ", /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, detail.noPoClient)), detail.shippingTujuan && /*#__PURE__*/React.createElement("div", {
     style: {
       background: theme.surface,
       borderRadius: 8,
@@ -10225,57 +11153,86 @@ function ItemRequisitionModule({
   const isPipin = session.role === "inventory" || session.role === "admin2";
   const isSepti = session.role === "workshop_manager";
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
+  const canManage = isPipin || isOwnerLike || isSepti;
+  const activeSO = salesOrders.filter(so => so.status === "Aktif");
   const [irSearch, setIrSearch] = useState("");
   const itemRequisitionsFiltered = irSearch.trim() ? itemRequisitions.filter(r => [r.nomor, r.soNomor].filter(Boolean).some(x => String(x).toLowerCase().includes(irSearch.trim().toLowerCase()))) : itemRequisitions;
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState(null);
   const [manualModal, setManualModal] = useState(false);
-  const [manualForm, setManualForm] = useState({
+  const [editingNomor, setEditingNomor] = useState(null);
+  const blankManualForm = {
     soNomor: "",
     partNumber: "",
     partName: "",
+    description: "",
     qty: "",
     catatan: ""
-  });
+  };
+  const [manualForm, setManualForm] = useState(blankManualForm);
   const [form, setForm] = useState({
     soNomor: "",
     items: []
   });
-  const saveManual = () => {
-    if (!manualForm.soNomor) return alert("Item Requisition harus tetap merujuk pada Sales Order — pilih SO terkait.");
-    if (!manualForm.partName || !manualForm.qty) return alert("Nama part dan qty wajib diisi");
-    const so = salesOrders.find(s => s.nomor === manualForm.soNomor);
-    setItemRequisitions([...itemRequisitions, {
-      nomor: newNomor(),
-      tanggal: today(),
-      soNomor: manualForm.soNomor,
-      soCustomerNama: so?.customerNama,
-      bomCandidate: true,
-      items: [{
-        partNumber: manualForm.partNumber,
-        partName: manualForm.partName,
-        qtyButuh: parseFloat(manualForm.qty) || 0,
-        stokTersedia: 0,
-        qtyKurang: parseFloat(manualForm.qty) || 0,
-        catatan: manualForm.catatan
-      }],
-      createdBy: session.nama,
-      status: "Menunggu Purchasing"
-    }]);
-    logAudit(store, session, {
-      module: "Item Requisition",
-      docNomor: manualForm.partName,
-      action: "Tambah (Non-SO / Kandidat BOM)",
-      detail: manualForm.catatan
-    });
+  const closeManualModal = () => {
     setManualModal(false);
-    setManualForm({
+    setEditingNomor(null);
+    setManualForm(blankManualForm);
+  };
+  const closeModal = () => {
+    setModal(false);
+    setEditingNomor(null);
+    setForm({
       soNomor: "",
-      partNumber: "",
-      partName: "",
-      qty: "",
-      catatan: ""
+      items: []
     });
+  };
+  const saveManual = () => {
+    if (!manualForm.partNumber) return alert("Part Number wajib dipilih dari Master Part (gunakan pencarian).");
+    if (!manualForm.qty) return alert("Qty wajib diisi");
+    const so = manualForm.soNomor ? salesOrders.find(s => s.nomor === manualForm.soNomor) : null;
+    const itemPayload = {
+      partNumber: manualForm.partNumber,
+      partName: manualForm.partName,
+      description: manualForm.description,
+      qtyButuh: parseFloat(manualForm.qty) || 0,
+      stokTersedia: 0,
+      qtyKurang: parseFloat(manualForm.qty) || 0,
+      catatan: manualForm.catatan
+    };
+    if (editingNomor) {
+      setItemRequisitions(itemRequisitions.map(r => r.nomor === editingNomor ? {
+        ...r,
+        soNomor: manualForm.soNomor || "",
+        soCustomerNama: so?.customerNama || "",
+        bomCandidate: true,
+        items: [itemPayload]
+      } : r));
+      logAudit(store, session, {
+        module: "Item Requisition",
+        docNomor: editingNomor,
+        action: "Revisi (Non-SO / Kandidat BOM)",
+        detail: manualForm.catatan
+      });
+    } else {
+      setItemRequisitions([...itemRequisitions, {
+        nomor: newNomor(),
+        tanggal: today(),
+        soNomor: manualForm.soNomor || "",
+        soCustomerNama: so?.customerNama || "",
+        bomCandidate: true,
+        items: [itemPayload],
+        createdBy: session.nama,
+        status: "Menunggu Purchasing"
+      }]);
+      logAudit(store, session, {
+        module: "Item Requisition",
+        docNomor: manualForm.partName,
+        action: "Tambah (Non-SO / Kandidat BOM)",
+        detail: manualForm.catatan
+      });
+    }
+    closeManualModal();
   };
   const newNomor = () => "IR-" + new Date().getFullYear() + "-" + String(itemRequisitions.length + 1).padStart(4, "0");
   const deleteIR = r => {
@@ -10289,9 +11246,6 @@ function ItemRequisitionModule({
       detail: r.soNomor
     });
   };
-
-  // SO that are parts/service type and not yet fully requisitioned
-  const eligibleSO = salesOrders.filter(so => so.tipe !== "Unit" || so.tipe === "Unit");
   const checkStockForSO = soNomor => {
     const so = salesOrders.find(s => s.nomor === soNomor);
     if (!so) return [];
@@ -10303,9 +11257,11 @@ function ItemRequisitionModule({
       return {
         partNumber: pn,
         partName: it.partName || it.unitName,
+        description: part?.description || "",
         qtyButuh: it.qty,
         stokTersedia: stok,
-        qtyKurang: kurang
+        qtyKurang: kurang,
+        catatan: ""
       };
     }).filter(x => x.qtyKurang > 0); // only short items
   };
@@ -10315,35 +11271,97 @@ function ItemRequisitionModule({
       alert("Stock cukup untuk SO ini — Item Requisition tidak diperlukan.");
       return;
     }
+    setEditingNomor(null);
     setForm({
       soNomor,
       items: shortItems
     });
     setModal(true);
   };
-  const save = () => {
-    if (!form.soNomor) return alert("Pilih Sales Order");
-    setItemRequisitions([...itemRequisitions, {
-      nomor: newNomor(),
-      tanggal: today(),
-      soNomor: form.soNomor,
-      items: form.items,
-      createdBy: session.nama,
-      status: "Menunggu Purchasing"
-    }]);
-    setModal(false);
+  const updateFormItemQty = (i, val) => {
+    const items = [...form.items];
+    const qtyButuh = parseFloat(val) || 0;
+    items[i] = {
+      ...items[i],
+      qtyButuh,
+      qtyKurang: Math.max(0, qtyButuh - (items[i].stokTersedia || 0))
+    };
     setForm({
-      soNomor: "",
-      items: []
+      ...form,
+      items
     });
   };
-  return /*#__PURE__*/React.createElement("div", {
+  const updateFormItemCatatan = (i, val) => {
+    const items = [...form.items];
+    items[i] = {
+      ...items[i],
+      catatan: val
+    };
+    setForm({
+      ...form,
+      items
+    });
+  };
+  const onEditIR = r => {
+    if (r.status === "Sudah di-PO" && !isOwnerLike) return alert("Item Requisition yang sudah di-PO tidak dapat direvisi.");
+    setEditingNomor(r.nomor);
+    if (r.bomCandidate) {
+      const it = r.items[0] || {};
+      setManualForm({
+        soNomor: r.soNomor || "",
+        partNumber: it.partNumber || "",
+        partName: it.partName || "",
+        description: it.description || "",
+        qty: String(it.qtyButuh || ""),
+        catatan: it.catatan || ""
+      });
+      setManualModal(true);
+    } else {
+      setForm({
+        soNomor: r.soNomor,
+        items: r.items.map(it => ({
+          ...it
+        }))
+      });
+      setModal(true);
+    }
+  };
+  const save = () => {
+    if (!form.soNomor) return alert("Pilih Sales Order");
+    if (form.items.length === 0) return alert("Tidak ada item pada requisition ini");
+    if (editingNomor) {
+      setItemRequisitions(itemRequisitions.map(r => r.nomor === editingNomor ? {
+        ...r,
+        soNomor: form.soNomor,
+        items: form.items
+      } : r));
+      logAudit(store, session, {
+        module: "Item Requisition",
+        docNomor: editingNomor,
+        action: "Revisi",
+        detail: form.soNomor
+      });
+    } else {
+      const so = salesOrders.find(s => s.nomor === form.soNomor);
+      setItemRequisitions([...itemRequisitions, {
+        nomor: newNomor(),
+        tanggal: today(),
+        soNomor: form.soNomor,
+        soCustomerNama: so?.customerNama || "",
+        items: form.items,
+        createdBy: session.nama,
+        status: "Menunggu Purchasing"
+      }]);
+    }
+    closeModal();
+  };
+  return React.createElement("div", {
     style: {
       display: "flex",
       flexDirection: "column",
       gap: 20
     }
-  }, /*#__PURE__*/React.createElement("div", {
+  }, React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
@@ -10351,30 +11369,34 @@ function ItemRequisitionModule({
       flexWrap: "wrap",
       gap: 12
     }
-  }, /*#__PURE__*/React.createElement("h2", {
+  }, React.createElement("h2", {
     style: {
       margin: 0,
       color: theme.text
     }
-  }, "Item Requisition"), (isPipin || isOwnerLike || isSepti) && /*#__PURE__*/React.createElement("div", {
+  }, "Item Requisition"), canManage && React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
       flexWrap: "wrap"
     }
-  }, /*#__PURE__*/React.createElement(Select, {
+  }, React.createElement(Select, {
     value: "",
     onChange: loadFromSO,
-    options: salesOrders.map(so => ({
+    options: activeSO.map(so => ({
       value: so.nomor,
       label: `${so.nomor} — ${so.customerNama}`
     })),
     style: {
       width: 280
     }
-  }), /*#__PURE__*/React.createElement(Btn, {
-    onClick: () => setManualModal(true)
-  }, "+ Request Part (Non-SO)"))), /*#__PURE__*/React.createElement("div", {
+  }), React.createElement(Btn, {
+    onClick: () => {
+      setEditingNomor(null);
+      setManualForm(blankManualForm);
+      setManualModal(true);
+    }
+  }, "+ Request Part (Non-SO)"))), React.createElement("div", {
     style: {
       fontSize: 12,
       color: theme.muted,
@@ -10383,128 +11405,214 @@ function ItemRequisitionModule({
       borderRadius: 8,
       border: `1px dashed ${theme.border}`
     }
-  }, "ℹ️ Item Requisition hanya dibuat jika ", /*#__PURE__*/React.createElement("strong", null, "stock kurang"), " dari Sales Order, atau permintaan part baru di luar SO (kandidat update BOM). Harga tidak ditampilkan di sini."), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
+  }, "ℹ️ Item Requisition hanya dibuat jika ", React.createElement("strong", null, "stock kurang"), " dari Sales Order, atau permintaan part baru di luar SO (kandidat update BOM, SO opsional). Harga tidak ditampilkan di sini."), React.createElement(Card, null, React.createElement(Input, {
     placeholder: "Cari no. requisition / no. SO...",
     value: irSearch,
     onChange: setIrSearch,
     style: {
       marginBottom: 12
     }
-  }), /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. Requisition", "Tanggal", "No. SO", "Jumlah Item Kurang", "Status"],
-    rows: itemRequisitionsFiltered.map(r => [/*#__PURE__*/React.createElement("span", {
+  }), React.createElement(Table, {
+    headers: ["No. Requisition", "Tanggal", "No. SO", "Jumlah Item Kurang", "Status", "IR Completed"],
+    rows: itemRequisitionsFiltered.map(r => [React.createElement("span", {
       style: {
         color: theme.accentLight,
         fontWeight: 600,
         cursor: "pointer"
       },
       onClick: () => setDetail(r)
-    }, r.nomor), r.tanggal, r.bomCandidate ? /*#__PURE__*/React.createElement(Badge, {
+    }, r.nomor), r.tanggal, r.bomCandidate ? r.soNomor ? React.createElement(Badge, {
       color: theme.blue
-    }, "Non-SO / Kandidat BOM") : r.soNomor, /*#__PURE__*/React.createElement(Badge, {
+    }, "Non-SO — ", r.soNomor) : React.createElement(Badge, {
+      color: theme.blue
+    }, "Non-SO / Kandidat BOM") : r.soNomor, React.createElement(Badge, {
       color: theme.purple
-    }, r.items.length, " part"), /*#__PURE__*/React.createElement(Badge, {
+    }, r.items.length, " part"), React.createElement(Badge, {
       color: r.status === "Menunggu Purchasing" ? theme.yellow : theme.green
-    }, r.status)]),
-    onDelete: isOwnerLike ? i => deleteIR(itemRequisitions[i]) : undefined,
+    }, r.status), r.status === "Sudah di-PO" ? React.createElement(Badge, {
+      color: theme.green
+    }, "✓ Selesai") : React.createElement(Badge, {
+      color: theme.yellow
+    }, "Belum")]),
+    onEdit: canManage ? i => onEditIR(itemRequisitionsFiltered[i]) : undefined,
+    onDelete: isOwnerLike ? i => deleteIR(itemRequisitionsFiltered[i]) : undefined,
     emptyMsg: "Belum ada Item Requisition"
-  })), /*#__PURE__*/React.createElement(Modal, {
+  })), React.createElement(Modal, {
     open: !!detail,
     title: `Detail ${detail?.nomor}`,
     onClose: () => setDetail(null),
-    width: 600
-  }, detail && /*#__PURE__*/React.createElement(Table, {
-    headers: ["Part Number", "Part Name", "Qty Dibutuhkan", "Stok Tersedia", "Qty Kurang"],
-    rows: detail.items.map(it => [it.partNumber, it.partName, fmtNum(it.qtyButuh), fmtNum(it.stokTersedia), /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: theme.red,
-        fontWeight: 600
-      }
-    }, fmtNum(it.qtyKurang))])
-  })), /*#__PURE__*/React.createElement(Modal, {
-    open: modal,
-    title: "Buat Item Requisition",
-    onClose: () => setModal(false),
     width: 620
-  }, /*#__PURE__*/React.createElement("div", {
+  }, detail && React.createElement("div", {
     style: {
       display: "flex",
       flexDirection: "column",
       gap: 14
     }
-  }, /*#__PURE__*/React.createElement("p", {
+  }, React.createElement(Table, {
+    headers: ["Part Number", "Part Name", "Qty Dibutuhkan", "Stok Tersedia", "Qty Kurang", "Catatan"],
+    rows: detail.items.map(it => [it.partNumber, it.partName, fmtNum(it.qtyButuh), fmtNum(it.stokTersedia), React.createElement("span", {
+      style: {
+        color: theme.red,
+        fontWeight: 600
+      }
+    }, fmtNum(it.qtyKurang)), React.createElement("span", {
+      style: catatanStyle
+    }, it.catatan || "-")])
+  }), canManage && detail.status !== "Sudah di-PO" && React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end"
+    }
+  }, React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => {
+      onEditIR(detail);
+      setDetail(null);
+    }
+  }, "✏️ Revisi")))), React.createElement(Modal, {
+    open: modal,
+    title: editingNomor ? "Revisi Item Requisition" : "Buat Item Requisition",
+    onClose: closeModal,
+    width: 660
+  }, React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, React.createElement("p", {
     style: {
       margin: 0,
       fontSize: 13,
       color: theme.muted
     }
-  }, "SO: ", /*#__PURE__*/React.createElement("strong", {
+  }, "SO: ", React.createElement("strong", {
     style: {
       color: theme.text
     }
-  }, form.soNomor)), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Part Number", "Part Name", "Qty Dibutuhkan", "Stok Tersedia", "Qty Kurang"],
-    rows: form.items.map(it => [it.partNumber, it.partName, fmtNum(it.qtyButuh), fmtNum(it.stokTersedia), /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: theme.red,
-        fontWeight: 600
-      }
-    }, fmtNum(it.qtyKurang))])
-  }), /*#__PURE__*/React.createElement("div", {
+  }, form.soNomor)), form.items.map((it, i) => React.createElement("div", {
+    key: i,
+    style: {
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8,
+      padding: 12,
+      display: "flex",
+      flexDirection: "column",
+      gap: 8
+    }
+  }, React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      fontSize: 13,
+      color: theme.text
+    }
+  }, React.createElement("strong", null, it.partNumber, " — ", it.partName), React.createElement(Badge, {
+    color: theme.red
+  }, "Kurang: ", fmtNum(it.qtyKurang))), it.description && React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: theme.muted
+    }
+  }, it.description), React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr 2fr",
+      gap: 10
+    }
+  }, React.createElement(Input, {
+    label: "Qty Dibutuhkan",
+    type: "number",
+    value: String(it.qtyButuh),
+    onChange: v => updateFormItemQty(i, v)
+  }), React.createElement("div", null, React.createElement("label", {
+    style: {
+      fontSize: 13,
+      color: theme.muted,
+      fontWeight: 500
+    }
+  }, "Stok Tersedia"), React.createElement("div", {
+    style: {
+      padding: "9px 0",
+      color: theme.text,
+      fontSize: 14
+    }
+  }, fmtNum(it.stokTersedia))), React.createElement(Input, {
+    label: "Catatan",
+    value: it.catatan || "",
+    onChange: v => updateFormItemCatatan(i, v)
+  })))), React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
       justifyContent: "flex-end"
     }
-  }, /*#__PURE__*/React.createElement(Btn, {
+  }, React.createElement(Btn, {
     variant: "ghost",
-    onClick: () => setModal(false)
-  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: closeModal
+  }, "Batal"), React.createElement(Btn, {
     onClick: save
-  }, "Buat Requisition")))), /*#__PURE__*/React.createElement(Modal, {
+  }, editingNomor ? "Simpan Revisi" : "Buat Requisition")))), React.createElement(Modal, {
     open: manualModal,
-    title: "Request Part Baru (Non-SO)",
-    onClose: () => setManualModal(false),
+    title: editingNomor ? "Revisi Request Part (Non-SO)" : "Request Part Baru (Non-SO)",
+    onClose: closeManualModal,
     width: 480
-  }, /*#__PURE__*/React.createElement("div", {
+  }, React.createElement("div", {
     style: {
       display: "flex",
       flexDirection: "column",
       gap: 14
     }
-  }, /*#__PURE__*/React.createElement("p", {
+  }, React.createElement("p", {
     style: {
       margin: 0,
       fontSize: 12,
       color: theme.muted
     }
-  }, "Untuk part yang tidak ada di item list Sales Order, namun tetap harus dikaitkan dengan SO/project yang berjalan. Data ini akan menjadi kandidat untuk update BOM & project berikutnya."), /*#__PURE__*/React.createElement(Select, {
-    label: "Sales Order Terkait",
+  }, "Untuk part yang tidak ada di item list Sales Order. Sales Order bersifat opsional — dapat dikaitkan dengan project yang berjalan, atau dibiarkan kosong sebagai kandidat update BOM umum."), React.createElement(Select, {
+    label: "Sales Order Terkait (opsional)",
     value: manualForm.soNomor,
     onChange: v => setManualForm({
       ...manualForm,
       soNomor: v
     }),
-    options: salesOrders.map(so => ({
+    options: [{
+      value: "",
+      label: "— Tidak terkait SO —"
+    }, ...activeSO.map(so => ({
       value: so.nomor,
       label: `${so.nomor} — ${so.customerNama}`
-    })),
-    required: true
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "Part Number (opsional)",
+    }))]
+  }), React.createElement(PartPicker, {
+    label: "Part Number *",
     value: manualForm.partNumber,
-    onChange: v => setManualForm({
-      ...manualForm,
-      partNumber: v
-    })
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "Nama Part *",
-    value: manualForm.partName,
-    onChange: v => setManualForm({
-      ...manualForm,
-      partName: v
-    })
-  }), /*#__PURE__*/React.createElement(Input, {
+    parts: parts,
+    showDescription: true,
+    onChange: pn => {
+      const p = parts.find(x => x.partNumber === pn);
+      setManualForm({
+        ...manualForm,
+        partNumber: pn,
+        partName: p?.partName || "",
+        description: p?.description || ""
+      });
+    }
+  }), manualForm.partName && React.createElement("div", {
+    style: {
+      background: theme.surface,
+      borderRadius: 8,
+      padding: "10px 12px",
+      fontSize: 13,
+      color: theme.text
+    }
+  }, React.createElement("strong", null, manualForm.partName), manualForm.description && React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: theme.muted,
+      marginTop: 4
+    }
+  }, manualForm.description)), React.createElement(Input, {
     label: "Qty *",
     type: "number",
     value: manualForm.qty,
@@ -10512,7 +11620,7 @@ function ItemRequisitionModule({
       ...manualForm,
       qty: v
     })
-  }), /*#__PURE__*/React.createElement(Input, {
+  }), React.createElement(Input, {
     label: "Catatan / Untuk Project",
     multiline: true,
     value: manualForm.catatan,
@@ -10520,18 +11628,18 @@ function ItemRequisitionModule({
       ...manualForm,
       catatan: v
     })
-  }), /*#__PURE__*/React.createElement("div", {
+  }), React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
       justifyContent: "flex-end"
     }
-  }, /*#__PURE__*/React.createElement(Btn, {
+  }, React.createElement(Btn, {
     variant: "ghost",
-    onClick: () => setManualModal(false)
-  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: closeManualModal
+  }, "Batal"), React.createElement(Btn, {
     onClick: saveManual
-  }, "Ajukan Permintaan")))));
+  }, editingNomor ? "Simpan Revisi" : "Ajukan Permintaan")))));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -10561,7 +11669,11 @@ function PurchaseOrderModule({
   const canMarkPaid = ["purchasing", "finance_director", "owner", "gm"].includes(session.role); // Erni or Christine (Finance Director)
   const isMaria = session.role === "purchasing_overseas";
   const [poSearch, setPoSearch] = useState("");
-  const poFiltered = poSearch.trim() ? po.filter(p => [p.nomor, p.supplierNama].filter(Boolean).some(x => String(x).toLowerCase().includes(poSearch.trim().toLowerCase()))) : po;
+  const poFiltered = poSearch.trim() ? po.filter(p => {
+    const q = poSearch.trim().toLowerCase();
+    if ([p.nomor, p.supplierNama].filter(Boolean).some(x => String(x).toLowerCase().includes(q))) return true;
+    return (p.items || []).some(it => [it.partNumber, it.partName].filter(Boolean).some(x => String(x).toLowerCase().includes(q)));
+  }) : po;
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState(null);
   const [importCostModal, setImportCostModal] = useState(null);
@@ -10584,6 +11696,7 @@ function PurchaseOrderModule({
   const [reviseModal, setReviseModal] = useState(null);
   const [reviseItems, setReviseItems] = useState([]);
   const [revisePakaiPpn, setRevisePakaiPpn] = useState(false);
+  const [reviseCurrency, setReviseCurrency] = useState("IDR");
   const [form, setForm] = useState({
     irNomors: [],
     supplierId: "",
@@ -10764,19 +11877,21 @@ function PurchaseOrderModule({
   const openPayMethod = p => {
     setPayMethodModal(p);
     setPayMethod(p.metodeBayar || "BCA");
-    setPayDate(p.tanggalBayar || today());
-    setPayAmount(p.jumlahDibayar ? String(p.jumlahDibayar) : String(p.total));
+    setPayDate(today());
+    const sisa = p.total - (p.jumlahDibayar || 0);
+    setPayAmount(String(sisa > 0 ? sisa : p.total));
   };
   const confirmMarkPaid = () => {
     const arr = [...po];
-    const jumlah = parseFloat(payAmount) || 0;
+    const jumlahBaru = parseFloat(payAmount) || 0;
+    const totalDibayar = (payMethodModal.jumlahDibayar || 0) + jumlahBaru;
     arr[po.indexOf(payMethodModal)] = {
       ...payMethodModal,
-      statusBayar: jumlah >= payMethodModal.total ? "Sudah Dibayar" : "Dibayar Sebagian",
+      statusBayar: totalDibayar >= payMethodModal.total ? "Sudah Dibayar" : "Dibayar Sebagian",
       paidBy: session.nama,
       paidDate: today(),
       tanggalBayar: payDate,
-      jumlahDibayar: jumlah,
+      jumlahDibayar: totalDibayar,
       metodeBayar: payMethod
     };
     setPo(arr);
@@ -10784,7 +11899,7 @@ function PurchaseOrderModule({
       module: `Purchase Order ${isLocal ? "Lokal" : "Overseas"}`,
       docNomor: payMethodModal.nomor,
       action: "Input Pembayaran",
-      detail: `oleh ${session.nama} via ${payMethod} — ${fmt(jumlah)} pada ${payDate}`
+      detail: `oleh ${session.nama} via ${payMethod} — ${fmt(jumlahBaru)} pada ${payDate} (total dibayar: ${fmt(totalDibayar)} / ${fmt(payMethodModal.total)})`
     });
     setPayMethodModal(null);
   };
@@ -10794,6 +11909,7 @@ function PurchaseOrderModule({
       ...it
     })));
     setRevisePakaiPpn(p.pakaiPpn || false);
+    setReviseCurrency(p.currency || "IDR");
   };
   const updateReviseHarga = (i, harga) => {
     const items = [...reviseItems];
@@ -10813,20 +11929,26 @@ function PurchaseOrderModule({
       ...it,
       subtotal: it.qty * (it.harga || 0)
     }));
+    const wasApproved = reviseModal.status === "Disetujui GM - Kirim ke Supplier";
     arr[po.indexOf(reviseModal)] = {
       ...reviseModal,
       items,
       subtotal: reviseSubtotal,
       pakaiPpn: revisePakaiPpn,
       ppnAmount: revisePpnAmount,
-      total: reviseTotal
+      total: reviseTotal,
+      currency: isLocal ? "IDR" : reviseCurrency,
+      ...(wasApproved ? {
+        status: "Menunggu Approval GM",
+        approvedByNama: null
+      } : {})
     };
     setPo(arr);
     logAudit(store, session, {
       module: `Purchase Order ${isLocal ? "Lokal" : "Overseas"}`,
       docNomor: reviseModal.nomor,
       action: "Revisi Harga",
-      detail: `${reviseModal.supplierNama} — Total baru: ${fmt(reviseTotal)}`
+      detail: `${reviseModal.supplierNama} — Total baru: ${fmtMoney(reviseTotal, isLocal ? "IDR" : reviseCurrency)}${wasApproved ? " — status dikembalikan ke Menunggu Approval GM" : ""}`
     });
     setReviseModal(null);
   };
@@ -10910,7 +12032,7 @@ function PurchaseOrderModule({
       tanggal: p.tanggal,
       supplier: p.supplierNama,
       currency: p.currency,
-      tipePembayaran: p.tipePembayaran,
+      tipePembayaran: payLabel(p.tipePembayaran),
       jatuhTempo: p.tanggalJatuhTempo || "-",
       total: p.total,
       status: p.status,
@@ -10920,7 +12042,61 @@ function PurchaseOrderModule({
     })), `Purchase_Order_${isLocal ? "Lokal" : "Overseas"}.xlsx`, "PO")
   }), (isHandler || isMaria || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
     onClick: openCreate
-  }, "+ Buat PO"))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+  }, "+ Buat PO"))), isOwnerLike && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.text,
+      fontSize: 15
+    }
+  }, "Approval GM — Menunggu Keputusan"), po.filter(p => p.status === "Menunggu Approval GM").length === 0 ? /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "Tidak ada PO menunggu approval.") : po.map(p => p.status === "Menunggu Approval GM" && /*#__PURE__*/React.createElement("div", {
+    key: p.nomor,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      padding: "10px 0",
+      borderBottom: `1px solid ${theme.border}33`
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, p.nomor), " — ", p.supplierNama, " — ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.green
+    }
+  }, p.currency, " ", fmtCur(p.total, p.currency)), /*#__PURE__*/React.createElement("br", null), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, payLabel(p.tipePembayaran), p.tipePembayaran === "TEMPO" ? ` · Jatuh tempo: ${p.tanggalJatuhTempo}` : "")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => setDetail(p)
+  }, "👁 Detail"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => openRevise(p)
+  }, "✏️ Edit"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "success",
+    onClick: () => gmApprove(p)
+  }, "✓ Approve"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "danger",
+    onClick: () => gmReject(p)
+  }, "✗ Tolak"))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
     style: {
       margin: "0 0 12px",
       color: theme.text,
@@ -10930,9 +12106,9 @@ function PurchaseOrderModule({
     headers: ["No. PO", "Supplier", "Total", "Tipe", "Jatuh Tempo", "No. Invoice Supplier", "No. Faktur Pajak", "Status Bayar", "Aksi"],
     rows: po.filter(p => p.status === "Disetujui GM - Kirim ke Supplier" || p.status === "Sudah Diterima").map(p => {
       const due = getDueStatus(p.tipePembayaran, p.tanggalJatuhTempo);
-      return [p.nomor, p.supplierNama, `${p.currency} ${fmtNum(p.total)}`, /*#__PURE__*/React.createElement(Badge, {
+      return [p.nomor, p.supplierNama, fmtMoney(p.total, p.currency), /*#__PURE__*/React.createElement(Badge, {
         color: p.tipePembayaran === "COD" ? theme.cyan : theme.purple
-      }, p.tipePembayaran), p.tipePembayaran === "TEMPO" ? /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement(Badge, {
+      }, payLabel(p.tipePembayaran)), p.tipePembayaran === "TEMPO" ? /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement(Badge, {
         color: due.color
       }, due.label), " ", /*#__PURE__*/React.createElement("span", {
         style: {
@@ -10947,18 +12123,24 @@ function PurchaseOrderModule({
         size: "sm",
         variant: "ghost",
         onClick: () => openSupplierDoc(p)
-      }, "+ Input") : "-", p.noFakturPajak || "-", /*#__PURE__*/React.createElement(Badge, {
+      }, "+ Input") : "-", p.noFakturPajak || "-", /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(Badge, {
         color: p.statusBayar === "Sudah Dibayar" ? theme.green : p.statusBayar === "Dibayar Sebagian" ? theme.yellow : theme.red
-      }, p.statusBayar, p.metodeBayar ? ` (${p.metodeBayar})` : ""), /*#__PURE__*/React.createElement("div", {
+      }, p.statusBayar, p.metodeBayar ? ` (${p.metodeBayar})` : ""), p.statusBayar === "Dibayar Sebagian" && /*#__PURE__*/React.createElement("div", {
+        style: {
+          fontSize: 11,
+          color: theme.red,
+          marginTop: 4
+        }
+      }, "Sisa: ", p.currency, " ", fmtCur(p.total - (p.jumlahDibayar || 0), p.currency))), /*#__PURE__*/React.createElement("div", {
         style: {
           display: "flex",
           gap: 6
         }
-      }, p.statusBayar === "Belum Dibayar" && canMarkPaid && /*#__PURE__*/React.createElement(Btn, {
+      }, p.statusBayar !== "Sudah Dibayar" && canMarkPaid && /*#__PURE__*/React.createElement(Btn, {
         size: "sm",
         variant: "success",
         onClick: () => openPayMethod(p)
-      }, "✓ Tandai Dibayar"), p.noInvoiceSupplier && canMarkPaid && /*#__PURE__*/React.createElement(Btn, {
+      }, p.statusBayar === "Dibayar Sebagian" ? "+ Tambah Pembayaran" : "✓ Tandai Dibayar"), p.noInvoiceSupplier && canMarkPaid && /*#__PURE__*/React.createElement(Btn, {
         size: "sm",
         variant: "ghost",
         onClick: () => openSupplierDoc(p)
@@ -10966,7 +12148,7 @@ function PurchaseOrderModule({
     }),
     emptyMsg: "Belum ada PO yang disetujui"
   })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
-    placeholder: "Cari no. PO / supplier...",
+    placeholder: "Cari no. PO / supplier / nama atau nomor part...",
     value: poSearch,
     onChange: setPoSearch,
     style: {
@@ -10985,14 +12167,14 @@ function PurchaseOrderModule({
         onClick: () => setDetail(p)
       }, p.nomor), p.tanggal, p.supplierNama, /*#__PURE__*/React.createElement(Badge, {
         color: p.tipePembayaran === "COD" ? theme.cyan : theme.purple
-      }, p.tipePembayaran), p.tipePembayaran === "TEMPO" ? /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement(Badge, {
+      }, payLabel(p.tipePembayaran)), p.tipePembayaran === "TEMPO" ? /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement(Badge, {
         color: due.color
       }, due.label), " ", /*#__PURE__*/React.createElement("span", {
         style: {
           fontSize: 11,
           color: theme.muted
         }
-      }, p.tanggalJatuhTempo)) : "-", `${p.currency} ${fmtNum(p.total)}`, /*#__PURE__*/React.createElement(Badge, {
+      }, p.tanggalJatuhTempo)) : "-", fmtMoney(p.total, p.currency), /*#__PURE__*/React.createElement(Badge, {
         color: statusColor[p.status]
       }, p.status), /*#__PURE__*/React.createElement(Badge, {
         color: p.statusBayar === "Sudah Dibayar" ? theme.green : p.statusBayar === "Dibayar Sebagian" ? theme.yellow : theme.red
@@ -11032,61 +12214,7 @@ function PurchaseOrderModule({
       onClick: () => openImportCost(p)
     }, p.importCost ? "Edit" : "+ Input") : "-"]),
     emptyMsg: "Belum ada PO Overseas"
-  })), isOwnerLike && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
-    style: {
-      margin: "0 0 12px",
-      color: theme.text,
-      fontSize: 15
-    }
-  }, "Approval GM — Menunggu Keputusan"), po.filter(p => p.status === "Menunggu Approval GM").length === 0 ? /*#__PURE__*/React.createElement("p", {
-    style: {
-      color: theme.muted,
-      fontSize: 13
-    }
-  }, "Tidak ada PO menunggu approval.") : po.map(p => p.status === "Menunggu Approval GM" && /*#__PURE__*/React.createElement("div", {
-    key: p.nomor,
-    style: {
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "center",
-      padding: "10px 0",
-      borderBottom: `1px solid ${theme.border}33`
-    }
-  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", {
-    style: {
-      color: theme.text
-    }
-  }, p.nomor), " — ", p.supplierNama, " — ", /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: theme.green
-    }
-  }, p.currency, " ", fmtNum(p.total)), /*#__PURE__*/React.createElement("br", null), /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 12,
-      color: theme.muted
-    }
-  }, p.tipePembayaran, p.tipePembayaran === "TEMPO" ? ` · Jatuh tempo: ${p.tanggalJatuhTempo}` : "")), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 8
-    }
-  }, /*#__PURE__*/React.createElement(Btn, {
-    size: "sm",
-    variant: "ghost",
-    onClick: () => setDetail(p)
-  }, "👁 Detail"), /*#__PURE__*/React.createElement(Btn, {
-    size: "sm",
-    variant: "ghost",
-    onClick: () => openRevise(p)
-  }, "✏️ Edit"), /*#__PURE__*/React.createElement(Btn, {
-    size: "sm",
-    variant: "success",
-    onClick: () => gmApprove(p)
-  }, "✓ Approve"), /*#__PURE__*/React.createElement(Btn, {
-    size: "sm",
-    variant: "danger",
-    onClick: () => gmReject(p)
-  }, "✗ Tolak"))))), /*#__PURE__*/React.createElement(Modal, {
+  })), /*#__PURE__*/React.createElement(Modal, {
     open: !!detail,
     title: `Detail ${detail?.nomor}`,
     onClose: () => setDetail(null),
@@ -11120,13 +12248,21 @@ function PurchaseOrderModule({
     style: {
       color: theme.text
     }
-  }, detail.currency)), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+  }, detail.currency)), detail.irNomors && detail.irNomors.length > 0 && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted
+    }
+  }, "No. IR:"), " ", /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, detail.irNomors.join(", "))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.muted
     }
   }, "Tipe Bayar:"), " ", /*#__PURE__*/React.createElement(Badge, {
     color: detail.tipePembayaran === "COD" ? theme.cyan : theme.purple
-  }, detail.tipePembayaran)), detail.tipePembayaran === "TEMPO" && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+  }, payLabel(detail.tipePembayaran))), detail.tipePembayaran === "TEMPO" && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.muted
     }
@@ -11148,7 +12284,7 @@ function PurchaseOrderModule({
     style: {
       color: theme.text
     }
-  }, fmt(detail.jumlahDibayar), " (", detail.tanggalBayar, ")")), detail.noInvoiceSupplier && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+  }, fmtMoney(detail.jumlahDibayar, detail.currency), " (", detail.tanggalBayar, ")")), detail.noInvoiceSupplier && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.muted
     }
@@ -11163,7 +12299,7 @@ function PurchaseOrderModule({
         color: theme.muted,
         fontSize: 12
       }
-    }, it.partDescription || "-"), fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)])
+    }, it.partDescription || "-"), fmtNum(it.qty), fmtMoney(it.harga, detail.currency), fmtMoney(it.subtotal, detail.currency)])
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       textAlign: "right",
@@ -11188,22 +12324,25 @@ function PurchaseOrderModule({
       docTitle: `PURCHASE ORDER ${isLocal ? "LOKAL" : "OVERSEAS"}`,
       nomor: detail.nomor,
       tanggal: detail.tanggal,
-      partyLabel: "Kepada Supplier:",
+      partyLabel: "Vendor:",
       partyName: detail.supplierNama,
+      currency: detail.currency,
       itemHeaders: ["Part Number", "Part Name", "Description", "Qty", "Harga", "Subtotal"],
-      items: detail.items.map(it => [it.partNumber, it.partName, it.partDescription || "-", fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)]),
+      items: detail.items.map(it => [it.partNumber, it.partName, it.partDescription || "-", fmtNum(it.qty), fmtMoney(it.harga, detail.currency), fmtMoney(it.subtotal, detail.currency)]),
       subtotal: detail.total,
       diskon: 0,
       pajak: 0,
       total: detail.total,
       catatan: detail.catatan,
-      extraInfoRows: [["Currency", detail.currency], ["Tipe Pembayaran", detail.tipePembayaran], ...(detail.tipePembayaran === "TEMPO" ? [["Jatuh Tempo", detail.tanggalJatuhTempo]] : []), ["PPN", detail.pakaiPpn ? `${detail.currency} ${fmtNum(detail.ppnAmount || 0)} (11%)` : "Tidak Kena PPN"], ...(detail.noInvoiceSupplier ? [["No. Invoice Supplier", detail.noInvoiceSupplier]] : []), ...(detail.jumlahDibayar > 0 ? [["Dibayar", `${fmt(detail.jumlahDibayar)} pada ${detail.tanggalBayar}`]] : [])],
+      extraInfoRows: [["Currency", detail.currency], ["Tipe Pembayaran", payLabel(detail.tipePembayaran)], ...(detail.tipePembayaran === "TEMPO" ? [["Jatuh Tempo", detail.tanggalJatuhTempo]] : []), ...(detail.irNomors && detail.irNomors.length ? [["No. IR", detail.irNomors.join(", ")]] : []), ["VAT/PPN", detail.pakaiPpn ? `${detail.currency} ${fmtCur(detail.ppnAmount || 0, detail.currency)} (11%)` : "Not Subject to VAT/PPN"], ...(detail.noInvoiceSupplier ? [["No. Invoice Supplier", detail.noInvoiceSupplier]] : []), ...(detail.jumlahDibayar > 0 ? [["Dibayar", `${fmtMoney(detail.jumlahDibayar, detail.currency)} pada ${detail.tanggalBayar}`]] : [])],
       dibuatOleh: {
         nama: detail.createdBy
       },
+      dibuatOlehLabel: "Prepared by",
       disetujuiOleh: detail.approvedByNama ? {
         nama: detail.approvedByNama
-      } : null
+      } : null,
+      disetujuiLabel: "Approved By"
     })
   })))), /*#__PURE__*/React.createElement(Modal, {
     open: modal,
@@ -11270,7 +12409,7 @@ function PurchaseOrderModule({
     onChange: addFromIR,
     options: itemRequisitions.filter(ir => ir.status === "Menunggu Purchasing" && !form.irNomors.includes(ir.nomor)).map(ir => ({
       value: ir.nomor,
-      label: `${ir.nomor} (${ir.items.length} part)`
+      label: `${ir.nomor}${ir.bomCandidate ? " · Non-SO" : ""} (${ir.items.length} part)`
     })),
     style: {
       width: 220
@@ -11312,7 +12451,7 @@ function PurchaseOrderModule({
         width: 110,
         fontFamily: "inherit"
       }
-    }), fmt(it.qty * (it.harga || 0)), /*#__PURE__*/React.createElement("span", {
+    }), fmtMoney(it.qty * (it.harga || 0), isLocal ? "IDR" : form.currency), /*#__PURE__*/React.createElement("span", {
       style: {
         fontSize: 11,
         color: theme.muted
@@ -11337,7 +12476,7 @@ function PurchaseOrderModule({
       label: "COD (Cash on Delivery)"
     }, {
       value: "TEMPO",
-      label: "TEMPO (Kredit)"
+      label: "CREDIT (Kredit)"
     }],
     required: true
   }), /*#__PURE__*/React.createElement("label", {
@@ -11447,12 +12586,12 @@ function PurchaseOrderModule({
       fontSize: 13,
       color: theme.muted
     }
-  }, "Subtotal: ", form.currency, " ", fmtNum(subtotal)), form.pakaiPpn && /*#__PURE__*/React.createElement("div", {
+  }, "Subtotal: ", form.currency, " ", fmtCur(subtotal, form.currency)), form.pakaiPpn && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 13,
       color: theme.muted
     }
-  }, "PPN (11%): ", form.currency, " ", fmtNum(ppnAmount)), /*#__PURE__*/React.createElement("span", {
+  }, "PPN (11%): ", form.currency, " ", fmtCur(ppnAmount, form.currency)), /*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.text,
       fontSize: 16,
@@ -11462,7 +12601,7 @@ function PurchaseOrderModule({
     style: {
       color: theme.green
     }
-  }, form.currency, " ", fmtNum(grandTotal)))), /*#__PURE__*/React.createElement(Input, {
+  }, form.currency, " ", fmtCur(grandTotal, form.currency)))), /*#__PURE__*/React.createElement(Input, {
     label: "Catatan",
     multiline: true,
     value: form.catatan,
@@ -11567,7 +12706,17 @@ function PurchaseOrderModule({
     style: {
       color: theme.text
     }
-  }, payMethodModal?.nomor), " — ", payMethodModal?.supplierNama), /*#__PURE__*/React.createElement(Select, {
+  }, payMethodModal?.nomor), " — ", payMethodModal?.supplierNama), payMethodModal?.jumlahDibayar > 0 && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Sudah dibayar: ", fmtMoney(payMethodModal.jumlahDibayar, payMethodModal.currency), " dari total ", fmtMoney(payMethodModal.total, payMethodModal.currency), " — Sisa: ", /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.red
+    }
+  }, fmtMoney(payMethodModal.total - payMethodModal.jumlahDibayar, payMethodModal.currency))), /*#__PURE__*/React.createElement(Select, {
     label: "Metode Pembayaran",
     value: payMethod,
     onChange: setPayMethod,
@@ -11582,7 +12731,7 @@ function PurchaseOrderModule({
     type: "date",
     required: true
   }), /*#__PURE__*/React.createElement(Input, {
-    label: "Jumlah Pembayaran",
+    label: "Jumlah Pembayaran (kali ini)",
     value: payAmount,
     onChange: setPayAmount,
     type: "number",
@@ -11610,7 +12759,24 @@ function PurchaseOrderModule({
       flexDirection: "column",
       gap: 14
     }
-  }, /*#__PURE__*/React.createElement(Table, {
+  }, reviseModal.status === "Disetujui GM - Kirim ke Supplier" && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.yellow,
+      background: `${theme.yellow}18`,
+      padding: "8px 12px",
+      borderRadius: 8
+    }
+  }, "⚠️ PO ini sudah disetujui GM. Merevisi harga atau mata uang akan mengembalikan status ke Menunggu Approval GM."), !isLocal && /*#__PURE__*/React.createElement(Select, {
+    label: "Mata Uang",
+    value: reviseCurrency,
+    onChange: setReviseCurrency,
+    options: ["USD", "EUR", "GBP", "MYR", "Other"].map(c => ({
+      value: c,
+      label: c
+    }))
+  }), /*#__PURE__*/React.createElement(Table, {
     headers: ["Part Number", "Part Name", "Qty", "Harga Satuan", "Subtotal"],
     rows: reviseItems.map((it, i) => [it.partNumber, it.partName, fmtNum(it.qty), /*#__PURE__*/React.createElement("input", {
       type: "number",
@@ -11625,7 +12791,7 @@ function PurchaseOrderModule({
         width: 110,
         fontFamily: "inherit"
       }
-    }), fmt(it.qty * (it.harga || 0))])
+    }), fmtMoney(it.qty * (it.harga || 0), isLocal ? "IDR" : reviseCurrency)])
   }), /*#__PURE__*/React.createElement("label", {
     style: {
       display: "flex",
@@ -11651,12 +12817,12 @@ function PurchaseOrderModule({
       fontSize: 13,
       color: theme.muted
     }
-  }, "Subtotal: ", fmt(reviseSubtotal)), revisePakaiPpn && /*#__PURE__*/React.createElement("div", {
+  }, "Subtotal: ", fmtMoney(reviseSubtotal, isLocal ? "IDR" : reviseCurrency)), revisePakaiPpn && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 13,
       color: theme.muted
     }
-  }, "PPN (11%): ", fmt(revisePpnAmount)), /*#__PURE__*/React.createElement("span", {
+  }, "PPN (11%): ", fmtMoney(revisePpnAmount, isLocal ? "IDR" : reviseCurrency)), /*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.text,
       fontSize: 16,
@@ -11666,7 +12832,7 @@ function PurchaseOrderModule({
     style: {
       color: theme.green
     }
-  }, fmt(reviseTotal)))), /*#__PURE__*/React.createElement("div", {
+  }, fmtMoney(reviseTotal, isLocal ? "IDR" : reviseCurrency)))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
@@ -13321,7 +14487,9 @@ function DeliveryOrderModule({
   }), detail.catatan && /*#__PURE__*/React.createElement("p", {
     style: {
       color: theme.muted,
-      fontSize: 13
+      fontSize: 13,
+      whiteSpace: "pre-wrap",
+      wordBreak: "break-word"
     }
   }, "Catatan: ", detail.catatan), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -13476,6 +14644,7 @@ function InvoiceModule({
     tipePembayaran: "COD",
     tanggalJatuhTempo: "",
     noFakturPajak: "",
+    noPoClient: "",
     catatan: ""
   });
   const openEditInv = inv => {
@@ -13484,6 +14653,7 @@ function InvoiceModule({
       tipePembayaran: inv.tipePembayaran || "COD",
       tanggalJatuhTempo: inv.tanggalJatuhTempo || "",
       noFakturPajak: inv.noFakturPajak || "",
+      noPoClient: inv.noPoClient || "",
       catatan: inv.catatan || ""
     });
   };
@@ -13554,11 +14724,15 @@ function InvoiceModule({
   const [form, setForm] = useState({
     soNomor: "",
     terminLabel: "",
+    noPoClient: "",
     tipePembayaran: "COD",
     jatuhTempoMode: "tanggal",
     tanggalJatuhTempo: "",
     jumlahHari: "30",
     noFakturPajak: "",
+    diskonMode: "persen",
+    diskonValue: "0",
+    uangMuka: "0",
     catatan: ""
   });
   const [filter, setFilter] = useState("Semua");
@@ -13617,10 +14791,22 @@ function InvoiceModule({
     }
     const terminAmount = hasTop ? computeTerminAmount(so, form.terminLabel) : so?.total;
     const termin = hasTop ? so.termOfPayment.find(t => t.label === form.terminLabel) : null;
+    // Invoice-level Discount + PPN (11%) + Uang Muka (DP) are entered independently at invoice
+    // creation time — they no longer just inherit the SO's own diskon/pajak. Discount is taken off
+    // the invoice subtotal first, THEN PPN 11% is calculated on the discounted amount, THEN Uang
+    // Muka (down payment already received) is deducted to arrive at the invoice Total.
+    const baseSubtotal = hasTop ? terminAmount : (so?.subtotal ?? so?.total ?? 0);
+    const diskonInputValue = parseFloat(form.diskonValue) || 0;
+    const diskonNominal = form.diskonMode === "persen" ? baseSubtotal * diskonInputValue / 100 : diskonInputValue;
+    const afterDiskon = Math.max(0, baseSubtotal - diskonNominal);
+    const pajakNominal = afterDiskon * 0.11;
+    const uangMukaNominal = parseFloat(form.uangMuka) || 0;
+    const invoiceTotal = Math.max(0, afterDiskon + pajakNominal - uangMukaNominal);
     setInvoices([...invoices, {
       nomor: newNomor(),
       tanggal: today(),
       soNomor: form.soNomor,
+      noPoClient: form.noPoClient,
       customerNama: so?.customerNama,
       tipe: so?.tipe,
       items: hasTop ? [{
@@ -13633,10 +14819,12 @@ function InvoiceModule({
       terminLabel: hasTop ? form.terminLabel : null,
       terminPercent: termin?.percent ?? null,
       soTotal: so?.total,
-      subtotal: hasTop ? terminAmount : so?.subtotal,
-      diskon: hasTop ? 0 : so?.diskon,
-      pajak: hasTop ? 0 : so?.pajak,
-      total: terminAmount,
+      subtotal: baseSubtotal,
+      diskon: diskonNominal,
+      diskonPersen: form.diskonMode === "persen" ? diskonInputValue : null,
+      pajak: pajakNominal,
+      uangMuka: uangMukaNominal,
+      total: invoiceTotal,
       tipePembayaran: form.tipePembayaran,
       tanggalJatuhTempo,
       noFakturPajak: form.noFakturPajak,
@@ -13650,11 +14838,15 @@ function InvoiceModule({
     setForm({
       soNomor: "",
       terminLabel: "",
+      noPoClient: "",
       tipePembayaran: "COD",
       jatuhTempoMode: "tanggal",
       tanggalJatuhTempo: "",
       jumlahHari: "30",
       noFakturPajak: "",
+      diskonMode: "persen",
+      diskonValue: "0",
+      uangMuka: "0",
       catatan: ""
     });
   };
@@ -13697,6 +14889,7 @@ function InvoiceModule({
       tipePembayaran: inv.tipePembayaran || "COD",
       tanggalJatuhTempo: inv.tanggalJatuhTempo || "",
       noFakturPajak: inv.noFakturPajak || "",
+      noPoClient: inv.noPoClient || "",
       catatan: inv.catatan || ""
     });
   };
@@ -14209,6 +15402,13 @@ function InvoiceModule({
       noFakturPajak: v
     })
   }), /*#__PURE__*/React.createElement(Input, {
+    label: "No. Purchase Order (dari Client)",
+    value: editInvForm.noPoClient,
+    onChange: v => setEditInvForm({
+      ...editInvForm,
+      noPoClient: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
     label: "Catatan",
     multiline: true,
     value: editInvForm.catatan,
@@ -14324,7 +15524,17 @@ function InvoiceModule({
     }
   }, /*#__PURE__*/React.createElement(Badge, {
     color: approvalColor[detail.statusApproval]
-  }, detail.statusApproval), detail.noFakturPajak && /*#__PURE__*/React.createElement("p", {
+  }, detail.statusApproval), detail.noPoClient && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 13,
+      color: theme.muted
+    }
+  }, "No. Purchase Order (Client): ", /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, detail.noPoClient)), detail.noFakturPajak && /*#__PURE__*/React.createElement("p", {
     style: {
       margin: 0,
       fontSize: 13,
@@ -14368,7 +15578,18 @@ function InvoiceModule({
       color: theme.muted,
       fontSize: 13
     }
-  }, /*#__PURE__*/React.createElement("span", null, "Pajak"), /*#__PURE__*/React.createElement("span", null, fmt(detail.pajak))), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("span", null, "PPN (11%)"), /*#__PURE__*/React.createElement("span", null, fmt(detail.pajak))), detail.uangMuka > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, /*#__PURE__*/React.createElement("span", null, "Uang Muka"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.red
+    }
+  }, "-", fmt(detail.uangMuka))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
@@ -14410,14 +15631,21 @@ function InvoiceModule({
       items: detail.items.map(it => [it.unitName || it.partName, fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)]),
       subtotal: detail.subtotal,
       diskon: detail.diskon,
+      diskonLabel: detail.diskonPersen ? `Discount (${detail.diskonPersen}%)` : "Discount",
       pajak: detail.pajak,
+      pajakLabel: "PPN (11%)",
+      uangMuka: detail.uangMuka,
       total: detail.total,
       catatan: detail.catatan,
-      extraInfoRows: [["No. Sales Order", detail.soNomor], ...(detail.terminLabel ? [["Termin", `${detail.terminLabel} (${detail.terminPercent}%) dari total SO ${fmt(detail.soTotal)}`]] : []), ["Tipe Pembayaran", detail.tipePembayaran], ...(detail.noFakturPajak ? [["No. Faktur Pajak", detail.noFakturPajak]] : []), ...(detail.tipePembayaran === "TEMPO" ? [["Jatuh Tempo", detail.tanggalJatuhTempo]] : []), ["Terbayar", fmt(detail.terbayar || 0)], ["Sisa", fmt(detail.total - (detail.terbayar || 0))]],
+      extraInfoRows: [["No. Purchase Order Client", detail.noPoClient || "-"], ...(detail.terminLabel ? [["Termin", `${detail.terminLabel} (${detail.terminPercent}%) dari total SO ${fmt(detail.soTotal)}`]] : []), ["Tipe Pembayaran", detail.tipePembayaran], ...(detail.tipePembayaran === "TEMPO" ? [["Jatuh Tempo", detail.tanggalJatuhTempo]] : []), ["Terbayar", fmt(detail.terbayar || 0)], ["Sisa", fmt(detail.total - (detail.terbayar || 0))]],
       terbilangText: terbilang(detail.total),
-      bankInfoText: "No. Rekening PT Foresta Transtek: (akan disusulkan)",
-      dibuatOleh: employees.find(e => e.nama === detail.createdBy),
-      disetujuiOleh: employees.find(e => ["owner", "gm"].includes(e.role))
+      bankInfoText: "BCA KCP Sunter Bisma<br/>A/N PT. FORESTA TRANSTEK<br/>A/C 5820822678",
+      hideCreatedBy: true,
+      disetujuiLabel: "Disetujui Oleh",
+      disetujuiOleh: {
+        nama: "Effendi Husin",
+        jabatan: "Presiden Direktur"
+      }
     })
   })), detail.statusApproval !== "Disetujui GM" && /*#__PURE__*/React.createElement("p", {
     style: {
@@ -14439,16 +15667,30 @@ function InvoiceModule({
   }, /*#__PURE__*/React.createElement(Select, {
     label: "Sales Order",
     value: form.soNomor,
-    onChange: v => setForm({
-      ...form,
-      soNomor: v,
-      terminLabel: ""
-    }),
+    onChange: v => {
+      const pickedSO = availableSO.find(so => so.nomor === v);
+      setForm({
+        ...form,
+        soNomor: v,
+        terminLabel: "",
+        // Auto-fill from the SO's own client PO number if it has one and the field isn't
+        // already filled in manually — sales manager can still override it.
+        noPoClient: form.noPoClient || pickedSO?.noPoClient || ""
+      });
+    },
     options: availableSO.map(so => ({
       value: so.nomor,
       label: `${so.nomor} — ${so.customerNama} — ${fmt(so.total)}`
     })),
     required: true
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "No. Purchase Order (dari Client)",
+    value: form.noPoClient,
+    onChange: v => setForm({
+      ...form,
+      noPoClient: v
+    }),
+    placeholder: "Nomor PO yang diberikan oleh client"
   }), selectedSO && selectedSORemainingTermin && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Select, {
     label: "Termin (Term of Payment terkunci dari Quotation)",
     value: form.terminLabel,
@@ -14568,7 +15810,97 @@ function InvoiceModule({
     style: {
       color: theme.text
     }
-  }, addDays(today(), form.jumlahHari)))), /*#__PURE__*/React.createElement(Input, {
+  }, addDays(today(), form.jumlahHari)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: `1px solid ${theme.border}`,
+      borderRadius: 10,
+      padding: 14,
+      display: "flex",
+      flexDirection: "column",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 13,
+      color: theme.muted,
+      fontWeight: 600
+    }
+  }, "DISCOUNT, PPN & UANG MUKA"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      fontSize: 13,
+      color: theme.text,
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "radio",
+    checked: form.diskonMode === "persen",
+    onChange: () => setForm({
+      ...form,
+      diskonMode: "persen"
+    })
+  }), " Discount %"), /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      fontSize: 13,
+      color: theme.text,
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "radio",
+    checked: form.diskonMode === "nominal",
+    onChange: () => setForm({
+      ...form,
+      diskonMode: "nominal"
+    })
+  }), " Discount Nominal (Rp)")), /*#__PURE__*/React.createElement(Input, {
+    label: form.diskonMode === "persen" ? "Discount (%)" : "Discount (Rp)",
+    value: form.diskonValue,
+    onChange: v => setForm({
+      ...form,
+      diskonValue: v
+    }),
+    type: "number",
+    min: "0",
+    placeholder: "0"
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Uang Muka / Down Payment (Rp)",
+    value: form.uangMuka,
+    onChange: v => setForm({
+      ...form,
+      uangMuka: v
+    }),
+    type: "number",
+    min: "0",
+    placeholder: "0"
+  }), form.soNomor && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      background: theme.surface,
+      borderRadius: 8,
+      padding: "8px 10px"
+    }
+  }, (() => {
+    const previewSubtotal = form.terminLabel ? computeTerminAmount(selectedSO, form.terminLabel) : selectedSO?.total || 0;
+    const previewDiskonValue = parseFloat(form.diskonValue) || 0;
+    const previewDiskon = form.diskonMode === "persen" ? previewSubtotal * previewDiskonValue / 100 : previewDiskonValue;
+    const previewAfterDiskon = Math.max(0, previewSubtotal - previewDiskon);
+    const previewPajak = previewAfterDiskon * 0.11;
+    const previewUangMuka = parseFloat(form.uangMuka) || 0;
+    const previewTotal = Math.max(0, previewAfterDiskon + previewPajak - previewUangMuka);
+    return `Subtotal ${fmt(previewSubtotal)} − Discount ${fmt(previewDiskon)} + PPN 11% ${fmt(previewPajak)} − Uang Muka ${fmt(previewUangMuka)} = Total ${fmt(previewTotal)}`;
+  })())), /*#__PURE__*/React.createElement(Input, {
     label: "No. Faktur Pajak (Opsional)",
     value: form.noFakturPajak,
     onChange: v => setForm({
@@ -15968,7 +17300,12 @@ function TicketingModule({
   }, detail.soNomors.map(n => /*#__PURE__*/React.createElement(Badge, {
     key: n,
     color: theme.purple
-  }, n))), detail.catatan && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+  }, n))), detail.catatan && /*#__PURE__*/React.createElement("div", {
+    style: {
+      whiteSpace: "pre-wrap",
+      wordBreak: "break-word"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.muted
     }
@@ -16197,7 +17534,11 @@ function printDocument({
   itemHeaders,
   subtotal,
   diskon,
+  diskonLabel = "Diskon",
   pajak,
+  pajakLabel = "Pajak",
+  uangMuka,
+  uangMukaLabel = "Uang Muka",
   total,
   extraInfoRows,
   catatan,
@@ -16206,9 +17547,12 @@ function printDocument({
   dibuatOleh,
   disetujuiOleh,
   disetujuiLabel = "Disetujui oleh",
+  dibuatOlehLabel = "Dibuat oleh",
+  hideCreatedBy = false,
   company,
   bankInfoText,
-  terbilangText
+  terbilangText,
+  currency
 }) {
   // Always use the live company settings from the Setting Perusahaan module (falls back to
   // the original hardcoded defaults only if a caller hasn't been updated to pass it yet).
@@ -16221,7 +17565,7 @@ function printDocument({
     alert("Popup diblokir browser. Izinkan popup untuk mencetak dokumen.");
     return;
   }
-  const rows = items.map(r => `<tr>${r.map(c => `<td style="padding:8px 10px;border-bottom:1px solid #ddd;font-size:13px;">${c}</td>`).join("")}</tr>`).join("");
+  const rows = items.map(r => `<tr>${r.map(c => `<td style="padding:8px 10px;border-bottom:1px solid #ddd;font-size:13px;white-space:pre-wrap;word-break:break-word;">${c}</td>`).join("")}</tr>`).join("");
   const headerCols = itemHeaders.map(h => `<th style="padding:8px 10px;text-align:left;font-size:12px;color:#555;border-bottom:2px solid #333;">${h}</th>`).join("");
   const extraRowsHtml = (extraInfoRows || []).map(([k, v]) => `<div style="display:flex;justify-content:space-between;font-size:13px;padding:2px 0;"><span style="color:#666;">${k}</span><span style="font-weight:600;">${v}</span></div>`).join("");
   const paymentTermsHtml = (paymentTerms || []).length ? `
@@ -16236,7 +17580,7 @@ function printDocument({
           <tbody>${paymentTerms.map(t => `<tr><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:13px;">${t.label}</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:13px;">${t.percent}%</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:13px;">${t.note || "-"}</td></tr>`).join("")}</tbody>
         </table>
       </div>` : "";
-  const sigBlock = person => person ? `${person.signature ? `<img src="${person.signature}" style="max-height:50px;display:block;margin:0 auto 6px;" />` : "<br/><br/><br/>"}____________________<br/>${person.nama}` : "<br/><br/><br/>____________________";
+  const sigBlock = person => person ? `${person.signature ? `<img src="${person.signature}" style="max-height:50px;display:block;margin:0 auto 6px;" />` : "<br/><br/><br/>"}____________________<br/>${person.nama}${person.jabatan ? `<br/><span style="font-size:11px;color:#666;">${person.jabatan}</span>` : ""}` : "<br/><br/><br/>____________________";
   win.document.write(`
     <html><head><title>${docTitle} - ${nomor}</title>
     <style>
@@ -16256,7 +17600,8 @@ function printDocument({
           ${co.logo ? `<img src="${co.logo}" style="max-height:56px;max-width:120px;object-fit:contain;" />` : ""}
           <div>
             <div class="company">${co.nama}</div>
-            <div style="font-size:12px;color:#666;margin-top:4px;">${co.telepon} · ${co.email}${co.npwp ? ` · NPWP: ${co.npwp}` : ""}</div>
+            ${co.alamat ? `<div style="font-size:12px;color:#666;margin-top:2px;">${co.alamat}</div>` : ""}
+            <div style="font-size:12px;color:#666;margin-top:2px;">${co.telepon} · ${co.email}${co.npwp ? ` · NPWP: ${co.npwp}` : ""}</div>
           </div>
         </div>
         <div>
@@ -16276,20 +17621,21 @@ function printDocument({
       </table>
       ${showPrice ? `
       <div class="totals">
-        <div class="row"><span>Subtotal</span><span>${fmt(subtotal)}</span></div>
-        ${diskon ? `<div class="row"><span>Diskon</span><span>-${fmt(diskon)}</span></div>` : ""}
-        ${pajak ? `<div class="row"><span>Pajak</span><span>${fmt(pajak)}</span></div>` : ""}
-        <div class="row final"><span>TOTAL</span><span>${fmt(total)}</span></div>
+        <div class="row"><span>Subtotal</span><span>${fmtMoney(subtotal, currency)}</span></div>
+        ${diskon ? `<div class="row"><span>${diskonLabel}</span><span>-${fmtMoney(diskon, currency)}</span></div>` : ""}
+        ${pajak ? `<div class="row"><span>${pajakLabel}</span><span>${fmtMoney(pajak, currency)}</span></div>` : ""}
+        ${uangMuka ? `<div class="row"><span>${uangMukaLabel}</span><span>-${fmtMoney(uangMuka, currency)}</span></div>` : ""}
+        <div class="row final"><span>TOTAL</span><span>${fmtMoney(total, currency)}</span></div>
       </div>
       ${terbilangText ? `<div style="text-align:right;font-size:11px;color:#666;font-style:italic;margin-top:4px;">Terbilang: ${terbilangText}</div>` : ""}` : ""}
       ${bankInfoText ? `<div style="margin-top:16px;background:#f5f5f5;border-radius:8px;padding:10px 14px;font-size:12px;"><strong>Informasi Pembayaran:</strong><br/>${bankInfoText}</div>` : ""}
       ${paymentTermsHtml}
-      ${catatan ? `<div style="margin-top:24px;font-size:12px;color:#666;"><strong>Catatan:</strong> ${catatan}</div>` : ""}
-      <div style="margin-top:60px;display:flex;justify-content:space-between;font-size:12px;">
-        <div style="text-align:center;width:200px;">Dibuat oleh<br/><br/>${sigBlock(dibuatOleh)}</div>
+      ${catatan ? `<div style="margin-top:24px;font-size:12px;color:#666;white-space:pre-wrap;word-break:break-word;"><strong>Catatan:</strong> ${String(catatan).replace(/</g, "&lt;")}</div>` : ""}
+      <div style="margin-top:60px;display:flex;justify-content:${hideCreatedBy ? "center" : "space-between"};font-size:12px;">
+        ${hideCreatedBy ? "" : `<div style="text-align:center;width:200px;">${dibuatOlehLabel}<br/><br/>${sigBlock(dibuatOleh)}</div>`}
         <div style="text-align:center;width:200px;">${disetujuiLabel}<br/><br/>${sigBlock(disetujuiOleh)}</div>
       </div>
-      <div style="margin-top:40px;text-align:center;font-style:italic;font-size:8px;color:#888;border-top:1px solid #ddd;padding-top:10px;line-height:1.5;">
+      <div style="margin-top:40px;text-align:center;font-style:italic;font-size:7px;color:#888;border-top:1px solid #ddd;padding-top:10px;line-height:1.5;">
         DISCLAIMER<br/>
         "Dokumen ini telah diterbitkan dan ditandatangani secara elektronik melalui sistem PT FORESTA TRANSTEK sehingga sah dan mengikat secara hukum tanpa memerlukan tanda tangan basah maupun stempel perusahaan, sesuai dengan ketentuan UU ITE No. 11 Tahun 2008.<br/>
         Lampiran ini merupakan bukti sah dan hanya berlaku sesuai dengan nomor, tanggal, serta syarat dan ketentuan yang tercantum di dalamnya.<br/>
@@ -16328,7 +17674,7 @@ function ClientHistoryModule({
   } = store;
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   const [selectedId, setSelectedId] = useState("");
-  const visibleCustomers = isOwnerLike ? customers : customers.filter(c => c.salesManager === session.nama);
+  const visibleCustomers = isOwnerLike ? customers : customers.filter(c => customerAccessibleBy(c, session));
   const cust = customers.find(c => c.id === selectedId);
   const myQuotU = quotationsUnit.filter(q => q.customerId === selectedId || q.customerNama === cust?.nama);
   const myQuotPS = quotationsPS.filter(q => q.customerId === selectedId || q.customerNama === cust?.nama);
@@ -16770,8 +18116,10 @@ function MaintenanceScheduleModule({
       label: "Terlambat",
       color: theme.red
     };
-    if (diffDays <= 14) return {
-      label: "Segera (≤14 hari)",
+    // Service cycle is 3 months — fire the warning once 2 months have elapsed since last service
+    // (i.e. once only ~1 month remains until the next due date), not just in the final 2 weeks.
+    if (diffDays <= 30) return {
+      label: "Segera (1 Bulan Lagi Harus Diservice)",
       color: theme.yellow
     };
     return {
@@ -17101,19 +18449,25 @@ function WorkshopDashboardModule({
   const overdueMaint = maintenanceSchedules.filter(m => getDueBadge(m.nextDueDate, m.status).label === "Terlambat");
   const soonMaint = maintenanceSchedules.filter(m => getDueBadge(m.nextDueDate, m.status).label === "Segera");
   const unassignedMaint = maintenanceSchedules.filter(m => m.status === "Terjadwal" && !m.assignedMekanik);
-  const mekanikNames = [...new Set(visits.map(v => v.mekanikNama))];
+  const mekanikNames = [...new Set([...visits.map(v => v.mekanikNama), ...dars.map(d => d.mekanikNama)].filter(Boolean))];
   const mekanikStats = mekanikNames.map(nama => {
     const myStatus = statusReports.filter(s => s.mekanikNama === nama);
     const jobSelesai = myStatus.filter(s => s.statusPekerjaan === "Selesai").length;
     const myRecs = partRecs.filter(r => r.mekanikNama === nama);
     const recsApproved = myRecs.filter(r => r.status !== "Menunggu Approval Septi" && r.status !== "Ditolak Septi").length;
+    const myDars = dars.filter(d => d.mekanikNama === nama);
+    const darsApproved = myDars.filter(d => d.status !== "Menunggu Approval Septi" && d.status !== "Ditolak Septi").length;
     return {
       nama,
       totalVisit: visits.filter(v => v.mekanikNama === nama).length,
       jobSelesai,
-      recsApproved
+      recsApproved,
+      totalDar: myDars.length,
+      darsApproved
     };
   }).sort((a, b) => b.jobSelesai - a.jobSelesai);
+  const [mekanikSearch, setMekanikSearch] = useState("");
+  const mekanikStatsFiltered = mekanikSearch.trim() ? mekanikStats.filter(m => m.nama.toLowerCase().includes(mekanikSearch.trim().toLowerCase())) : mekanikStats;
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -17220,13 +18574,24 @@ function WorkshopDashboardModule({
       color: theme.text,
       fontSize: 15
     }
-  }, "Performa Mekanik (Real-time)"), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Mekanik", "Total Kunjungan", "Job Selesai", "Part Rec. Disetujui"],
-    rows: mekanikStats.map(m => [m.nama, m.totalVisit, /*#__PURE__*/React.createElement("span", {
+  }, "Performa Mekanik (Real-time)"), /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari nama mekanik...",
+    value: mekanikSearch,
+    onChange: setMekanikSearch,
+    style: {
+      marginBottom: 12
+    }
+  }), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Mekanik", "Total Kunjungan", "Job Selesai", "Total DAR", "DAR Disetujui", "Part Rec. Disetujui"],
+    rows: mekanikStatsFiltered.map(m => [m.nama, m.totalVisit, /*#__PURE__*/React.createElement("span", {
       style: {
         color: theme.green
       }
-    }, m.jobSelesai), /*#__PURE__*/React.createElement("span", {
+    }, m.jobSelesai), m.totalDar, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.cyan
+      }
+    }, m.darsApproved), /*#__PURE__*/React.createElement("span", {
       style: {
         color: theme.purple
       }
@@ -17584,7 +18949,7 @@ function SalesActivityModule({
   const myActivitiesAll = isSalesManager ? salesActivities.filter(a => a.salesUsername === session.username) : salesActivities;
   const [saSearch, setSaSearch] = useState("");
   const myActivities = saSearch.trim() ? myActivitiesAll.filter(a => [a.salesNama, a.customerNama, a.jenisAktivitas, a.catatan].filter(Boolean).some(x => String(x).toLowerCase().includes(saSearch.trim().toLowerCase()))) : myActivitiesAll;
-  const myCustomers = isSalesManager ? customers.filter(c => c.salesManager === session.nama) : customers;
+  const myCustomers = isSalesManager ? customers.filter(c => customerAccessibleBy(c, session)) : customers;
   const opsCoa = coa.filter(c => c.perOrang);
   const addBiaya = () => {
     const c = coa.find(x => x.kode === biayaForm.coaKode);
@@ -17723,7 +19088,9 @@ function SalesActivityModule({
         color: theme.accentLight
       },
       onClick: () => setDetail(a)
-    }, fmt(a.totalBiaya)), a.catatan]),
+    }, fmt(a.totalBiaya)), /*#__PURE__*/React.createElement("span", {
+      style: catatanStyle
+    }, a.catatan)]),
     emptyMsg: "Belum ada aktivitas tercatat"
   })), /*#__PURE__*/React.createElement(Modal, {
     open: !!detail,
@@ -18128,9 +19495,11 @@ function FormCutiModule({
     attendance,
     setAttendance,
     leaveRequests,
-    setLeaveRequests
+    setLeaveRequests,
+    employees
   } = store;
-  const isApprover = hasPayrollAccess(session.role); // owner / gm / hrd_payroll
+  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
+  const isApprover = isOwnerLike || session.role === "hrd_payroll"; // HO1/HO2/HO3 + HRD1 can approve, and create leave on behalf of staff
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState(null);
   const [detailForm, setDetailForm] = useState(null);
@@ -18145,7 +19514,8 @@ function FormCutiModule({
   const emptyForm = {
     alasan: "",
     dariTanggal: today(),
-    sampaiTanggal: today()
+    sampaiTanggal: today(),
+    targetUsername: session.username
   };
   const [form, setForm] = useState(emptyForm);
   const countDays = (dari, sampai) => {
@@ -18176,26 +19546,61 @@ function FormCutiModule({
     if (!form.alasan.trim()) return alert("Alasan Cuti wajib diisi");
     if (!form.dariTanggal || !form.sampaiTanggal) return alert("Dari Tanggal dan Sampai Tanggal wajib diisi");
     if (form.sampaiTanggal < form.dariTanggal) return alert("Sampai Tanggal tidak boleh sebelum Dari Tanggal");
+    const targetUsername = form.targetUsername || session.username;
+    const isOnBehalf = isApprover && targetUsername !== session.username;
+    const targetEmp = employees.find(e => e.username === targetUsername);
+    const targetNama = isOnBehalf ? targetEmp?.nama || targetUsername : session.nama;
     const req = {
       id: newNomor(),
-      username: session.username,
-      nama: session.nama,
+      username: targetUsername,
+      nama: targetNama,
       alasan: form.alasan,
       dariTanggal: form.dariTanggal,
       sampaiTanggal: form.sampaiTanggal,
       jumlahHari: countDays(form.dariTanggal, form.sampaiTanggal),
-      status: "Menunggu Approval HRD",
-      diajukanTanggal: today()
+      status: isOnBehalf ? "Menunggu Konfirmasi Staff" : "Menunggu Approval HRD",
+      diajukanTanggal: today(),
+      createdOnBehalf: isOnBehalf,
+      createdByNama: isOnBehalf ? session.nama : null
     };
     setLeaveRequests([...leaveRequests, req]);
     logAudit(store, session, {
       module: "Form Cuti",
       docNomor: req.id,
-      action: "Ajukan Cuti",
-      detail: `${req.jumlahHari} hari (${req.dariTanggal} s/d ${req.sampaiTanggal})`
+      action: isOnBehalf ? "Ajukan Cuti (atas nama staff)" : "Ajukan Cuti",
+      detail: `${isOnBehalf ? `Untuk ${targetNama} — ` : ""}${req.jumlahHari} hari (${req.dariTanggal} s/d ${req.sampaiTanggal})`
     });
     setModal(false);
     setForm(emptyForm);
+  };
+  const staffConfirm = req => {
+    approve(req);
+    logAudit(store, session, {
+      module: "Form Cuti",
+      docNomor: req.id,
+      action: "Konfirmasi Staff",
+      detail: `${req.nama} mengonfirmasi cuti yang diajukan oleh ${req.createdByNama}`
+    });
+  };
+  const staffDispute = req => {
+    const reason = prompt("Alasan tidak sesuai / bantahan:");
+    if (!reason) return;
+    const arr = [...leaveRequests];
+    arr[leaveRequests.indexOf(req)] = {
+      ...req,
+      status: "Ditolak",
+      rejectReason: `Dibantah oleh staff: ${reason}`,
+      approvedBy: session.nama,
+      approvedTanggal: today()
+    };
+    setLeaveRequests(arr);
+    logAudit(store, session, {
+      module: "Form Cuti",
+      docNomor: req.id,
+      action: "Bantah Cuti",
+      detail: reason
+    });
+    setDetail(null);
   };
   const approve = (req, formOverride) => {
     const merged = formOverride ? {
@@ -18271,10 +19676,19 @@ function FormCutiModule({
   };
   const statusColor = {
     "Menunggu Approval HRD": theme.yellow,
+    "Menunggu Konfirmasi Staff": theme.cyan,
     Disetujui: theme.green,
     Ditolak: theme.red
   };
   const pendingCount = leaveRequests.filter(r => r.status === "Menunggu Approval HRD").length;
+  const myPendingConfirm = leaveRequests.filter(r => r.status === "Menunggu Konfirmasi Staff" && r.username === session.username);
+  const targetOptions = [{
+    value: session.username,
+    label: `${session.nama} (Saya)`
+  }, ...employees.filter(e => e.username !== session.username).map(e => ({
+    value: e.username,
+    label: e.nama
+  }))];
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -18347,7 +19761,72 @@ function FormCutiModule({
       color: theme.yellow,
       marginTop: 6
     }
-  }, pendingCount))), isApprover && pendingCount > 0 && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+  }, pendingCount))), myPendingConfirm.length > 0 && /*#__PURE__*/React.createElement(Card, {
+    style: {
+      background: theme.cyan + "11",
+      border: `1px solid ${theme.cyan}44`
+    }
+  }, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.cyan,
+      fontSize: 15
+    }
+  }, "📋 Konfirmasi Cuti Anda"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 10px",
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Cuti berikut diajukan atas nama Anda oleh HO/HRD — konfirmasi jika sudah benar, atau bantah jika tidak sesuai."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 10
+    }
+  }, myPendingConfirm.map(r => /*#__PURE__*/React.createElement("div", {
+    key: r.id,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      flexWrap: "wrap",
+      gap: 10,
+      padding: "10px 14px",
+      background: theme.surface,
+      borderRadius: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, r.dariTanggal, " s/d ", r.sampaiTanggal, " (", r.jumlahHari, " hari)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: theme.muted,
+      fontSize: 13,
+      marginTop: 2
+    }
+  }, r.alasan), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: theme.muted,
+      fontSize: 12,
+      marginTop: 2
+    }
+  }, "Diajukan oleh ", r.createdByNama)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "success",
+    onClick: () => staffConfirm(r)
+  }, "✓ Konfirmasi"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "danger",
+    onClick: () => staffDispute(r)
+  }, "✗ Tidak Sesuai")))))), isApprover && pendingCount > 0 && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
     style: {
       margin: "0 0 12px",
       color: theme.text,
@@ -18436,16 +19915,30 @@ function FormCutiModule({
       flexDirection: "column",
       gap: 14
     }
-  }, /*#__PURE__*/React.createElement("div", {
+  }, isApprover && /*#__PURE__*/React.createElement(Select, {
+    label: "Ajukan Untuk",
+    value: form.targetUsername,
+    onChange: v => setForm({
+      ...form,
+      targetUsername: v
+    }),
+    options: targetOptions
+  }), form.targetUsername && form.targetUsername !== session.username && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.cyan
+    }
+  }, "ℹ️ Cuti ini akan diajukan atas nama staff tersebut dan menunggu konfirmasi dari mereka sebelum berlaku."), /*#__PURE__*/React.createElement("div", {
     style: {
       color: theme.muted,
       fontSize: 13
     }
   }, "Sisa jatah cuti tahun ", currentYear, ": ", /*#__PURE__*/React.createElement("strong", {
     style: {
-      color: mySisaCuti > 0 ? theme.green : theme.red
+      color: sisaCuti(form.targetUsername || session.username) > 0 ? theme.green : theme.red
     }
-  }, mySisaCuti, " hari")), /*#__PURE__*/React.createElement(Input, {
+  }, sisaCuti(form.targetUsername || session.username), " hari")), /*#__PURE__*/React.createElement(Input, {
     label: "Alasan Cuti",
     value: form.alasan,
     onChange: v => setForm({
@@ -18484,7 +19977,7 @@ function FormCutiModule({
       color: theme.text,
       fontSize: 13
     }
-  }, "Jumlah hari: ", /*#__PURE__*/React.createElement("strong", null, jumlahHariForm), jumlahHariForm > mySisaCuti && /*#__PURE__*/React.createElement("span", {
+  }, "Jumlah hari: ", /*#__PURE__*/React.createElement("strong", null, jumlahHariForm), jumlahHariForm > sisaCuti(form.targetUsername || session.username) && /*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.red,
       marginLeft: 8
@@ -18513,7 +20006,12 @@ function FormCutiModule({
       flexDirection: "column",
       gap: 10
     }
-  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Nama: "), detail.nama), isApprover && detail.status === "Menunggu Approval HRD" && detailForm ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Input, {
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Nama: "), detail.nama), detail.createdOnBehalf && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: theme.cyan,
+      fontSize: 12
+    }
+  }, "Diajukan atas nama staff oleh ", detail.createdByNama), isApprover && detail.status === "Menunggu Approval HRD" && detailForm ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Input, {
     label: "Alasan Cuti",
     value: detailForm.alasan,
     onChange: v => setDetailForm({
@@ -18578,7 +20076,21 @@ function FormCutiModule({
   }, "✓ Approve"), /*#__PURE__*/React.createElement(Btn, {
     variant: "danger",
     onClick: () => reject(detail)
-  }, "✗ Tolak")))));
+  }, "✗ Tolak")), detail.status === "Menunggu Konfirmasi Staff" && detail.username === session.username && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "success",
+    onClick: () => {
+      staffConfirm(detail);
+      setDetail(null);
+    }
+  }, "✓ Konfirmasi"), /*#__PURE__*/React.createElement(Btn, {
+    variant: "danger",
+    onClick: () => staffDispute(detail)
+  }, "✗ Tidak Sesuai")))));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -19143,37 +20655,70 @@ function WorkshopOpsModule({
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   const canSeeAll = isOwnerLike || session.username === "accounting1";
   const visibleExpenses = canSeeAll ? workshopOpsExpenses : workshopOpsExpenses.filter(e => e.inputUsername ? e.inputUsername === session.username : e.inputBy === session.nama);
-  const [modal, setModal] = useState(false);
-  const [form, setForm] = useState({
+  const blankWopsForm = {
     tanggal: today(),
     coaKode: "",
     nominal: "",
     kategori: "Workshop",
     kategoriLainnya: "",
     catatan: ""
-  });
+  };
+  const [modal, setModal] = useState(false);
+  const [form, setForm] = useState(blankWopsForm);
+  const [editingExpenseId, setEditingExpenseId] = useState(null);
+  const canEditEntry = e => canSeeAll || (e.inputUsername ? e.inputUsername === session.username : e.inputBy === session.nama);
   const save = () => {
     const c = coa.find(x => x.kode === form.coaKode);
     if (!c || !form.nominal) return alert("Pilih jenis biaya dan isi nominal");
     if (form.kategori === "Other" && !form.kategoriLainnya.trim()) return alert("Isi kategori (Other) secara manual");
-    setWorkshopOpsExpenses([...workshopOpsExpenses, {
-      id: "WOPS-" + uid(),
-      ...form,
-      kategoriLabel: form.kategori === "Other" ? form.kategoriLainnya.trim() : form.kategori,
-      coaNama: c.nama,
-      nominal: parseFloat(form.nominal) || 0,
-      inputBy: session.nama,
-      inputUsername: session.username
-    }]);
+    if (editingExpenseId) {
+      const idx = workshopOpsExpenses.findIndex(e => e.id === editingExpenseId);
+      if (idx >= 0) {
+        const arr = [...workshopOpsExpenses];
+        arr[idx] = {
+          ...arr[idx],
+          ...form,
+          kategoriLabel: form.kategori === "Other" ? form.kategoriLainnya.trim() : form.kategori,
+          coaNama: c.nama,
+          nominal: parseFloat(form.nominal) || 0
+        };
+        setWorkshopOpsExpenses(arr);
+      }
+    } else {
+      setWorkshopOpsExpenses([...workshopOpsExpenses, {
+        id: "WOPS-" + uid(),
+        ...form,
+        kategoriLabel: form.kategori === "Other" ? form.kategoriLainnya.trim() : form.kategori,
+        coaNama: c.nama,
+        nominal: parseFloat(form.nominal) || 0,
+        inputBy: session.nama,
+        inputUsername: session.username
+      }]);
+    }
     setModal(false);
+    setEditingExpenseId(null);
+    setForm(blankWopsForm);
+  };
+  const onEditExpense = i => {
+    const e = visibleExpensesFiltered[i];
+    if (!canEditEntry(e)) return alert("Anda hanya dapat merevisi pengeluaran yang Anda input sendiri.");
     setForm({
-      tanggal: today(),
-      coaKode: "",
-      nominal: "",
-      kategori: "Workshop",
-      kategoriLainnya: "",
-      catatan: ""
+      tanggal: e.tanggal,
+      coaKode: e.coaKode,
+      nominal: String(e.nominal),
+      kategori: e.kategori,
+      kategoriLainnya: e.kategoriLainnya || "",
+      catatan: e.catatan || ""
     });
+    setEditingExpenseId(e.id);
+    setModal(true);
+  };
+  const onDeleteExpense = i => {
+    const e = visibleExpensesFiltered[i];
+    if (!canEditEntry(e)) return alert("Anda hanya dapat menghapus pengeluaran yang Anda input sendiri.");
+    if (confirm("Hapus pengeluaran ini?")) {
+      setWorkshopOpsExpenses(workshopOpsExpenses.filter(x => x.id !== e.id));
+    }
   };
   const totalBulanIni = visibleExpenses.filter(e => e.tanggal.slice(0, 7) === today().slice(0, 7)).reduce((s, e) => s + e.nominal, 0);
   const [wopsSearch, setWopsSearch] = useState("");
@@ -19240,12 +20785,20 @@ function WorkshopOpsModule({
     }
   }), /*#__PURE__*/React.createElement(Table, {
     headers: ["Tanggal", "Kategori", "Jenis Biaya", "Nominal", "Catatan", "Input Oleh"],
-    rows: visibleExpensesFiltered.map(e => [e.tanggal, e.kategoriLabel || e.kategori || "-", e.coaNama, fmt(e.nominal), e.catatan, e.inputBy]),
-    emptyMsg: "Belum ada pengeluaran tercatat"
+    rows: visibleExpensesFiltered.map(e => [e.tanggal, e.kategoriLabel || e.kategori || "-", e.coaNama, fmt(e.nominal), /*#__PURE__*/React.createElement("span", {
+      style: catatanStyle
+    }, e.catatan), e.inputBy]),
+    emptyMsg: "Belum ada pengeluaran tercatat",
+    onEdit: onEditExpense,
+    onDelete: onDeleteExpense
   })), /*#__PURE__*/React.createElement(Modal, {
     open: modal,
-    title: "Catat Pengeluaran Workshop",
-    onClose: () => setModal(false)
+    title: editingExpenseId ? "Revisi Pengeluaran Workshop" : "Catat Pengeluaran Workshop",
+    onClose: () => {
+      setModal(false);
+      setEditingExpenseId(null);
+      setForm(blankWopsForm);
+    }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -19819,8 +21372,10 @@ function ComingSoon({
 // USER MANAGEMENT
 // ════════════════════════════════════════════════════════════════════════════
 function UserManagement({
-  currentUser
+  currentUser,
+  store
 }) {
+  const isOwnerLike = currentUser.role === "owner" || currentUser.role === "gm" || currentUser.role === "finance_director";
   const [users, setUsersRaw] = useState([]);
   const [modal, setModal] = useState(false);
   const [form, setForm] = useState({
@@ -19831,6 +21386,10 @@ function UserManagement({
   });
   const [editIdx, setEditIdx] = useState(null);
   const [search, setSearch] = useState("");
+  const [resetModal, setResetModal] = useState(null);
+  const [resetTempPass, setResetTempPass] = useState("");
+  const [accessModal, setAccessModal] = useState(null);
+  const [accessList, setAccessList] = useState([]);
   const loadUsers = async () => {
     const {
       data,
@@ -19894,6 +21453,60 @@ function UserManagement({
     if (error) return alert("Gagal mengubah status: " + error.message);
     await loadUsers();
   };
+  const deleteUser = async i => {
+    const u = filtered[i];
+    if (u.username === currentUser.username) return alert("Tidak bisa menghapus diri sendiri");
+    if (!confirm(`Hapus user ${u.nama} (${u.username}) dari ERP? Akun ini akan hilang dari daftar user & tidak bisa lagi mengakses aplikasi. Login Supabase Auth-nya perlu dihapus terpisah oleh admin teknis via Supabase Dashboard.`)) return;
+    const {
+      error
+    } = await sb.from("profiles").delete().eq("id", u.id);
+    if (error) return alert("Gagal menghapus user: " + error.message);
+    if (store) logAudit(store, currentUser, {
+      module: "Manajemen User",
+      docNomor: u.username,
+      action: "Hapus User",
+      detail: `${u.nama} (${ROLE_DEFS[u.role]?.label || u.role})`
+    });
+    await loadUsers();
+  };
+  const openAccessModal = u => {
+    setAccessModal(u);
+    setAccessList(u.customModules && Array.isArray(u.customModules) ? [...u.customModules] : getAllowedModules(u.role, null));
+  };
+  const toggleAccessModule = id => setAccessList(list => list.includes(id) ? list.filter(x => x !== id) : [...list, id]);
+  const saveAccess = async () => {
+    const {
+      error
+    } = await sb.from("profiles").update({
+      custom_modules: accessList
+    }).eq("id", accessModal.id);
+    if (error) return alert("Gagal menyimpan akses modul: " + error.message);
+    if (store) logAudit(store, currentUser, {
+      module: "Manajemen User",
+      docNomor: accessModal.username,
+      action: "Ubah Akses Modul",
+      detail: `${accessModal.nama} — ${accessList.length} modul diaktifkan`
+    });
+    await loadUsers();
+    setAccessModal(null);
+  };
+  const openResetPassword = u => {
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
+    let temp = "";
+    for (let i = 0; i < 10; i++) temp += chars[Math.floor(Math.random() * chars.length)];
+    setResetTempPass(temp);
+    setResetModal(u);
+  };
+  const confirmResetRequest = () => {
+    if (store) logAudit(store, currentUser, {
+      module: "Manajemen User",
+      docNomor: resetModal.username,
+      action: "Request Reset Password",
+      detail: `Diminta oleh ${currentUser.nama} — password sementara diusulkan: ${resetTempPass} (harus diterapkan admin teknis via Supabase Dashboard → Authentication → Users)`
+    });
+    alert("Permintaan reset password dicatat di Audit Trail. Sampaikan password sementara ini ke admin teknis untuk diterapkan lewat Supabase Dashboard, lalu minta user mengganti password saat login berikutnya.");
+    setResetModal(null);
+  };
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -19927,7 +21540,16 @@ function UserManagement({
     }
   }), /*#__PURE__*/React.createElement(Btn, {
     onClick: () => alert("Membuat login baru harus dilakukan lewat Supabase dashboard oleh admin teknis (butuh service_role key, tidak aman dilakukan dari browser). Hubungi developer untuk menambah user baru.")
-  }, "+ Tambah User"))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
+  }, "+ Tambah User"))), isOwnerLike && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      background: theme.surface,
+      padding: "8px 14px",
+      borderRadius: 8,
+      border: `1px dashed ${theme.border}`
+    }
+  }, "ℹ️ ", /*#__PURE__*/React.createElement("strong", null, "Super User"), " (akses penuh tanpa batas di seluruh modul): HO1 (Owner), HO2 (GM), HO3 (Finance Director). Hanya Super User yang dapat menghapus akun & memproses reset password di sini."), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
     headers: ["Nama", "Username", "Role", "Status"],
     rows: filtered.map((u, i) => [u.nama, /*#__PURE__*/React.createElement("span", {
       style: {
@@ -19935,7 +21557,14 @@ function UserManagement({
       }
     }, u.username), /*#__PURE__*/React.createElement(Badge, {
       color: ROLE_DEFS[u.role]?.color
-    }, ROLE_DEFS[u.role]?.label), /*#__PURE__*/React.createElement("button", {
+    }, ROLE_DEFS[u.role]?.label), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        flexWrap: "wrap"
+      }
+    }, /*#__PURE__*/React.createElement("button", {
       onClick: () => toggleAktif(i),
       style: {
         background: "none",
@@ -19944,9 +21573,121 @@ function UserManagement({
       }
     }, /*#__PURE__*/React.createElement(Badge, {
       color: u.aktif ? theme.green : theme.red
-    }, u.aktif ? "Aktif" : "Nonaktif"))]),
+    }, u.aktif ? "Aktif" : "Nonaktif")), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => openAccessModal(u)
+    }, "🔐 Akses Modul"), isOwnerLike && u.username !== currentUser.username && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => openResetPassword(u)
+    }, "🔑 Reset Password"), isOwnerLike && u.username !== currentUser.username && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "danger",
+      onClick: () => deleteUser(i)
+    }, "🗑 Hapus"))]),
     onEdit: onEdit
   })), /*#__PURE__*/React.createElement(Modal, {
+    open: !!accessModal,
+    title: `Akses Modul — ${accessModal?.nama}`,
+    onClose: () => setAccessModal(null),
+    width: 560
+  }, accessModal && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Centang modul yang boleh diakses oleh ", accessModal.nama, " (", ROLE_DEFS[accessModal.role]?.label, "). Perubahan berlaku langsung setelah disimpan."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 8,
+      maxHeight: 360,
+      overflowY: "auto"
+    }
+  }, ALL_MODULES.map(m => /*#__PURE__*/React.createElement("label", {
+    key: m.id,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      fontSize: 13,
+      color: theme.text,
+      cursor: "pointer",
+      padding: "4px 0"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: accessList.includes(m.id),
+    onChange: () => toggleAccessModule(m.id)
+  }), m.icon, " ", m.label))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setAccessModal(null)
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: saveAccess
+  }, "Simpan Akses")))), /*#__PURE__*/React.createElement(Modal, {
+    open: !!resetModal,
+    title: `Reset Password — ${resetModal?.nama}`,
+    onClose: () => setResetModal(null),
+    width: 460
+  }, resetModal && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 13,
+      color: theme.muted
+    }
+  }, "Untuk keamanan, perubahan password login (Supabase Auth) hanya bisa diterapkan oleh admin teknis lewat Supabase Dashboard — bukan dari browser ERP ini. Gunakan usulan password sementara di bawah, lalu minta admin teknis menerapkannya (Authentication → Users → ", resetModal.username, "@foresta.local → Reset Password)."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: theme.surface,
+      borderRadius: 8,
+      padding: 14,
+      textAlign: "center"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: theme.muted,
+      marginBottom: 6
+    }
+  }, "Password Sementara (usulan)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 20,
+      fontWeight: 700,
+      color: theme.accentLight,
+      letterSpacing: 2,
+      fontFamily: "monospace"
+    }
+  }, resetTempPass)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setResetModal(null)
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: confirmResetRequest
+  }, "Catat Permintaan Reset")))), /*#__PURE__*/React.createElement(Modal, {
     open: modal,
     title: editIdx !== null ? "Edit User" : "Tambah User",
     onClose: () => setModal(false)
@@ -20181,7 +21922,8 @@ async function buildAppSession(user) {
     userId: profile.id,
     nama: profile.nama,
     username: profile.username,
-    role: profile.role,
+    // HO2 (Jeffry Husin) IS the GM — see identical note in LoginPage.handleLogin.
+    role: profile.username === "ho2" || profile.role === "ho2" ? "gm" : profile.role,
     customModules: profile.custom_modules || null,
     loginAt: new Date().toISOString()
   };
@@ -20353,7 +22095,8 @@ function App() {
         });
       case "users":
         return /*#__PURE__*/React.createElement(UserManagement, {
-          currentUser: session
+          currentUser: session,
+          store: store
         });
       case "mekanik_report":
         return /*#__PURE__*/React.createElement(MekanikReport, {
