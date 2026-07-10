@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-10.1";
+const APP_BUILD = "2026-07-10.2";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -1854,9 +1854,23 @@ function Table({
   rows,
   onEdit,
   onDelete,
-  emptyMsg = "Tidak ada data"
+  emptyMsg = "Tidak ada data",
+  pageSize = 100
 }) {
-  return /*#__PURE__*/React.createElement("div", {
+  // Pagination guard: rendering thousands of <tr> nodes in one synchronous React
+  // commit (e.g. Master Part with 2700+ items, Database Client with 900+) can
+  // freeze or crash the tab on lower-spec devices — this is what made those
+  // modules intermittently "not show up" for some users. Windowing the rendered
+  // rows keeps the DOM small regardless of how much data exists.
+  const [page, setPage] = useState(0);
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  const safePage = Math.min(page, totalPages - 1);
+  useEffect(() => {
+    if (page > totalPages - 1) setPage(Math.max(0, totalPages - 1));
+  }, [totalPages]);
+  const startIdx = safePage * pageSize;
+  const pageRows = rows.slice(startIdx, startIdx + pageSize);
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
     style: {
       overflowX: "auto"
     }
@@ -1895,39 +1909,67 @@ function Table({
       textAlign: "center",
       color: theme.muted
     }
-  }, emptyMsg)) : rows.map((row, i) => /*#__PURE__*/React.createElement("tr", {
-    key: i,
+  }, emptyMsg)) : pageRows.map((row, i) => {
+    const absIdx = startIdx + i;
+    return /*#__PURE__*/React.createElement("tr", {
+      key: absIdx,
+      style: {
+        borderBottom: `1px solid ${theme.border}22`
+      },
+      onMouseEnter: e => e.currentTarget.style.background = theme.surface,
+      onMouseLeave: e => e.currentTarget.style.background = "transparent"
+    }, row.map((cell, j) => /*#__PURE__*/React.createElement("td", {
+      key: j,
+      style: {
+        padding: "10px 12px",
+        color: theme.text,
+        whiteSpace: "nowrap"
+      }
+    }, cell)), (onEdit || onDelete) && /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: "10px 12px",
+        display: "flex",
+        gap: 8,
+        position: "sticky",
+        right: 0,
+        background: theme.bg,
+        boxShadow: "-4px 0 6px -4px rgba(0,0,0,0.3)"
+      }
+    }, onEdit && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => onEdit(absIdx)
+    }, "Edit"), onDelete && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "danger",
+      onClick: () => onDelete(absIdx)
+    }, "Hapus")));
+  })))), rows.length > pageSize && /*#__PURE__*/React.createElement("div", {
     style: {
-      borderBottom: `1px solid ${theme.border}22`
-    },
-    onMouseEnter: e => e.currentTarget.style.background = theme.surface,
-    onMouseLeave: e => e.currentTarget.style.background = "transparent"
-  }, row.map((cell, j) => /*#__PURE__*/React.createElement("td", {
-    key: j,
-    style: {
-      padding: "10px 12px",
-      color: theme.text,
-      whiteSpace: "nowrap"
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      padding: "10px 4px",
+      fontSize: 12,
+      color: theme.muted
     }
-  }, cell)), (onEdit || onDelete) && /*#__PURE__*/React.createElement("td", {
+  }, /*#__PURE__*/React.createElement("span", null, `Menampilkan ${startIdx + 1}–${Math.min(startIdx + pageSize, rows.length)} dari ${rows.length} baris`), /*#__PURE__*/React.createElement("div", {
     style: {
-      padding: "10px 12px",
       display: "flex",
       gap: 8,
-      position: "sticky",
-      right: 0,
-      background: theme.bg,
-      boxShadow: "-4px 0 6px -4px rgba(0,0,0,0.3)"
+      alignItems: "center"
     }
-  }, onEdit && /*#__PURE__*/React.createElement(Btn, {
+  }, /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
-    onClick: () => onEdit(i)
-  }, "Edit"), onDelete && /*#__PURE__*/React.createElement(Btn, {
+    disabled: safePage === 0,
+    onClick: () => setPage(p => Math.max(0, p - 1))
+  }, "← Sebelumnya"), /*#__PURE__*/React.createElement("span", null, `Halaman ${safePage + 1} / ${totalPages}`), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
-    variant: "danger",
-    onClick: () => onDelete(i)
-  }, "Hapus")))))));
+    variant: "ghost",
+    disabled: safePage >= totalPages - 1,
+    onClick: () => setPage(p => Math.min(totalPages - 1, p + 1))
+  }, "Berikutnya →"))));
 }
 function Badge({
   children,
