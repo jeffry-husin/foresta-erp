@@ -3,6 +3,14 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<!-- Prevent browsers/proxies from caching this HTML shell. Without this, staff who keep
+     the app open in a tab or whose browser cached an old copy would keep running an
+     outdated build indefinitely — this was the root cause behind menu items (e.g. Master
+     Part) intermittently "disappearing" for some users after a deploy: they were seeing
+     old cached code that predated a fix, not a live bug. -->
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="0" />
 <title>FORESTA ERP</title>
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -16,6 +24,45 @@
 <div id="root"></div>
 <script>
 const { useState, useEffect, useRef } = React;
+
+// ════════════════════════════════════════════════════════════════════════════
+// APP BUILD / AUTO-UPDATE CHECK
+// Bump APP_BUILD on every deploy. Even with the no-cache meta tags above, a tab
+// that's been left open for hours/days is still running whatever JS it loaded at
+// open time — it has no way to know a new version was deployed. This periodically
+// re-fetches the live file (bypassing cache) and compares its APP_BUILD string;
+// if it's newer, a small banner offers a one-click refresh instead of the user
+// silently working on stale code (which is what made bugs like "Master Part
+// randomly missing for some users" look inconsistent — they were on old builds).
+// ════════════════════════════════════════════════════════════════════════════
+const APP_BUILD = "2026-07-10.1";
+(function () {
+  function showUpdateBanner() {
+    if (document.getElementById("app-update-banner")) return;
+    const bar = document.createElement("div");
+    bar.id = "app-update-banner";
+    bar.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:99999;background:#2563eb;color:#fff;padding:10px 16px;text-align:center;font-family:'Segoe UI',Arial,sans-serif;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,.25);";
+    bar.innerHTML = 'Versi baru aplikasi tersedia (ada pembaruan/perbaikan). <button id="app-update-btn" style="margin-left:10px;background:#fff;color:#2563eb;border:none;border-radius:4px;padding:4px 12px;font-weight:700;cursor:pointer;">Refresh Sekarang</button>';
+    document.body.appendChild(bar);
+    document.getElementById("app-update-btn").onclick = function () {
+      location.reload();
+    };
+  }
+  async function checkForUpdate() {
+    try {
+      const res = await fetch(location.pathname + "?_v=" + Date.now(), {
+        cache: "no-store"
+      });
+      const text = await res.text();
+      const m = text.match(/APP_BUILD\s*=\s*"([^"]+)"/);
+      if (m && m[1] && m[1] !== APP_BUILD) showUpdateBanner();
+    } catch (e) {/* offline or blocked — ignore, will retry next interval */}
+  }
+  setInterval(checkForUpdate, 5 * 60 * 1000);
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible") checkForUpdate();
+  });
+})();
 
 // ════════════════════════════════════════════════════════════════════════════
 // SUPABASE — shared backend (replaces per-browser localStorage)
@@ -2320,7 +2367,7 @@ function Dashboard({
       flexWrap: "wrap",
       gap: 8
     }
-  }, getAllowedModules(session.role).filter(m => m !== "payroll" || hasPayrollAccess(session.role)).map(mid => {
+  }, getAllowedModules(session.role, session.customModules).filter(m => m !== "payroll" || hasPayrollAccess(session.role)).map(mid => {
     const m = ALL_MODULES.find(x => x.id === mid);
     return m ? /*#__PURE__*/React.createElement(Badge, {
       key: mid,
