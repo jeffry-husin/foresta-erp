@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-10.3";
+const APP_BUILD = "2026-07-14.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -625,10 +625,9 @@ const ALL_MODULES = [{
   icon: "🏭",
   label: "Workshop Dashboard"
 }, {
-  id: "part_request",
-  icon: "🆕",
-  label: "Request Part Baru"
-}, {
+  // "part_request" (Request Part Baru) deactivated 2026-07-13 per request — module code, its
+  // render-switch cases, and existing data are left intact; it's just no longer in ALL_MODULES,
+  // so it can't appear in any sidebar/menu or be granted to any role.
   id: "mekanik_report",
   icon: "🔧",
   label: "Mekanik Report"
@@ -1271,22 +1270,48 @@ function usePersisted(key, defaultVal) {
       cancelled = true;
     };
   }, [key]);
+  // IMPORTANT — concurrent-write safety: when multiple users edit the same collection at the same
+  // time (e.g. two people creating an Item Requisition within seconds of each other), each browser
+  // only knows about its own last-loaded copy of the array. If we just merged against that local
+  // copy and blindly upserted, whoever writes second silently wipes out whoever wrote first (their
+  // whole document vanishes — this is exactly the "previous IR got rewritten" bug). To close that
+  // window, whenever the caller passes an updater FUNCTION (the `prev => ...` form) we re-fetch the
+  // current server data immediately before applying it and writing back, instead of trusting the
+  // (possibly stale) local React state. Callers that still pass a plain value skip this and behave
+  // as before — so every "create a new record" call site should use the function form.
   const setVal = v => {
-    setValRaw(prev => {
-      const next = typeof v === "function" ? v(prev) : v;
-      sb.from("erp_data").upsert({
-        key,
-        data: next,
-        updated_at: new Date().toISOString()
-      }, {
-        onConflict: "key"
-      }).then(({
-        error
-      }) => {
-        if (error) console.error("Gagal menyimpan " + key + ":", error);
-      });
-      return next;
-    });
+    // Optimistic local update so the UI feels instant; this may be superseded a moment later once
+    // the fresh-fetch reconciliation below finishes.
+    setValRaw(prev => typeof v === "function" ? v(prev) : v);
+    (async () => {
+      try {
+        let basePrev = val;
+        if (typeof v === "function") {
+          const {
+            data,
+            error: fetchError
+          } = await sb.from("erp_data").select("data").eq("key", key).maybeSingle();
+          if (!fetchError && data) basePrev = data.data;
+        }
+        const next = typeof v === "function" ? v(basePrev) : v;
+        const {
+          error
+        } = await sb.from("erp_data").upsert({
+          key,
+          data: next,
+          updated_at: new Date().toISOString()
+        }, {
+          onConflict: "key"
+        });
+        if (error) {
+          console.error("Gagal menyimpan " + key + ":", error);
+        } else {
+          setValRaw(next);
+        }
+      } catch (e) {
+        console.error("Gagal menyimpan " + key + ":", e);
+      }
+    })();
   };
   return [val, setVal, loaded];
 }
@@ -1324,6 +1349,7 @@ function useStore() {
   const [internalDOs, setInternalDOs] = usePersisted("erp_internal_do", []); // Internal Delivery Order: Office -> Workshop, auto-created on Goods Receipt
   const [workshopOpsExpenses, setWorkshopOpsExpenses] = usePersisted("erp_workshop_ops", []); // Workshop operational expenses (Epy inputs, from Master COA)
   const [basts, setBasts] = usePersisted("erp_basts", []); // BAPP (Berita Acara Penyelesaian Pekerjaan) entries, per visit
+  const [suratTugas, setSuratTugas] = usePersisted("erp_surat_tugas", []); // Surat Perintah Tugas entries, per visit
   const [mills, setMills] = usePersisted("erp_mills", []); // Master Mill: mill/site location database (Mill Name, Company, Alamat, Provinsi, Kabupaten)
   const [inspectionReports, setInspectionReports] = usePersisted("erp_inspection_reports", []); // Inspection Report entries, per visit (component checklist)
   const [leaveRequests, setLeaveRequests] = usePersisted("erp_leave_requests", []); // Form Cuti: leave requests, approved by HRD, deducts from 12-day/year quota via Absensi "Cuti" entries
@@ -1422,6 +1448,8 @@ function useStore() {
     setWorkshopOpsExpenses,
     basts,
     setBasts,
+    suratTugas,
+    setSuratTugas,
     mills,
     setMills,
     inspectionReports,
@@ -3689,16 +3717,14 @@ function MasterUnit({
       gap: 10,
       marginBottom: 10
     }
-  }, /*#__PURE__*/React.createElement(Select, {
+  }, /*#__PURE__*/React.createElement(PartPicker, {
     value: bomItem.partNumber,
     onChange: v => setBomItem({
       ...bomItem,
       partNumber: v
     }),
-    options: parts.filter(p => p.kategori === "Parts").map(p => ({
-      value: p.partNumber,
-      label: `${p.partNumber} - ${p.partName}`
-    }))
+    parts: parts.filter(p => p.kategori === "Parts"),
+    showDescription: true
   }), /*#__PURE__*/React.createElement(Input, {
     value: bomItem.qty,
     onChange: v => setBomItem({
@@ -5440,12 +5466,15 @@ function MekanikReport({
     partRequests,
     basts,
     setBasts,
+    suratTugas,
+    setSuratTugas,
     mills,
     units,
     salesOrders,
     deliveryOrders,
     inspectionReports,
-    setInspectionReports
+    setInspectionReports,
+    employees
   } = store;
   const partRecs = normalizePartRecs(partRecsRaw);
   const isMekanik = session.role === "mekanik";
@@ -5545,6 +5574,39 @@ function MekanikReport({
   });
   const [editingInspectionId, setEditingInspectionId] = useState(null);
   const [editingBastId, setEditingBastId] = useState(null);
+  const emptySTAssignee = {
+    nama: "",
+    jabatan: "",
+    jenisPekerjaan: "",
+    berangkatTanggal: "",
+    sampaiTanggal: "",
+    kendaraan: ""
+  };
+  const [stAssigneeForm, setSTAssigneeForm] = useState(emptySTAssignee);
+  const [stAssigneeCart, setSTAssigneeCart] = useState([]);
+  const emptySTForm = {
+    nomor: "",
+    tanggalPembuatan: today(),
+    dibuatOlehNama: "",
+    dibuatOlehJabatan: "",
+    namaClient: ""
+  };
+  const [stForm, setSTForm] = useState(emptySTForm);
+  const [editingSTId, setEditingSTId] = useState(null);
+  const romanMonths = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"];
+  const nextSTNomor = (arr = suratTugas) => {
+    const year = new Date().getFullYear();
+    const count = arr.filter(s => s.nomor && s.nomor.endsWith("/" + year)).length + 1;
+    return `${String(count).padStart(3, "0")}/${romanMonths[new Date().getMonth()]}/${year}`;
+  };
+  const addSTAssignee = () => {
+    if (!stAssigneeForm.nama.trim()) return alert("Isi nama yang ditugaskan");
+    setSTAssigneeCart([...stAssigneeCart, {
+      ...stAssigneeForm
+    }]);
+    setSTAssigneeForm(emptySTAssignee);
+  };
+  const removeSTAssignee = i => setSTAssigneeCart(stAssigneeCart.filter((_, idx) => idx !== i));
   const setHidraulikField = (key, value) => setInspectionForm(f => ({
     ...f,
     hidraulik: {
@@ -5680,6 +5742,30 @@ function MekanikReport({
         items: emptyInspectionItems("Static Crane"),
         catatan: "",
         hidraulik: emptyHidraulikValuesFor("Static Crane")
+      });
+    }
+    if (type === "surattugas") {
+      const editingST = editingRecord;
+      setEditingSTId(editingST ? editingST.id : null);
+      setSTAssigneeCart(editingST ? editingST.assignees.map(a => ({
+        ...a
+      })) : []);
+      setSTAssigneeForm({
+        ...emptySTAssignee,
+        // Jenis Pekerjaan auto-pulled from this visit's Jenis Berita Acara — mekanik/manager can still
+        // override it manually per assignee if needed.
+        jenisPekerjaan: visit.jenisBeritaAcara || ""
+      });
+      setSTForm(editingST ? {
+        nomor: editingST.nomor,
+        tanggalPembuatan: editingST.tanggalPembuatan,
+        dibuatOlehNama: editingST.dibuatOlehNama,
+        dibuatOlehJabatan: editingST.dibuatOlehJabatan,
+        namaClient: editingST.namaClient
+      } : {
+        ...emptySTForm,
+        nomor: nextSTNomor(),
+        tanggalPembuatan: today()
       });
     }
   };
@@ -5856,15 +5942,17 @@ function MekanikReport({
   const visitStatus = id => statusReports.filter(s => s.visitId === id);
   const visitBasts = id => basts.filter(b => b.visitId === id);
   const visitInspections = id => inspectionReports.filter(r => r.visitId === id);
-  // Delete a whole visit and cascade-delete every DAR/Part Rec/Status/BAPP/Inspection tied to it.
+  const visitSuratTugas = id => suratTugas.filter(s => s.visitId === id);
+  // Delete a whole visit and cascade-delete every DAR/Part Rec/Status/BAPP/Inspection/Surat Tugas tied to it.
   const deleteVisit = v => {
-    if (!confirm(`Hapus kunjungan ${v.id} beserta seluruh DAR, Part Recommendation, Status Report, BAPP, dan Inspection Report di dalamnya? Tindakan ini tidak bisa dibatalkan.`)) return;
+    if (!confirm(`Hapus kunjungan ${v.id} beserta seluruh DAR, Part Recommendation, Status Report, BAPP, Inspection Report, dan Surat Tugas di dalamnya? Tindakan ini tidak bisa dibatalkan.`)) return;
     setVisits(visits.filter(x => x.id !== v.id));
     setDars(dars.filter(x => x.visitId !== v.id));
     setPartRecs(partRecs.filter(x => x.visitId !== v.id));
     setStatusReports(statusReports.filter(x => x.visitId !== v.id));
     setBasts(basts.filter(x => x.visitId !== v.id));
     setInspectionReports(inspectionReports.filter(x => x.visitId !== v.id));
+    setSuratTugas(suratTugas.filter(x => x.visitId !== v.id));
     logAudit(store, session, {
       module: "Mekanik Report",
       docNomor: v.id,
@@ -5900,6 +5988,16 @@ function MekanikReport({
       docNomor: r.id,
       action: "Hapus",
       detail: r.mekanikNama || ""
+    });
+  };
+  const deletePartRec = rec => {
+    if (!confirm("Hapus Part Recommendation ini?")) return;
+    setPartRecs(partRecs.filter(x => x.id !== rec.id));
+    logAudit(store, session, {
+      module: "Part Recommendation",
+      docNomor: rec.id,
+      action: "Hapus",
+      detail: `${rec.items.length} item oleh ${rec.mekanikNama}`
     });
   };
   const saveInspection = () => {
@@ -5957,6 +6055,90 @@ function MekanikReport({
       dibuatOleh: {
         nama: r.mekanikNama
       }
+    });
+  };
+  const saveST = () => {
+    if (stAssigneeCart.length === 0) return alert("Tambahkan minimal 1 orang yang ditugaskan");
+    if (!stForm.dibuatOlehNama.trim()) return alert("Pilih/isi nama yang membuat Surat Tugas");
+    if (editingSTId) {
+      const arr = [...suratTugas];
+      const idx = arr.findIndex(s => s.id === editingSTId);
+      if (idx >= 0) arr[idx] = {
+        ...arr[idx],
+        ...stForm,
+        assignees: stAssigneeCart
+      };
+      setSuratTugas(arr);
+      logAudit(store, session, {
+        module: "Surat Tugas",
+        docNomor: stForm.nomor,
+        action: "Edit",
+        detail: `${stAssigneeCart.length} orang ditugaskan`
+      });
+    } else {
+      setSuratTugas(prev => {
+        // Re-validate the doc number against fresh data at save time (it was only a suggestion
+        // pre-filled when the form opened) — if it's already taken, bump it to the next free one
+        // instead of silently colliding with another Surat Tugas.
+        const nomor = prev.some(s => s.nomor === stForm.nomor) ? nextSTNomor(prev) : stForm.nomor;
+        return [...prev, {
+          id: "ST-" + uid(),
+          visitId: detailVisit.id,
+          ...stForm,
+          nomor,
+          assignees: stAssigneeCart,
+          createdBy: session.nama
+        }];
+      });
+      logAudit(store, session, {
+        module: "Surat Tugas",
+        docNomor: stForm.nomor,
+        action: "Buat",
+        detail: `${stAssigneeCart.length} orang ditugaskan`
+      });
+    }
+    setFormType(null);
+    setEditingSTId(null);
+    setSTForm(emptySTForm);
+    setSTAssigneeCart([]);
+  };
+  const deleteST = s => {
+    if (!isOwnerLike) return alert("Hanya Owner/GM/Finance Director yang dapat menghapus Surat Tugas.");
+    if (!confirm("Hapus Surat Tugas ini?")) return;
+    setSuratTugas(suratTugas.filter(x => x.id !== s.id));
+    logAudit(store, session, {
+      module: "Surat Tugas",
+      docNomor: s.nomor,
+      action: "Hapus",
+      detail: `${s.assignees.length} orang ditugaskan`
+    });
+  };
+  const printSuratTugas = s => {
+    const v = visits.find(x => x.id === s.visitId) || detailVisit || {};
+    printDocument({
+      company: store.companySettings,
+      docTitle: "SURAT PERINTAH TUGAS",
+      nomor: s.nomor,
+      tanggal: s.tanggalPembuatan,
+      partyLabel: "Menugaskan kepada:",
+      partyName: s.assignees.map(a => a.nama).join(", "),
+      partyExtra: `Client: ${v.customerNama || "-"} · Lokasi: ${v.lokasi || v.unitTerkait || "-"}`,
+      itemHeaders: ["Nama", "Jabatan", "Jenis Pekerjaan", "Berangkat", "Sampai", "Kendaraan"],
+      items: s.assignees.map(a => [a.nama, a.jabatan || "-", a.jenisPekerjaan || "-", a.berangkatTanggal || "-", a.sampaiTanggal || "-", a.kendaraan || "-"]),
+      showPrice: false,
+      catatan: "Yang bersangkutan agar melaksanakan tugas dengan penuh tanggung jawab dan melaporkan hasil pekerjaan kepada Branch Manager setelah tugas selesai dilaksanakan.",
+      hideCreatedBy: false,
+      dibuatOlehLabel: "Diketahui",
+      dibuatOleh: s.namaClient ? {
+        nama: s.namaClient
+      } : null,
+      disetujuiLabel: "Yang Menugaskan",
+      disetujuiOleh: {
+        nama: s.dibuatOlehNama,
+        jabatan: s.dibuatOlehJabatan
+      },
+      disetujuiAlign: null,
+      showMateraiSpace: false
     });
   };
   const approveDar = dar => {
@@ -6557,7 +6739,11 @@ function MekanikReport({
     size: "sm",
     variant: "ghost",
     onClick: () => openForm(detailVisit, "inspection")
-  }, "🔍 + Inspection Report")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
+  }, "🔍 + Inspection Report"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => openForm(detailVisit, "surattugas")
+  }, "📜 + Surat Tugas")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
     style: {
       margin: "0 0 8px",
       color: theme.muted,
@@ -6627,7 +6813,15 @@ function MekanikReport({
       }
     }, /*#__PURE__*/React.createElement(PrintBtn, {
       onClick: () => printPartRec(recDoc)
-    }), (isSepti || isOwnerLike) && recDoc.status === "Menunggu Approval Septi" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Btn, {
+    }), (isOwnerLike || isSepti || isMekanik && session.username === detailVisit.mekanikUsername) && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => openForm(detailVisit, "partrec")
+    }, "✏️"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "danger",
+      onClick: () => deletePartRec(recDoc)
+    }, "🗑️"), (isSepti || isOwnerLike) && recDoc.status === "Menunggu Approval Septi" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "success",
       onClick: () => approveRec(recDoc)
@@ -6709,6 +6903,31 @@ function MekanikReport({
       onClick: () => deleteInspection(r)
     }, "🗑️"))]),
     emptyMsg: "Belum ada inspection report"
+  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
+    style: {
+      margin: "0 0 8px",
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "📜 SURAT PERINTAH TUGAS"), /*#__PURE__*/React.createElement(Table, {
+    headers: ["No. Surat Tugas", "Tanggal", "Ditugaskan Kepada", "Dibuat Oleh", ""],
+    rows: visitSuratTugas(detailVisit.id).map(s => [s.nomor, s.tanggalPembuatan, s.assignees.map(a => a.nama).join(", "), `${s.dibuatOlehNama}${s.dibuatOlehJabatan ? ` (${s.dibuatOlehJabatan})` : ""}`, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 6
+      }
+    }, (isOwnerLike || isSepti || isMekanik && session.username === detailVisit.mekanikUsername) && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => openForm(detailVisit, "surattugas", s)
+    }, "✏️"), /*#__PURE__*/React.createElement(PrintBtn, {
+      onClick: () => printSuratTugas(s)
+    }), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "danger",
+      onClick: () => deleteST(s)
+    }, "🗑️"))]),
+    emptyMsg: "Belum ada surat tugas untuk kunjungan ini"
   })))), /*#__PURE__*/React.createElement(Modal, {
     open: formType === "dar",
     title: editingDarId ? `Edit Daily Activity Report — ${detailVisit?.jenisBeritaAcara}` : `Isi Daily Activity Report — ${detailVisit?.jenisBeritaAcara}`,
@@ -7498,6 +7717,226 @@ function MekanikReport({
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     onClick: saveInspection
   }, editingInspectionId ? "Simpan Perubahan" : "Simpan Inspection Report")))), /*#__PURE__*/React.createElement(Modal, {
+    open: formType === "surattugas",
+    title: editingSTId ? "Edit Surat Perintah Tugas" : "Buat Surat Perintah Tugas",
+    onClose: () => {
+      setFormType(null);
+      setEditingSTId(null);
+    },
+    width: 780
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("datalist", {
+    id: "stEmployeeNames"
+  }, employees.map(e => /*#__PURE__*/React.createElement("option", {
+    key: e.username,
+    value: e.nama
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "No. Surat Tugas",
+    value: stForm.nomor,
+    onChange: v => setSTForm({
+      ...stForm,
+      nomor: v
+    }),
+    required: true
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal Pembuatan",
+    type: "date",
+    value: stForm.tanggalPembuatan,
+    onChange: v => setSTForm({
+      ...stForm,
+      tanggalPembuatan: v
+    }),
+    required: true
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("label", {
+    style: {
+      fontSize: 13,
+      color: theme.muted,
+      fontWeight: 500
+    }
+  }, "Dibuat Oleh (Nama Manager)", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.red
+    }
+  }, " *")), /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    list: "stEmployeeNames",
+    value: stForm.dibuatOlehNama,
+    placeholder: "Pilih dari daftar atau ketik manual",
+    onChange: e => {
+      const v = e.target.value;
+      const emp = employees.find(x => x.nama === v);
+      setSTForm({
+        ...stForm,
+        dibuatOlehNama: v,
+        dibuatOlehJabatan: emp ? emp.jabatan || stForm.dibuatOlehJabatan : stForm.dibuatOlehJabatan
+      });
+    },
+    style: {
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8,
+      padding: "9px 12px",
+      color: theme.text,
+      fontSize: 14,
+      fontFamily: "inherit",
+      outline: "none",
+      width: "100%",
+      boxSizing: "border-box"
+    }
+  })), /*#__PURE__*/React.createElement(Input, {
+    label: "Jabatan",
+    value: stForm.dibuatOlehJabatan,
+    onChange: v => setSTForm({
+      ...stForm,
+      dibuatOlehJabatan: v
+    }),
+    placeholder: "cth. Service Manager"
+  })), /*#__PURE__*/React.createElement(Input, {
+    label: "Nama yang Mengetahui (Client)",
+    value: stForm.namaClient,
+    onChange: v => setSTForm({
+      ...stForm,
+      namaClient: v
+    }),
+    placeholder: "PIC client yang menandatangani 'Diketahui' (opsional)"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: `1px solid ${theme.border}`,
+      borderRadius: 10,
+      padding: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 10px",
+      fontSize: 13,
+      fontWeight: 600,
+      color: theme.text
+    }
+  }, "Menugaskan Kepada"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 10,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    list: "stEmployeeNames",
+    value: stAssigneeForm.nama,
+    placeholder: "Nama (pilih dari daftar atau ketik manual)",
+    onChange: e => {
+      const v = e.target.value;
+      const emp = employees.find(x => x.nama === v);
+      setSTAssigneeForm({
+        ...stAssigneeForm,
+        nama: v,
+        jabatan: emp ? emp.jabatan || stAssigneeForm.jabatan : stAssigneeForm.jabatan
+      });
+    },
+    style: {
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8,
+      padding: "9px 12px",
+      color: theme.text,
+      fontSize: 14,
+      fontFamily: "inherit",
+      outline: "none",
+      width: "100%",
+      boxSizing: "border-box"
+    }
+  }), /*#__PURE__*/React.createElement(Input, {
+    value: stAssigneeForm.jabatan,
+    onChange: v => setSTAssigneeForm({
+      ...stAssigneeForm,
+      jabatan: v
+    }),
+    placeholder: "Jabatan"
+  }), /*#__PURE__*/React.createElement(Input, {
+    value: stAssigneeForm.jenisPekerjaan,
+    onChange: v => setSTAssigneeForm({
+      ...stAssigneeForm,
+      jenisPekerjaan: v
+    }),
+    placeholder: "Jenis Pekerjaan"
+  }), /*#__PURE__*/React.createElement(Input, {
+    type: "date",
+    value: stAssigneeForm.berangkatTanggal,
+    onChange: v => setSTAssigneeForm({
+      ...stAssigneeForm,
+      berangkatTanggal: v
+    }),
+    placeholder: "Berangkat"
+  }), /*#__PURE__*/React.createElement(Input, {
+    type: "date",
+    value: stAssigneeForm.sampaiTanggal,
+    onChange: v => setSTAssigneeForm({
+      ...stAssigneeForm,
+      sampaiTanggal: v
+    }),
+    placeholder: "Sampai"
+  }), /*#__PURE__*/React.createElement(Input, {
+    value: stAssigneeForm.kendaraan,
+    onChange: v => setSTAssigneeForm({
+      ...stAssigneeForm,
+      kendaraan: v
+    }),
+    placeholder: "Kendaraan"
+  }), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    onClick: addSTAssignee
+  }, "+ Add")), stAssigneeCart.length > 0 && /*#__PURE__*/React.createElement(Table, {
+    headers: ["Nama", "Jabatan", "Jenis Pekerjaan", "Berangkat", "Sampai", "Kendaraan", ""],
+    rows: stAssigneeCart.map((a, i) => [a.nama, a.jabatan || "-", a.jenisPekerjaan || "-", a.berangkatTanggal || "-", a.sampaiTanggal || "-", a.kendaraan || "-", /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "danger",
+      onClick: () => removeSTAssignee(i)
+    }, "×")])
+  }), stAssigneeCart.length === 0 && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted,
+      textAlign: "center"
+    }
+  }, "Belum ada orang yang ditugaskan")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => {
+      setFormType(null);
+      setEditingSTId(null);
+    }
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: saveST
+  }, editingSTId ? "Simpan Perubahan" : "Simpan Surat Tugas")))), /*#__PURE__*/React.createElement(Modal, {
     open: visitModal,
     title: "Buat Kunjungan Kerja Baru",
     onClose: () => setVisitModal(false)
@@ -8417,6 +8856,7 @@ function QuotationUnit({
       items: [...f.items, {
         unitCode: unit.unitCode,
         unitName: unit.unitName,
+        partDescription: unit.description || "",
         qty,
         harga,
         subtotal: qty * harga,
@@ -8439,6 +8879,7 @@ function QuotationUnit({
       items: [...f.items, {
         unitCode: part.partNumber,
         unitName: part.partName,
+        partDescription: part.description || "",
         qty,
         harga,
         subtotal: qty * harga,
@@ -9653,6 +10094,7 @@ function QuotationPS({
       items: [...f.items, {
         partNumber: part.partNumber,
         partName: part.partName,
+        partDescription: part.description || "",
         qty,
         harga,
         subtotal: qty * harga
@@ -10785,7 +11227,23 @@ function SalesOrderModule({
   const approvedPS = quotationsPS.filter(q => q.status === "Disetujui GM");
   const [soSearch, setSoSearch] = useState("");
   const salesOrdersFiltered = soSearch.trim() ? salesOrders.filter(so => [so.nomor, so.customerNama, so.salesManagerNama, so.sourceNomor].filter(Boolean).some(x => String(x).toLowerCase().includes(soSearch.trim().toLowerCase()))) : salesOrders;
-  const newNomor = () => "SO-" + new Date().getFullYear() + "-" + String(salesOrders.length + 1).padStart(4, "0");
+  // Compute the next number from the max existing sequence in the given (ideally freshly-fetched)
+  // array rather than its .length — this avoids both collisions when two users create a record at
+  // the same moment (each browser's setter re-fetches fresh data right before merging, so passing
+  // that fresh array in here yields a number that reflects what's actually on the server) and reuse
+  // of a number after a record is deleted.
+  const newNomor = (arr = salesOrders) => {
+    const year = new Date().getFullYear();
+    const prefix = "SO-" + year + "-";
+    const maxSeq = arr.reduce((max, r) => {
+      if (r.nomor && r.nomor.startsWith(prefix)) {
+        const n = parseInt(r.nomor.slice(prefix.length), 10);
+        if (!isNaN(n) && n > max) return n;
+      }
+      return max;
+    }, 0);
+    return prefix + String(maxSeq + 1).padStart(4, "0");
+  };
   // Step 1: user picked a quotation — open the item-selection + shipping-info step instead of
   // immediately creating the SO, since not all quoted parts necessarily need to ship/PO out.
   const openPickItems = (quot, type) => {
@@ -10821,7 +11279,6 @@ function SalesOrderModule({
     const diskon = subtotal * diskonRatio;
     const total = subtotal - diskon + pajak;
     const so = {
-      nomor: newNomor(),
       tanggal: today(),
       tipe: type,
       sourceNomor: quot.nomor,
@@ -10849,7 +11306,10 @@ function SalesOrderModule({
         ...t
       }))
     };
-    setSalesOrders([...salesOrders, so]);
+    setSalesOrders(prev => [...prev, {
+      ...so,
+      nomor: newNomor(prev)
+    }]);
     if (type === "Unit") {
       const arr = [...quotationsUnit];
       arr[quotationsUnit.indexOf(quot)] = {
@@ -11069,7 +11529,13 @@ function SalesOrderModule({
     type: "checkbox",
     checked: pickedItems.includes(i),
     onChange: () => togglePickedItem(i)
-  }), /*#__PURE__*/React.createElement("span", null, it.unitName || it.partName, " — Qty ", fmtNum(it.qty), " — ", fmt(it.subtotal))))), /*#__PURE__*/React.createElement(Input, {
+  }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("strong", null, it.partNumber || it.unitCode), " — ", it.unitName || it.partName, " — Qty ", fmtNum(it.qty), " — ", fmt(it.subtotal)), (it.partDescription || it.description) && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: theme.muted,
+      marginTop: 2
+    }
+  }, it.partDescription || it.description))))), /*#__PURE__*/React.createElement(Input, {
     label: "No. Purchase Order Client",
     value: shipForm.noPoClient,
     onChange: v => setShipForm({
@@ -11157,8 +11623,8 @@ function SalesOrderModule({
       gap: 14
     }
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: detail.tipe === "Unit" ? ["Unit Code", "Unit Name", "Qty", "Harga", "Subtotal"] : ["Part Number", "Part Name", "Qty", "Harga", "Subtotal"],
-    rows: detail.items.map(it => detail.tipe === "Unit" ? [it.unitCode, it.unitName, fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)] : [it.partNumber, it.partName, fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)])
+    headers: detail.tipe === "Unit" ? ["Unit Code", "Unit Name", "Description", "Qty", "Harga", "Subtotal"] : ["Part Number", "Part Name", "Description", "Qty", "Harga", "Subtotal"],
+    rows: detail.items.map(it => detail.tipe === "Unit" ? [it.unitCode, it.unitName, it.partDescription || it.description || "-", fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)] : [it.partNumber, it.partName, it.partDescription || it.description || "-", fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)])
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       textAlign: "right",
@@ -11218,8 +11684,8 @@ function SalesOrderModule({
       tanggal: detail.tanggal,
       partyLabel: "Kepada:",
       partyName: detail.customerNama,
-      itemHeaders: detail.tipe === "Unit" ? ["Unit Code", "Unit Name", "Qty", "Harga", "Subtotal"] : ["Part Number", "Part Name", "Qty", "Harga", "Subtotal"],
-      items: detail.items.map(it => detail.tipe === "Unit" ? [it.unitCode, it.unitName, fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)] : [it.partNumber, it.partName, fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)]),
+      itemHeaders: detail.tipe === "Unit" ? ["Unit Code", "Unit Name", "Description", "Qty", "Harga", "Subtotal"] : ["Part Number", "Part Name", "Description", "Qty", "Harga", "Subtotal"],
+      items: detail.items.map(it => detail.tipe === "Unit" ? [it.unitCode, it.unitName, it.partDescription || it.description || "-", fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)] : [it.partNumber, it.partName, it.partDescription || it.description || "-", fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)]),
       subtotal: detail.subtotal,
       diskon: detail.diskon,
       pajak: detail.pajak,
@@ -11310,8 +11776,8 @@ function ItemRequisitionModule({
         detail: manualForm.catatan
       });
     } else {
-      setItemRequisitions([...itemRequisitions, {
-        nomor: newNomor(),
+      setItemRequisitions(prev => [...prev, {
+        nomor: newNomor(prev),
         tanggal: today(),
         soNomor: manualForm.soNomor || "",
         soCustomerNama: so?.customerNama || "",
@@ -11329,7 +11795,18 @@ function ItemRequisitionModule({
     }
     closeManualModal();
   };
-  const newNomor = () => "IR-" + new Date().getFullYear() + "-" + String(itemRequisitions.length + 1).padStart(4, "0");
+  const newNomor = (arr = itemRequisitions) => {
+    const year = new Date().getFullYear();
+    const prefix = "IR-" + year + "-";
+    const maxSeq = arr.reduce((max, r) => {
+      if (r.nomor && r.nomor.startsWith(prefix)) {
+        const n = parseInt(r.nomor.slice(prefix.length), 10);
+        if (!isNaN(n) && n > max) return n;
+      }
+      return max;
+    }, 0);
+    return prefix + String(maxSeq + 1).padStart(4, "0");
+  };
   const deleteIR = r => {
     if (!isOwnerLike) return alert("Hanya Owner/GM/Finance Director yang dapat menghapus Item Requisition.");
     if (!confirm(`Hapus Item Requisition ${r.nomor}?`)) return;
@@ -11438,8 +11915,8 @@ function ItemRequisitionModule({
       });
     } else {
       const so = salesOrders.find(s => s.nomor === form.soNomor);
-      setItemRequisitions([...itemRequisitions, {
-        nomor: newNomor(),
+      setItemRequisitions(prev => [...prev, {
+        nomor: newNomor(prev),
         tanggal: today(),
         soNomor: form.soNomor,
         soCustomerNama: so?.customerNama || "",
@@ -11553,12 +12030,31 @@ function ItemRequisitionModule({
     }, fmtNum(it.qtyKurang)), React.createElement("span", {
       style: catatanStyle
     }, it.catatan || "-")])
-  }), canManage && detail.status !== "Sudah di-PO" && React.createElement("div", {
+  }), detail && React.createElement("div", {
     style: {
       display: "flex",
+      gap: 10,
       justifyContent: "flex-end"
     }
-  }, React.createElement(Btn, {
+  }, React.createElement(PrintBtn, {
+    onClick: () => printDocument({
+      company: store.companySettings,
+      docTitle: "ITEM REQUISITION",
+      nomor: detail.nomor,
+      tanggal: detail.tanggal,
+      partyLabel: "No. Sales Order:",
+      partyName: detail.soNomor || "-",
+      partyExtra: detail.soCustomerNama || "",
+      itemHeaders: ["Part Number", "Part Name", "Qty Dibutuhkan", "Stok Tersedia", "Qty Kurang", "Catatan"],
+      items: detail.items.map(it => [it.partNumber, it.partName, fmtNum(it.qtyButuh), fmtNum(it.stokTersedia), fmtNum(it.qtyKurang), it.catatan || "-"]),
+      showPrice: false,
+      extraInfoRows: [["Status", detail.status]],
+      dibuatOleh: {
+        nama: detail.createdBy
+      },
+      hideCreatedBy: false
+    })
+  }), canManage && detail.status !== "Sudah di-PO" && React.createElement(Btn, {
     variant: "ghost",
     onClick: () => {
       onEditIR(detail);
@@ -11782,7 +12278,8 @@ function PurchaseOrderModule({
   const [supplierDocModal, setSupplierDocModal] = useState(null);
   const [supplierDocForm, setSupplierDocForm] = useState({
     noInvoiceSupplier: "",
-    noFakturPajak: ""
+    noFakturPajak: "",
+    isCash: false
   });
   const [payMethodModal, setPayMethodModal] = useState(null);
   const [payMethod, setPayMethod] = useState("BCA");
@@ -11792,6 +12289,8 @@ function PurchaseOrderModule({
   const [reviseItems, setReviseItems] = useState([]);
   const [revisePakaiPpn, setRevisePakaiPpn] = useState(false);
   const [reviseCurrency, setReviseCurrency] = useState("IDR");
+  const [reviseSupplierId, setReviseSupplierId] = useState("");
+  const [reviseIrNomors, setReviseIrNomors] = useState([]);
   const [form, setForm] = useState({
     irNomors: [],
     supplierId: "",
@@ -11802,16 +12301,33 @@ function PurchaseOrderModule({
     jatuhTempoMode: "tanggal",
     tanggalJatuhTempo: "",
     jumlahHari: "30",
-    catatan: ""
+    catatan: "",
+    urgent: false
   });
+  const [reviseUrgent, setReviseUrgent] = useState(false);
   const [itemForm, setItemForm] = useState({
     partNumber: "",
     partName: "",
     qty: 1,
     harga: ""
   });
-  const [irPickerOpen, setIrPickerOpen] = useState(false);
-  const newNomor = () => (isLocal ? "POL-" : "POO-") + new Date().getFullYear() + "-" + String(po.length + 1).padStart(4, "0");
+  // irPick: the IR currently being picked from (per-item, works for both the create form and the
+  // full-edit/revise modal — irPickTarget tells confirmIrPick which one to add the chosen items into).
+  const [irPick, setIrPick] = useState(null);
+  const [irPickedIdx, setIrPickedIdx] = useState([]);
+  const [irPickTarget, setIrPickTarget] = useState("create"); // 'create' | 'revise'
+  const newNomor = (arr = po) => {
+    const year = new Date().getFullYear();
+    const prefix = (isLocal ? "POL-" : "POO-") + year + "-";
+    const maxSeq = arr.reduce((max, r) => {
+      if (r.nomor && r.nomor.startsWith(prefix)) {
+        const n = parseInt(r.nomor.slice(prefix.length), 10);
+        if (!isNaN(n) && n > max) return n;
+      }
+      return max;
+    }, 0);
+    return prefix + String(maxSeq + 1).padStart(4, "0");
+  };
   const addDays = (dateStr, days) => {
     const d = new Date(dateStr);
     d.setDate(d.getDate() + parseInt(days));
@@ -11830,16 +12346,36 @@ function PurchaseOrderModule({
       jatuhTempoMode: "tanggal",
       tanggalJatuhTempo: "",
       jumlahHari: "30",
-      catatan: ""
+      catatan: "",
+      urgent: false
     });
     setModal(true);
   };
 
   // Add items from one more Item Requisition into the PO being built (multi-IR per supplier)
-  const addFromIR = irNomor => {
+  // Step 1: user picked an IR from the dropdown (create form or revise/edit modal) — open a
+  // per-item checklist instead of pulling every item in, since not all parts in one IR are
+  // necessarily bought from the same supplier / go into the same PO.
+  const openIrPick = (irNomor, target) => {
     const ir = itemRequisitions.find(r => r.nomor === irNomor);
-    if (!ir || form.irNomors.includes(irNomor)) return;
-    const newItems = ir.items.map(it => {
+    if (!ir) return;
+    const alreadyIn = target === "revise" ? reviseIrNomors.includes(irNomor) : form.irNomors.includes(irNomor);
+    if (alreadyIn) return;
+    const availableIdx = ir.items.map((_, i) => i).filter(i => !ir.items[i].sudahDiPO);
+    if (availableIdx.length === 0) return alert("Semua item di IR ini sudah masuk ke PO lain.");
+    setIrPick(ir);
+    setIrPickedIdx(availableIdx);
+    setIrPickTarget(target);
+  };
+  const toggleIrPickedIdx = i => setIrPickedIdx(arr => arr.includes(i) ? arr.filter(x => x !== i) : [...arr, i]);
+  // Step 2: user confirms which specific items from that IR actually get added — routed to either
+  // the create-form draft or the revise/edit draft depending on where the picker was opened from.
+  const confirmIrPick = () => {
+    if (!irPick) return;
+    const chosen = irPickedIdx.filter(i => !irPick.items[i].sudahDiPO);
+    if (chosen.length === 0) return alert("Pilih minimal 1 item yang belum di-PO");
+    const newItems = chosen.map(i => {
+      const it = irPick.items[i];
       const part = store.parts.find(p => p.partNumber === it.partNumber);
       return {
         partNumber: it.partNumber,
@@ -11847,21 +12383,33 @@ function PurchaseOrderModule({
         partDescription: part?.description || "",
         qty: it.qtyKurang,
         harga: "",
-        fromIR: irNomor
+        fromIR: irPick.nomor,
+        fromIRIdx: i
       };
     });
-    setForm(f => ({
-      ...f,
-      irNomors: [...f.irNomors, irNomor],
-      items: [...f.items, ...newItems]
-    }));
-    setIrPickerOpen(false);
+    if (irPickTarget === "revise") {
+      setReviseIrNomors(arr => arr.includes(irPick.nomor) ? arr : [...arr, irPick.nomor]);
+      setReviseItems(items => [...items, ...newItems]);
+    } else {
+      setForm(f => ({
+        ...f,
+        irNomors: f.irNomors.includes(irPick.nomor) ? f.irNomors : [...f.irNomors, irPick.nomor],
+        items: [...f.items, ...newItems]
+      }));
+    }
+    setIrPick(null);
+    setIrPickedIdx([]);
   };
   const removeIR = irNomor => setForm(f => ({
     ...f,
     irNomors: f.irNomors.filter(n => n !== irNomor),
     items: f.items.filter(it => it.fromIR !== irNomor)
   }));
+  const removeFormItem = i => setForm(f => ({
+    ...f,
+    items: f.items.filter((_, j) => j !== i)
+  }));
+  const removeReviseItem = i => setReviseItems(items => items.filter((_, j) => j !== i));
   const updateItemHarga = (i, harga) => {
     const items = [...form.items];
     items[i] = {
@@ -11894,8 +12442,8 @@ function PurchaseOrderModule({
       ...it,
       subtotal: it.qty * (it.harga || 0)
     }));
-    setPo([...po, {
-      nomor: newNomor(),
+    setPo(prev => [...prev, {
+      nomor: newNomor(prev),
       tanggal: today(),
       irNomors: form.irNomors,
       supplierId: form.supplierId,
@@ -11909,6 +12457,7 @@ function PurchaseOrderModule({
       tipePembayaran: form.tipePembayaran,
       tanggalJatuhTempo,
       catatan: form.catatan,
+      urgent: !!form.urgent,
       createdBy: session.nama,
       status: "Menunggu Approval GM",
       statusBayar: "Belum Dibayar",
@@ -11917,11 +12466,22 @@ function PurchaseOrderModule({
       noInvoiceSupplier: "",
       noFakturPajak: ""
     }]);
-    // Mark consumed Item Requisitions so they no longer appear in the picker
-    const updatedIRs = store.itemRequisitions.map(ir => form.irNomors.includes(ir.nomor) ? {
-      ...ir,
-      status: "Sudah di-PO"
-    } : ir);
+    // Mark only the specific items that were pulled into this PO as consumed — an IR only flips
+    // to "Sudah di-PO" once every one of its items has been allocated to some PO; items left over
+    // (e.g. because they go to a different supplier) stay available for a future PO.
+    const updatedIRs = store.itemRequisitions.map(ir => {
+      if (!form.irNomors.includes(ir.nomor)) return ir;
+      const consumedIdx = form.items.filter(it => it.fromIR === ir.nomor).map(it => it.fromIRIdx);
+      const newItems = ir.items.map((it, i) => consumedIdx.includes(i) ? {
+        ...it,
+        sudahDiPO: true
+      } : it);
+      return {
+        ...ir,
+        items: newItems,
+        status: newItems.every(it => it.sudahDiPO) ? "Sudah di-PO" : "Menunggu Purchasing"
+      };
+    });
     store.setItemRequisitions(updatedIRs);
     setModal(false);
     setForm({
@@ -12005,6 +12565,9 @@ function PurchaseOrderModule({
     })));
     setRevisePakaiPpn(p.pakaiPpn || false);
     setReviseCurrency(p.currency || "IDR");
+    setReviseSupplierId(p.supplierId || "");
+    setReviseIrNomors(p.irNomors || []);
+    setReviseUrgent(p.urgent || false);
   };
   const updateReviseHarga = (i, harga) => {
     const items = [...reviseItems];
@@ -12019,19 +12582,27 @@ function PurchaseOrderModule({
   const revisePpnAmount = revisePakaiPpn ? reviseSubtotal * 0.11 : 0;
   const reviseTotal = reviseSubtotal + revisePpnAmount;
   const saveRevise = () => {
+    if (!reviseSupplierId) return alert("Pilih supplier");
+    if (reviseItems.length === 0) return alert("PO harus punya minimal 1 item");
     const arr = [...po];
     const items = reviseItems.map(it => ({
       ...it,
       subtotal: it.qty * (it.harga || 0)
     }));
     const wasApproved = reviseModal.status === "Disetujui GM - Kirim ke Supplier";
+    const sup = suppliers.find(s => s.id === reviseSupplierId);
+    const newIrNomors = [...new Set(items.filter(it => it.fromIR).map(it => it.fromIR))];
     arr[po.indexOf(reviseModal)] = {
       ...reviseModal,
+      supplierId: reviseSupplierId,
+      supplierNama: sup?.nama || reviseModal.supplierNama,
+      irNomors: newIrNomors,
       items,
       subtotal: reviseSubtotal,
       pakaiPpn: revisePakaiPpn,
       ppnAmount: revisePpnAmount,
       total: reviseTotal,
+      urgent: !!reviseUrgent,
       currency: isLocal ? "IDR" : reviseCurrency,
       ...(wasApproved ? {
         status: "Menunggu Approval GM",
@@ -12039,11 +12610,41 @@ function PurchaseOrderModule({
       } : {})
     };
     setPo(arr);
+    // Reconcile IR item consumption: release items removed from the PO during this edit, and
+    // mark newly-added items (pulled in via the IR picker while editing) as consumed.
+    const oldKeys = new Set((reviseModal.items || []).filter(it => it.fromIR).map(it => `${it.fromIR}#${it.fromIRIdx}`));
+    const newKeys = new Set(items.filter(it => it.fromIR).map(it => `${it.fromIR}#${it.fromIRIdx}`));
+    const releasedKeys = [...oldKeys].filter(k => !newKeys.has(k));
+    const addedKeys = [...newKeys].filter(k => !oldKeys.has(k));
+    if (releasedKeys.length || addedKeys.length) {
+      const touchedIRs = new Set([...releasedKeys, ...addedKeys].map(k => k.split("#")[0]));
+      const updatedIRs = store.itemRequisitions.map(ir => {
+        if (!touchedIRs.has(ir.nomor)) return ir;
+        const newItems = ir.items.map((it, i) => {
+          const key = `${ir.nomor}#${i}`;
+          if (releasedKeys.includes(key)) return {
+            ...it,
+            sudahDiPO: false
+          };
+          if (addedKeys.includes(key)) return {
+            ...it,
+            sudahDiPO: true
+          };
+          return it;
+        });
+        return {
+          ...ir,
+          items: newItems,
+          status: newItems.every(it => it.sudahDiPO) ? "Sudah di-PO" : "Menunggu Purchasing"
+        };
+      });
+      store.setItemRequisitions(updatedIRs);
+    }
     logAudit(store, session, {
       module: `Purchase Order ${isLocal ? "Lokal" : "Overseas"}`,
       docNomor: reviseModal.nomor,
-      action: "Revisi Harga",
-      detail: `${reviseModal.supplierNama} — Total baru: ${fmtMoney(reviseTotal, isLocal ? "IDR" : reviseCurrency)}${wasApproved ? " — status dikembalikan ke Menunggu Approval GM" : ""}`
+      action: "Edit PO",
+      detail: `${sup?.nama || reviseModal.supplierNama} — Total baru: ${fmtMoney(reviseTotal, isLocal ? "IDR" : reviseCurrency)}${wasApproved ? " — status dikembalikan ke Menunggu Approval GM" : ""}`
     });
     setReviseModal(null);
   };
@@ -12051,14 +12652,16 @@ function PurchaseOrderModule({
     setSupplierDocModal(p);
     setSupplierDocForm({
       noInvoiceSupplier: p.noInvoiceSupplier || "",
-      noFakturPajak: p.noFakturPajak || ""
+      noFakturPajak: p.noFakturPajak || "",
+      isCash: p.noInvoiceSupplier === "CASH"
     });
   };
   const saveSupplierDoc = () => {
     const arr = [...po];
     arr[po.indexOf(supplierDocModal)] = {
       ...supplierDocModal,
-      ...supplierDocForm
+      noInvoiceSupplier: supplierDocForm.isCash ? "CASH" : supplierDocForm.noInvoiceSupplier,
+      noFakturPajak: supplierDocForm.noFakturPajak
     };
     setPo(arr);
     setSupplierDocModal(null);
@@ -12253,14 +12856,20 @@ function PurchaseOrderModule({
     headers: ["No. PO", "Tanggal", "Supplier", "Tipe Bayar", "Jatuh Tempo", "Total", "Status", "Status Bayar", "Aksi"],
     rows: poFiltered.map(p => {
       const due = getDueStatus(p.tipePembayaran, p.tanggalJatuhTempo);
-      return [/*#__PURE__*/React.createElement("span", {
+      return [/*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("span", {
         style: {
           color: theme.accentLight,
           fontWeight: 600,
           cursor: "pointer"
         },
         onClick: () => setDetail(p)
-      }, p.nomor), p.tanggal, p.supplierNama, /*#__PURE__*/React.createElement(Badge, {
+      }, p.nomor), p.urgent && /*#__PURE__*/React.createElement("span", {
+        style: {
+          marginLeft: 6
+        }
+      }, /*#__PURE__*/React.createElement(Badge, {
+        color: theme.red
+      }, "⚠ URGENT"))), p.tanggal, p.supplierNama, /*#__PURE__*/React.createElement(Badge, {
         color: p.tipePembayaran === "COD" ? theme.cyan : theme.purple
       }, payLabel(p.tipePembayaran)), p.tipePembayaran === "TEMPO" ? /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement(Badge, {
         color: due.color
@@ -12277,16 +12886,42 @@ function PurchaseOrderModule({
         size: "sm",
         variant: "ghost",
         onClick: () => openRevise(p)
-      }, "Revisi Harga") : "-"];
+      }, "Edit") : "-"];
     }),
-    onDelete: isOwnerLike ? i => {
-      if (!confirm(`Hapus PO ${po[i].nomor}?`)) return;
-      setPo(po.filter(x => x !== po[i]));
+    onDelete: isOwnerLike || isHandler || isMaria ? i => {
+      const target = po[i];
+      if (!isOwnerLike && target.status !== "Menunggu Approval GM") {
+        return alert("PO yang sudah diproses (disetujui/ditolak GM) hanya dapat dihapus oleh Owner/GM/Finance Director.");
+      }
+      if (!confirm(`Hapus PO ${target.nomor}?`)) return;
+      setPo(po.filter(x => x !== target));
+      // Release any IR items this PO had consumed so they become pickable again in a future PO.
+      if (target.irNomors && target.irNomors.length) {
+        const consumedByIR = {};
+        (target.items || []).forEach(it => {
+          if (it.fromIR == null || it.fromIRIdx == null) return;
+          (consumedByIR[it.fromIR] = consumedByIR[it.fromIR] || []).push(it.fromIRIdx);
+        });
+        const updatedIRs = store.itemRequisitions.map(ir => {
+          const idxList = consumedByIR[ir.nomor];
+          if (!idxList) return ir;
+          const newItems = ir.items.map((it, i2) => idxList.includes(i2) ? {
+            ...it,
+            sudahDiPO: false
+          } : it);
+          return {
+            ...ir,
+            items: newItems,
+            status: "Menunggu Purchasing"
+          };
+        });
+        store.setItemRequisitions(updatedIRs);
+      }
       logAudit(store, session, {
         module: isLocal ? "Purchase Order Lokal" : "Purchase Order Overseas",
-        docNomor: po[i].nomor,
+        docNomor: target.nomor,
         action: "Hapus",
-        detail: po[i].supplierNama
+        detail: target.supplierNama
       });
     } : undefined,
     emptyMsg: `Belum ada PO ${isLocal ? "Lokal" : "Overseas"}`
@@ -12351,7 +12986,17 @@ function PurchaseOrderModule({
     style: {
       color: theme.text
     }
-  }, detail.irNomors.join(", "))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+  }, detail.irNomors.join(", "))), detail.irNomors && detail.irNomors.length > 0 && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted
+    }
+  }, "No. SO:"), " ", /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, [...new Set(detail.irNomors.map(n => itemRequisitions.find(ir => ir.nomor === n)?.soNomor).filter(Boolean))].join(", ") || "-")), detail.urgent && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(Badge, {
+    color: theme.red
+  }, "⚠ URGENT")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.muted
     }
@@ -12419,17 +13064,19 @@ function PurchaseOrderModule({
       docTitle: `PURCHASE ORDER ${isLocal ? "LOKAL" : "OVERSEAS"}`,
       nomor: detail.nomor,
       tanggal: detail.tanggal,
+      tanggalLabel: isLocal ? "Tanggal" : "Date",
       partyLabel: "Vendor:",
       partyName: detail.supplierNama,
+      partyExtra: suppliers.find(s => s.id === detail.supplierId)?.alamat || "",
       currency: detail.currency,
-      itemHeaders: ["Part Number", "Part Name", "Description", "Qty", "Harga", "Subtotal"],
+      itemHeaders: ["Part Number", "Part Name", "Description", "Qty", isLocal ? "Harga" : "Price", "Subtotal"],
       items: detail.items.map(it => [it.partNumber, it.partName, it.partDescription || "-", fmtNum(it.qty), fmtMoney(it.harga, detail.currency), fmtMoney(it.subtotal, detail.currency)]),
       subtotal: detail.total,
       diskon: 0,
       pajak: 0,
       total: detail.total,
-      catatan: detail.catatan,
-      extraInfoRows: [["Currency", detail.currency], ["Tipe Pembayaran", payLabel(detail.tipePembayaran)], ...(detail.tipePembayaran === "TEMPO" ? [["Jatuh Tempo", detail.tanggalJatuhTempo]] : []), ...(detail.irNomors && detail.irNomors.length ? [["No. IR", detail.irNomors.join(", ")]] : []), ["VAT/PPN", detail.pakaiPpn ? `${detail.currency} ${fmtCur(detail.ppnAmount || 0, detail.currency)} (11%)` : "Not Subject to VAT/PPN"], ...(detail.noInvoiceSupplier ? [["No. Invoice Supplier", detail.noInvoiceSupplier]] : []), ...(detail.jumlahDibayar > 0 ? [["Dibayar", `${fmtMoney(detail.jumlahDibayar, detail.currency)} pada ${detail.tanggalBayar}`]] : [])],
+      catatan: detail.urgent ? `⚠ URGENT${detail.catatan ? " — " + detail.catatan : ""}` : detail.catatan,
+      extraInfoRows: [["No. PO", detail.nomor], ...(detail.irNomors && detail.irNomors.length ? [["No. SO", [...new Set(detail.irNomors.map(n => itemRequisitions.find(ir => ir.nomor === n)?.soNomor).filter(Boolean))].join(", ") || "-"]] : []), ...(detail.irNomors && detail.irNomors.length ? [["No. IR", detail.irNomors.join(", ")]] : []), ["Currency", detail.currency], [isLocal ? "Tipe Pembayaran" : "Payment Term", payLabel(detail.tipePembayaran)], ...(detail.tipePembayaran === "TEMPO" ? [[isLocal ? "Jatuh Tempo" : "Due Date", detail.tanggalJatuhTempo]] : []), ["VAT/PPN", detail.pakaiPpn ? `${detail.currency} ${fmtCur(detail.ppnAmount || 0, detail.currency)} (11%)` : "Not Subject to VAT/PPN"], ...(detail.noInvoiceSupplier ? [["No. Invoice Supplier", detail.noInvoiceSupplier]] : []), ...(detail.jumlahDibayar > 0 ? [["Dibayar", `${fmtMoney(detail.jumlahDibayar, detail.currency)} pada ${detail.tanggalBayar}`]] : [])],
       dibuatOleh: {
         nama: detail.createdBy
       },
@@ -12499,15 +13146,18 @@ function PurchaseOrderModule({
       fontSize: 13,
       fontWeight: 600
     }
-  }, "ITEM DARI REQUISITION (bisa tambah lebih dari 1)"), /*#__PURE__*/React.createElement(Select, {
+  }, "ITEM DARI REQUISITION (bisa tambah lebih dari 1 — pilih item spesifik per IR)"), /*#__PURE__*/React.createElement(Select, {
     value: "",
-    onChange: addFromIR,
-    options: itemRequisitions.filter(ir => ir.status === "Menunggu Purchasing" && !form.irNomors.includes(ir.nomor)).map(ir => ({
-      value: ir.nomor,
-      label: `${ir.nomor}${ir.bomCandidate ? " · Non-SO" : ""} (${ir.items.length} part)`
-    })),
+    onChange: v => openIrPick(v, "create"),
+    options: itemRequisitions.filter(ir => ir.status === "Menunggu Purchasing" && !form.irNomors.includes(ir.nomor)).map(ir => {
+      const remaining = ir.items.filter(it => !it.sudahDiPO).length;
+      return {
+        value: ir.nomor,
+        label: `${ir.nomor}${ir.bomCandidate ? " · Non-SO" : ""} (${remaining}/${ir.items.length} part belum di-PO)`
+      };
+    }),
     style: {
-      width: 220
+      width: 260
     }
   })), form.irNomors.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
@@ -12551,7 +13201,8 @@ function PurchaseOrderModule({
         fontSize: 11,
         color: theme.muted
       }
-    }, it.fromIR)])
+    }, it.fromIR)]),
+    onDelete: removeFormItem
   }) : /*#__PURE__*/React.createElement("p", {
     style: {
       margin: 0,
@@ -12590,7 +13241,24 @@ function PurchaseOrderModule({
       ...form,
       pakaiPpn: e.target.checked
     })
-  }), " Dikenakan PPN (11%)"), form.tipePembayaran === "TEMPO" && /*#__PURE__*/React.createElement("div", {
+  }), " Dikenakan PPN (11%)"), /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      fontSize: 13,
+      color: theme.red,
+      fontWeight: 700,
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: !!form.urgent,
+    onChange: e => setForm({
+      ...form,
+      urgent: e.target.checked
+    })
+  }), " ⚠ URGENT (beri tahu supplier bahwa PO ini mendesak)"), form.tipePembayaran === "TEMPO" && /*#__PURE__*/React.createElement("div", {
     style: {
       border: `1px solid ${theme.border}`,
       borderRadius: 10,
@@ -12716,6 +13384,70 @@ function PurchaseOrderModule({
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     onClick: save
   }, "Ajukan PO")))), /*#__PURE__*/React.createElement(Modal, {
+    open: !!irPick,
+    title: `Pilih Item dari ${irPick?.nomor || ""}`,
+    onClose: () => {
+      setIrPick(null);
+      setIrPickedIdx([]);
+    },
+    width: 560
+  }, irPick && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      color: theme.muted,
+      fontSize: 13,
+      fontWeight: 600
+    }
+  }, "Pilih item mana yang mau dibuat menjadi PO ini (item yang sudah di-PO tidak bisa dipilih lagi):"), irPick.items.map((it, i) => {
+    const consumed = !!it.sudahDiPO;
+    return /*#__PURE__*/React.createElement("label", {
+      key: i,
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "8px 12px",
+        background: theme.surface,
+        borderRadius: 8,
+        marginBottom: 6,
+        cursor: consumed ? "not-allowed" : "pointer",
+        fontSize: 13,
+        color: consumed ? theme.muted : theme.text,
+        opacity: consumed ? 0.55 : 1
+      }
+    }, /*#__PURE__*/React.createElement("input", {
+      type: "checkbox",
+      checked: irPickedIdx.includes(i),
+      disabled: consumed,
+      onChange: () => toggleIrPickedIdx(i)
+    }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("strong", null, it.partNumber), " — ", it.partName, " — Qty ", fmtNum(it.qtyKurang)), consumed && /*#__PURE__*/React.createElement("span", {
+      style: {
+        marginLeft: 8
+      }
+    }, /*#__PURE__*/React.createElement(Badge, {
+      color: theme.green
+    }, "Sudah di-PO"))));
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => {
+      setIrPick(null);
+      setIrPickedIdx([]);
+    }
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: confirmIrPick
+  }, "+ Tambahkan Item Terpilih")))), /*#__PURE__*/React.createElement(Modal, {
     open: !!importCostModal,
     title: `Import Cost — ${importCostModal?.nomor}`,
     onClose: () => setImportCostModal(null),
@@ -12845,9 +13577,9 @@ function PurchaseOrderModule({
     onClick: confirmMarkPaid
   }, "✓ Konfirmasi Pembayaran")))), /*#__PURE__*/React.createElement(Modal, {
     open: !!reviseModal,
-    title: `Revisi Harga PO — ${reviseModal?.nomor}`,
+    title: `Edit PO — ${reviseModal?.nomor}`,
     onClose: () => setReviseModal(null),
-    width: 620
+    width: 660
   }, reviseModal && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -12863,7 +13595,22 @@ function PurchaseOrderModule({
       padding: "8px 12px",
       borderRadius: 8
     }
-  }, "⚠️ PO ini sudah disetujui GM. Merevisi harga atau mata uang akan mengembalikan status ke Menunggu Approval GM."), !isLocal && /*#__PURE__*/React.createElement(Select, {
+  }, "⚠️ PO ini sudah disetujui GM. Mengedit PO akan mengembalikan status ke Menunggu Approval GM."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: !isLocal ? "2fr 1fr" : "1fr",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    label: "Supplier",
+    value: reviseSupplierId,
+    onChange: setReviseSupplierId,
+    options: suppliers.map(s => ({
+      value: s.id,
+      label: s.nama
+    })),
+    required: true
+  }), !isLocal && /*#__PURE__*/React.createElement(Select, {
     label: "Mata Uang",
     value: reviseCurrency,
     onChange: setReviseCurrency,
@@ -12871,7 +13618,33 @@ function PurchaseOrderModule({
       value: c,
       label: c
     }))
-  }), /*#__PURE__*/React.createElement(Table, {
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center"
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      color: theme.muted,
+      fontSize: 13,
+      fontWeight: 600
+    }
+  }, "ITEM PO"), /*#__PURE__*/React.createElement(Select, {
+    value: "",
+    onChange: v => openIrPick(v, "revise"),
+    options: itemRequisitions.filter(ir => ir.status === "Menunggu Purchasing" && !reviseIrNomors.includes(ir.nomor)).map(ir => {
+      const remaining = ir.items.filter(it => !it.sudahDiPO).length;
+      return {
+        value: ir.nomor,
+        label: `+ ${ir.nomor} (${remaining}/${ir.items.length} part belum di-PO)`
+      };
+    }),
+    style: {
+      width: 260
+    }
+  })), /*#__PURE__*/React.createElement(Table, {
     headers: ["Part Number", "Part Name", "Qty", "Harga Satuan", "Subtotal"],
     rows: reviseItems.map((it, i) => [it.partNumber, it.partName, fmtNum(it.qty), /*#__PURE__*/React.createElement("input", {
       type: "number",
@@ -12886,7 +13659,9 @@ function PurchaseOrderModule({
         width: 110,
         fontFamily: "inherit"
       }
-    }), fmtMoney(it.qty * (it.harga || 0), isLocal ? "IDR" : reviseCurrency)])
+    }), fmtMoney(it.qty * (it.harga || 0), isLocal ? "IDR" : reviseCurrency)]),
+    onDelete: removeReviseItem,
+    emptyMsg: "Belum ada item"
   }), /*#__PURE__*/React.createElement("label", {
     style: {
       display: "flex",
@@ -12900,7 +13675,21 @@ function PurchaseOrderModule({
     type: "checkbox",
     checked: revisePakaiPpn,
     onChange: e => setRevisePakaiPpn(e.target.checked)
-  }), " Dikenakan PPN (11%)"), /*#__PURE__*/React.createElement("div", {
+  }), " Dikenakan PPN (11%)"), /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      fontSize: 13,
+      color: theme.red,
+      fontWeight: 700,
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: !!reviseUrgent,
+    onChange: e => setReviseUrgent(e.target.checked)
+  }), " ⚠ URGENT (beri tahu supplier bahwa PO ini mendesak)"), /*#__PURE__*/React.createElement("div", {
     style: {
       background: theme.surface,
       borderRadius: 8,
@@ -12949,7 +13738,23 @@ function PurchaseOrderModule({
       flexDirection: "column",
       gap: 14
     }
-  }, /*#__PURE__*/React.createElement(Input, {
+  }, /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      fontSize: 13,
+      color: theme.text,
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: supplierDocForm.isCash,
+    onChange: e => setSupplierDocForm({
+      ...supplierDocForm,
+      isCash: e.target.checked
+    })
+  }), " Pembayaran CASH (tanpa No. Invoice dari supplier)"), !supplierDocForm.isCash && /*#__PURE__*/React.createElement(Input, {
     label: "No. Invoice dari Supplier",
     value: supplierDocForm.noInvoiceSupplier,
     onChange: v => setSupplierDocForm({
@@ -13762,7 +14567,18 @@ function PartsUseModule({
   const [returnModal, setReturnModal] = useState(null);
   const [returnQty, setReturnQty] = useState({});
   const [returnReason, setReturnReason] = useState("Tidak Terpakai Semua");
-  const newNomor = () => "PU-" + new Date().getFullYear() + "-" + String(partsUse.length + 1).padStart(4, "0");
+  const newNomor = (arr = partsUse) => {
+    const year = new Date().getFullYear();
+    const prefix = "PU-" + year + "-";
+    const maxSeq = arr.reduce((max, r) => {
+      if (r.nomor && r.nomor.startsWith(prefix)) {
+        const n = parseInt(r.nomor.slice(prefix.length), 10);
+        if (!isNaN(n) && n > max) return n;
+      }
+      return max;
+    }, 0);
+    return prefix + String(maxSeq + 1).padStart(4, "0");
+  };
   const eligibleSO = salesOrders.filter(so => so.status === "Aktif");
   const loadFromSO = soNomor => {
     const so = salesOrders.find(s => s.nomor === soNomor);
@@ -13781,8 +14597,8 @@ function PartsUseModule({
   };
   const save = () => {
     if (!form.mekanikNama) return alert("Isi nama mekanik penerima");
-    setPartsUse([...partsUse, {
-      nomor: newNomor(),
+    setPartsUse(prev => [...prev, {
+      nomor: newNomor(prev),
       tanggal: today(),
       soNomor: form.soNomor,
       mekanikNama: form.mekanikNama,
@@ -14210,7 +15026,18 @@ function DeliveryOrderModule({
     noTelp: "",
     catatan: ""
   });
-  const newNomor = () => "DO-" + new Date().getFullYear() + "-" + String(deliveryOrders.length + 1).padStart(4, "0");
+  const newNomor = (arr = deliveryOrders) => {
+    const year = new Date().getFullYear();
+    const prefix = "DO-" + year + "-";
+    const maxSeq = arr.reduce((max, r) => {
+      if (r.nomor && r.nomor.startsWith(prefix)) {
+        const n = parseInt(r.nomor.slice(prefix.length), 10);
+        if (!isNaN(n) && n > max) return n;
+      }
+      return max;
+    }, 0);
+    return prefix + String(maxSeq + 1).padStart(4, "0");
+  };
   const addMonths = (dateStr, months) => {
     const d = new Date(dateStr);
     d.setMonth(d.getMonth() + months);
@@ -14219,20 +15046,23 @@ function DeliveryOrderModule({
   const save = () => {
     if (!form.soNomor) return alert("Pilih Sales Order");
     const so = salesOrders.find(s => s.nomor === form.soNomor);
-    const doNomor = newNomor();
-    setDeliveryOrders([...deliveryOrders, {
-      nomor: doNomor,
-      ...form,
-      customerNama: so?.customerNama,
-      tipe: so?.tipe,
-      items: so?.items.map(it => ({
-        partNumber: it.partNumber || it.unitCode,
-        nama: it.unitName || it.partName,
-        qty: it.qty
-      })) || [],
-      createdBy: session.nama,
-      status: "Dikirim"
-    }]);
+    let doNomor;
+    setDeliveryOrders(prev => {
+      doNomor = newNomor(prev);
+      return [...prev, {
+        nomor: doNomor,
+        ...form,
+        customerNama: so?.customerNama,
+        tipe: so?.tipe,
+        items: so?.items.map(it => ({
+          partNumber: it.partNumber || it.unitCode,
+          nama: it.unitName || it.partName,
+          qty: it.qty
+        })) || [],
+        createdBy: session.nama,
+        status: "Dikirim"
+      }];
+    });
     // Auto-generate maintenance schedule for Unit-type SO — every 3 months from DO date
     if (so?.tipe === "Unit") {
       const newSchedules = so.items.map(it => ({
@@ -14727,6 +15557,7 @@ function InvoiceModule({
     setInvoices,
     salesOrders,
     employees,
+    customers,
     editRequests,
     setEditRequests
   } = store;
@@ -14863,7 +15694,18 @@ function InvoiceModule({
     if (isLastRemaining) return Math.max(0, so.total - soTerbayarSoFar(so.nomor));
     return so.total * (parseFloat(t.percent) || 0) / 100;
   };
-  const newNomor = () => "INV-" + new Date().getFullYear() + "-" + String(invoices.length + 1).padStart(4, "0");
+  const newNomor = (arr = invoices) => {
+    const year = new Date().getFullYear();
+    const prefix = "INV-" + year + "-";
+    const maxSeq = arr.reduce((max, r) => {
+      if (r.nomor && r.nomor.startsWith(prefix)) {
+        const n = parseInt(r.nomor.slice(prefix.length), 10);
+        if (!isNaN(n) && n > max) return n;
+      }
+      return max;
+    }, 0);
+    return prefix + String(maxSeq + 1).padStart(4, "0");
+  };
   const addDays = (dateStr, days) => {
     const d = new Date(dateStr);
     d.setDate(d.getDate() + parseInt(days));
@@ -14897,8 +15739,8 @@ function InvoiceModule({
     const pajakNominal = afterDiskon * 0.11;
     const uangMukaNominal = parseFloat(form.uangMuka) || 0;
     const invoiceTotal = Math.max(0, afterDiskon + pajakNominal - uangMukaNominal);
-    setInvoices([...invoices, {
-      nomor: newNomor(),
+    setInvoices(prev => [...prev, {
+      nomor: newNomor(prev),
       tanggal: today(),
       soNomor: form.soNomor,
       noPoClient: form.noPoClient,
@@ -14922,6 +15764,7 @@ function InvoiceModule({
       total: invoiceTotal,
       tipePembayaran: form.tipePembayaran,
       tanggalJatuhTempo,
+      jumlahHariTempo: form.tipePembayaran === "TEMPO" && form.jatuhTempoMode === "hari" ? form.jumlahHari : null,
       noFakturPajak: form.noFakturPajak,
       catatan: form.catatan,
       createdBy: session.nama,
@@ -15722,6 +16565,7 @@ function InvoiceModule({
       tanggal: detail.tanggal,
       partyLabel: "Kepada:",
       partyName: detail.customerNama,
+      partyExtra: customers.find(c => c.nama === detail.customerNama)?.alamat || "",
       itemHeaders: ["Nama Barang/Jasa", "Qty", "Harga", "Subtotal"],
       items: detail.items.map(it => [it.unitName || it.partName, fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)]),
       subtotal: detail.subtotal,
@@ -15732,10 +16576,12 @@ function InvoiceModule({
       uangMuka: detail.uangMuka,
       total: detail.total,
       catatan: detail.catatan,
-      extraInfoRows: [["No. Purchase Order Client", detail.noPoClient || "-"], ...(detail.terminLabel ? [["Termin", `${detail.terminLabel} (${detail.terminPercent}%) dari total SO ${fmt(detail.soTotal)}`]] : []), ["Tipe Pembayaran", detail.tipePembayaran], ...(detail.tipePembayaran === "TEMPO" ? [["Jatuh Tempo", detail.tanggalJatuhTempo]] : []), ["Terbayar", fmt(detail.terbayar || 0)], ["Sisa", fmt(detail.total - (detail.terbayar || 0))]],
+      extraInfoRows: [["No. Purchase", detail.noPoClient || "-"], ...(detail.terminLabel ? [["Termin", `${detail.terminLabel} (${detail.terminPercent}%) dari total SO ${fmt(detail.soTotal)}`]] : []), ["Term of Payment", detail.tipePembayaran], ...(detail.tipePembayaran === "TEMPO" ? [...(detail.jumlahHariTempo ? [["Jumlah Hari", `${detail.jumlahHariTempo} hari`]] : []), ["Jatuh Tempo", detail.tanggalJatuhTempo]] : [])],
       terbilangText: terbilang(detail.total),
       bankInfoText: "BCA KCP Sunter Bisma<br/>A/N PT. FORESTA TRANSTEK<br/>A/C 5820822678",
       hideCreatedBy: true,
+      disetujuiAlign: "left",
+      showMateraiSpace: true,
       disetujuiLabel: "Disetujui Oleh",
       disetujuiOleh: {
         nama: "Effendi Husin",
@@ -17123,7 +17969,18 @@ function TicketingModule({
   const [namaPicker, setNamaPicker] = useState("");
   const [namaBebas, setNamaBebas] = useState("");
   const mekanikList = employees.filter(e => e.role === "mekanik").map(e => e.nama);
-  const newNomor = () => "TKT-" + new Date().getFullYear() + "-" + String(tickets.length + 1).padStart(4, "0");
+  const newNomor = (arr = tickets) => {
+    const year = new Date().getFullYear();
+    const prefix = "TKT-" + year + "-";
+    const maxSeq = arr.reduce((max, r) => {
+      if (r.nomor && r.nomor.startsWith(prefix)) {
+        const n = parseInt(r.nomor.slice(prefix.length), 10);
+        if (!isNaN(n) && n > max) return n;
+      }
+      return max;
+    }, 0);
+    return prefix + String(maxSeq + 1).padStart(4, "0");
+  };
   const toggleSO = nomor => {
     setForm(f => ({
       ...f,
@@ -17155,19 +18012,24 @@ function TicketingModule({
     if (form.soNomors.length === 0) return alert("Pilih minimal 1 project (Sales Order)");
     const hargaSatuan = parseFloat(form.harga) || 0;
     const jumlahOrang = form.mekanikNamaList.length;
-    const item = {
+    const baseItem = {
       ...form,
       harga: hargaSatuan,
       jumlahOrang,
       totalHarga: hargaSatuan * jumlahOrang,
-      nomor: editIdx !== null ? tickets[editIdx].nomor : newNomor(),
       inputBy: session.nama
     };
     if (editIdx !== null) {
       const arr = [...tickets];
-      arr[editIdx] = item;
+      arr[editIdx] = {
+        ...baseItem,
+        nomor: tickets[editIdx].nomor
+      };
       setTickets(arr);
-    } else setTickets([...tickets, item]);
+    } else setTickets(prev => [...prev, {
+      ...baseItem,
+      nomor: newNomor(prev)
+    }]);
     setModal(false);
     setForm({
       tanggal: today(),
@@ -17622,6 +18484,7 @@ function printDocument({
   docTitle,
   nomor,
   tanggal,
+  tanggalLabel = "Tanggal",
   partyLabel,
   partyName,
   partyExtra,
@@ -17644,6 +18507,8 @@ function printDocument({
   disetujuiLabel = "Disetujui oleh",
   dibuatOlehLabel = "Dibuat oleh",
   hideCreatedBy = false,
+  disetujuiAlign,
+  showMateraiSpace = false,
   company,
   bankInfoText,
   terbilangText,
@@ -17701,7 +18566,7 @@ function printDocument({
         </div>
         <div>
           <div class="doctitle">${docTitle}</div>
-          <div style="text-align:right;font-size:13px;margin-top:6px;">No: <strong>${nomor}</strong><br/>Tanggal: ${tanggal}</div>
+          <div style="text-align:right;font-size:13px;margin-top:6px;">No: <strong>${nomor}</strong><br/>${tanggalLabel}: ${tanggal}</div>
         </div>
       </div>
       <div style="margin-bottom:20px;">
@@ -17726,9 +18591,9 @@ function printDocument({
       ${bankInfoText ? `<div style="margin-top:16px;background:#f5f5f5;border-radius:8px;padding:10px 14px;font-size:12px;"><strong>Informasi Pembayaran:</strong><br/>${bankInfoText}</div>` : ""}
       ${paymentTermsHtml}
       ${catatan ? `<div style="margin-top:24px;font-size:12px;color:#666;white-space:pre-wrap;word-break:break-word;"><strong>Catatan:</strong> ${String(catatan).replace(/</g, "&lt;")}</div>` : ""}
-      <div style="margin-top:60px;display:flex;justify-content:${hideCreatedBy ? "center" : "space-between"};font-size:12px;">
+      <div style="margin-top:60px;display:flex;justify-content:${disetujuiAlign === "left" ? "flex-start" : hideCreatedBy ? "center" : "space-between"};font-size:12px;">
         ${hideCreatedBy ? "" : `<div style="text-align:center;width:200px;">${dibuatOlehLabel}<br/><br/>${sigBlock(dibuatOleh)}</div>`}
-        <div style="text-align:center;width:200px;">${disetujuiLabel}<br/><br/>${sigBlock(disetujuiOleh)}</div>
+        <div style="text-align:center;width:200px;">${disetujuiLabel}<br/><br/>${showMateraiSpace ? `<div style="width:94px;height:144px;border:1px dashed #999;border-radius:4px;margin:0 auto 6px;display:flex;align-items:center;justify-content:center;font-size:9px;color:#999;text-align:center;padding:4px;box-sizing:border-box;">Materai<br/>Rp 10.000</div>` : ""}${sigBlock(disetujuiOleh)}</div>
       </div>
       <div style="margin-top:40px;text-align:center;font-style:italic;font-size:7px;color:#888;border-top:1px solid #ddd;padding-top:10px;line-height:1.5;">
         DISCLAIMER<br/>
@@ -19633,7 +20498,18 @@ function FormCutiModule({
   const sisaCuti = username => Math.max(0, 12 - cutiTerpakai(username));
   const mySisaCuti = sisaCuti(session.username);
   const jumlahHariForm = countDays(form.dariTanggal, form.sampaiTanggal);
-  const newNomor = () => "CUTI-" + new Date().getFullYear() + "-" + String(leaveRequests.length + 1).padStart(4, "0");
+  const newNomor = (arr = leaveRequests) => {
+    const year = new Date().getFullYear();
+    const prefix = "CUTI-" + year + "-";
+    const maxSeq = arr.reduce((max, r) => {
+      if (r.id && r.id.startsWith(prefix)) {
+        const n = parseInt(r.id.slice(prefix.length), 10);
+        if (!isNaN(n) && n > max) return n;
+      }
+      return max;
+    }, 0);
+    return prefix + String(maxSeq + 1).padStart(4, "0");
+  };
   const myRequests = leaveRequests.filter(r => r.username === session.username);
   const listRequests = isApprover ? leaveRequests : myRequests;
   const sortedRequests = [...listRequests].sort((a, b) => (b.diajukanTanggal || "").localeCompare(a.diajukanTanggal || ""));
@@ -19645,8 +20521,7 @@ function FormCutiModule({
     const isOnBehalf = isApprover && targetUsername !== session.username;
     const targetEmp = employees.find(e => e.username === targetUsername);
     const targetNama = isOnBehalf ? targetEmp?.nama || targetUsername : session.nama;
-    const req = {
-      id: newNomor(),
+    const reqBase = {
       username: targetUsername,
       nama: targetNama,
       alasan: form.alasan,
@@ -19658,7 +20533,14 @@ function FormCutiModule({
       createdOnBehalf: isOnBehalf,
       createdByNama: isOnBehalf ? session.nama : null
     };
-    setLeaveRequests([...leaveRequests, req]);
+    let req;
+    setLeaveRequests(prev => {
+      req = {
+        ...reqBase,
+        id: newNomor(prev)
+      };
+      return [...prev, req];
+    });
     logAudit(store, session, {
       module: "Form Cuti",
       docNomor: req.id,
@@ -20795,7 +21677,7 @@ function WorkshopOpsModule({
     setForm(blankWopsForm);
   };
   const onEditExpense = i => {
-    const e = visibleExpensesFiltered[i];
+    const e = periodItems[i];
     if (!canEditEntry(e)) return alert("Anda hanya dapat merevisi pengeluaran yang Anda input sendiri.");
     setForm({
       tanggal: e.tanggal,
@@ -20809,15 +21691,86 @@ function WorkshopOpsModule({
     setModal(true);
   };
   const onDeleteExpense = i => {
-    const e = visibleExpensesFiltered[i];
+    const e = periodItems[i];
     if (!canEditEntry(e)) return alert("Anda hanya dapat menghapus pengeluaran yang Anda input sendiri.");
     if (confirm("Hapus pengeluaran ini?")) {
       setWorkshopOpsExpenses(workshopOpsExpenses.filter(x => x.id !== e.id));
     }
   };
+  // Bulk-mark every expense in a given weekly (Thu-Wed) period as paid/unpaid at once — the recap
+  // is what actually gets settled/paid to the team, not each individual line item.
+  const markPeriodPaid = (periodKey, paid) => {
+    setWorkshopOpsExpenses(prev => prev.map(e => getWeekPeriod(e.tanggal).key === periodKey ? {
+      ...e,
+      dibayar: paid
+    } : e));
+    logAudit(store, session, {
+      module: "Operation Cost",
+      docNomor: periodKey,
+      action: paid ? "Tandai Sudah Dibayar" : "Tandai Belum Dibayar",
+      detail: `Periode ${weekPeriods.find(p => p.key === periodKey)?.label || periodKey}`
+    });
+  };
+  // Mark a single transaction paid/unpaid — period status derives from these per-item flags:
+  // all paid = Sudah Dibayar, none paid = Belum Dibayar, some paid = Sebagian Dibayar.
+  const markExpensePaid = (id, paid) => {
+    const e = workshopOpsExpenses.find(x => x.id === id);
+    setWorkshopOpsExpenses(prev => prev.map(x => x.id === id ? {
+      ...x,
+      dibayar: paid
+    } : x));
+    logAudit(store, session, {
+      module: "Operation Cost",
+      docNomor: e?.tanggal || id,
+      action: paid ? "Tandai Sudah Dibayar (Detail)" : "Tandai Belum Dibayar (Detail)",
+      detail: `${e?.coaNama || "-"} - ${fmt(e?.nominal || 0)}`
+    });
+  };
+  const periodPaidStatus = items => {
+    if (!items.length) return "unpaid";
+    const paidCount = items.filter(e => e.dibayar).length;
+    if (paidCount === items.length) return "paid";
+    if (paidCount === 0) return "unpaid";
+    return "partial";
+  };
   const totalBulanIni = visibleExpenses.filter(e => e.tanggal.slice(0, 7) === today().slice(0, 7)).reduce((s, e) => s + e.nominal, 0);
   const [wopsSearch, setWopsSearch] = useState("");
   const visibleExpensesFiltered = wopsSearch.trim() ? visibleExpenses.filter(e => [e.coaNama, e.kategoriLabel, e.kategori, e.catatan, e.inputBy].filter(Boolean).some(x => String(x).toLowerCase().includes(wopsSearch.trim().toLowerCase()))) : visibleExpenses;
+
+  // Weekly recap: cut off every Wednesday, period runs Thursday through the following Wednesday.
+  // Individual entries are rolled up into 1 recap row per period, with a drill-down modal showing
+  // exactly which transactions make up that period's total.
+  const getWeekPeriod = dateStr => {
+    const d = new Date(dateStr + "T00:00:00");
+    const daysSinceThu = (d.getDay() - 4 + 7) % 7;
+    const start = new Date(d);
+    start.setDate(d.getDate() - daysSinceThu);
+    const end = new Date(start);
+    end.setDate(start.getDate() + 6);
+    const iso = dt => dt.toISOString().split("T")[0];
+    return {
+      key: iso(start),
+      start: iso(start),
+      end: iso(end),
+      label: `${iso(start)} s/d ${iso(end)}`
+    };
+  };
+  const weekPeriods = (() => {
+    const map = {};
+    visibleExpensesFiltered.forEach(e => {
+      const p = getWeekPeriod(e.tanggal);
+      if (!map[p.key]) map[p.key] = {
+        ...p,
+        items: [],
+        total: 0
+      };
+      map[p.key].items.push(e);
+      map[p.key].total += e.nominal;
+    });
+    return Object.values(map).sort((a, b) => b.key.localeCompare(a.key));
+  })();
+  const [detailPeriod, setDetailPeriod] = useState(null);
+  const periodItems = detailPeriod ? weekPeriods.find(p => p.key === detailPeriod)?.items || [] : [];
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -20871,7 +21824,13 @@ function WorkshopOpsModule({
       color: theme.yellow,
       marginTop: 6
     }
-  }, fmt(totalBulanIni))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
+  }, fmt(totalBulanIni))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 12px",
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Rekap mingguan — cut off setiap hari Rabu. Periode berjalan Kamis s/d Rabu minggu berikutnya. Klik \"Lihat Detail\" untuk melihat rincian transaksi dalam periode tersebut."), !detailPeriod ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari kategori / jenis biaya / catatan...",
     value: wopsSearch,
     onChange: setWopsSearch,
@@ -20879,14 +21838,83 @@ function WorkshopOpsModule({
       marginBottom: 12
     }
   }), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Tanggal", "Kategori", "Jenis Biaya", "Nominal", "Catatan", "Input Oleh"],
-    rows: visibleExpensesFiltered.map(e => [e.tanggal, e.kategoriLabel || e.kategori || "-", e.coaNama, fmt(e.nominal), /*#__PURE__*/React.createElement("span", {
+    headers: ["Periode (Kamis-Rabu)", "Jumlah Transaksi", "Total", "Status", "Aksi"],
+    rows: weekPeriods.map(p => [p.label, `${p.items.length} transaksi`, fmt(p.total), /*#__PURE__*/React.createElement(Badge, {
+      color: periodPaidStatus(p.items) === "paid" ? theme.green : periodPaidStatus(p.items) === "partial" ? theme.cyan : theme.yellow
+    }, periodPaidStatus(p.items) === "paid" ? "Sudah Dibayar" : periodPaidStatus(p.items) === "partial" ? "Sebagian Dibayar" : "Belum Dibayar"), /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => setDetailPeriod(p.key)
+    }, "🔍 Lihat Detail")]),
+    emptyMsg: "Belum ada pengeluaran tercatat"
+  })) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      flexWrap: "wrap",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    size: "sm",
+    onClick: () => setDetailPeriod(null)
+  }, "← Kembali ke Rekap"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.text,
+      fontWeight: 700,
+      fontSize: 15
+    }
+  }, weekPeriods.find(p => p.key === detailPeriod)?.label || ""), /*#__PURE__*/React.createElement(Badge, {
+    color: periodPaidStatus(periodItems) === "paid" ? theme.green : periodPaidStatus(periodItems) === "partial" ? theme.cyan : theme.yellow
+  }, periodPaidStatus(periodItems) === "paid" ? "Sudah Dibayar" : periodPaidStatus(periodItems) === "partial" ? "Sebagian Dibayar" : "Belum Dibayar"), (isOwnerLike || canSeeAll) && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: periodPaidStatus(periodItems) === "paid" ? "ghost" : "success",
+    onClick: () => markPeriodPaid(detailPeriod, periodPaidStatus(periodItems) !== "paid")
+  }, periodPaidStatus(periodItems) === "paid" ? "↺ Tandai Semua Belum Dibayar" : "✓ Tandai Semua Sudah Dibayar")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "Total Periode Ini"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 20,
+      fontWeight: 700,
+      color: theme.yellow
+    }
+  }, fmt(weekPeriods.find(p => p.key === detailPeriod)?.total || 0))), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Tanggal", "Kategori", "Jenis Biaya", "Nominal", "Catatan", "Input Oleh", "Status"],
+    rows: periodItems.map(e => [e.tanggal, e.kategoriLabel || e.kategori || "-", e.coaNama, fmt(e.nominal), /*#__PURE__*/React.createElement("span", {
       style: catatanStyle
-    }, e.catatan), e.inputBy]),
-    emptyMsg: "Belum ada pengeluaran tercatat",
+    }, e.catatan), e.inputBy, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement(Badge, {
+      color: e.dibayar ? theme.green : theme.yellow
+    }, e.dibayar ? "Dibayar" : "Belum"), (isOwnerLike || canSeeAll) && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: e.dibayar ? "ghost" : "success",
+      onClick: () => markExpensePaid(e.id, !e.dibayar)
+    }, e.dibayar ? "↺" : "✓"))]),
+    emptyMsg: "Tidak ada transaksi pada periode ini",
     onEdit: onEditExpense,
     onDelete: onDeleteExpense
-  })), /*#__PURE__*/React.createElement(Modal, {
+  }))), /*#__PURE__*/React.createElement(Modal, {
     open: modal,
     title: editingExpenseId ? "Revisi Pengeluaran Workshop" : "Catat Pengeluaran Workshop",
     onClose: () => {
