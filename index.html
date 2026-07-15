@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-14.1";
+const APP_BUILD = "2026-07-15.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -21873,7 +21873,18 @@ function WorkshopOpsModule({
     }
   }, weekPeriods.find(p => p.key === detailPeriod)?.label || ""), /*#__PURE__*/React.createElement(Badge, {
     color: periodPaidStatus(periodItems) === "paid" ? theme.green : periodPaidStatus(periodItems) === "partial" ? theme.cyan : theme.yellow
-  }, periodPaidStatus(periodItems) === "paid" ? "Sudah Dibayar" : periodPaidStatus(periodItems) === "partial" ? "Sebagian Dibayar" : "Belum Dibayar"), (isOwnerLike || canSeeAll) && /*#__PURE__*/React.createElement(Btn, {
+  }, periodPaidStatus(periodItems) === "paid" ? "Sudah Dibayar" : periodPaidStatus(periodItems) === "partial" ? "Sebagian Dibayar" : "Belum Dibayar"), /*#__PURE__*/React.createElement(ExportExcelBtn, {
+    label: "📊 Export Periode Ini",
+    onClick: () => exportToExcel(periodItems.map(e => ({
+      tanggal: e.tanggal,
+      kategori: e.kategoriLabel || e.kategori || "-",
+      jenis: e.coaNama,
+      nominal: e.nominal,
+      catatan: e.catatan,
+      inputOleh: e.inputBy,
+      status: e.dibayar ? "Dibayar" : "Belum Dibayar"
+    })), `Workshop_Ops_${weekPeriods.find(p => p.key === detailPeriod)?.start || detailPeriod}_${weekPeriods.find(p => p.key === detailPeriod)?.end || ""}.xlsx`, "Workshop Ops")
+  }), (isOwnerLike || canSeeAll) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: periodPaidStatus(periodItems) === "paid" ? "ghost" : "success",
     onClick: () => markPeriodPaid(detailPeriod, periodPaidStatus(periodItems) !== "paid")
@@ -23667,23 +23678,4 @@ function App() {
     day: "numeric"
   }))), /*#__PURE__*/React.createElement("div", {
     style: {
-      flex: 1,
-      overflowY: "auto",
-      padding: isMobile ? "16px 14px" : "24px 28px"
-    }
-  }, renderPage())), /*#__PURE__*/React.createElement(ChangePasswordModal, {
-    open: changePwOpen,
-    onClose: () => setChangePwOpen(false),
-    session: session
-  }), /*#__PURE__*/React.createElement(SignatureModal, {
-    open: signatureOpen,
-    onClose: () => setSignatureOpen(false),
-    session: session,
-    store: store
-  }));
-}
-const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(React.createElement(App));
-</script>
-</body>
-</html>
+ 
