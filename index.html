@@ -23678,4 +23678,23 @@ function App() {
     day: "numeric"
   }))), /*#__PURE__*/React.createElement("div", {
     style: {
- 
+      flex: 1,
+      overflowY: "auto",
+      padding: isMobile ? "16px 14px" : "24px 28px"
+    }
+  }, renderPage())), /*#__PURE__*/React.createElement(ChangePasswordModal, {
+    open: changePwOpen,
+    onClose: () => setChangePwOpen(false),
+    session: session
+  }), /*#__PURE__*/React.createElement(SignatureModal, {
+    open: signatureOpen,
+    onClose: () => setSignatureOpen(false),
+    session: session,
+    store: store
+  }));
+}
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(React.createElement(App));
+</script>
+</body>
+</html>
