@@ -2616,6 +2616,7 @@ function MasterPart({
   const [conflicts, setConflicts] = useState(null); // { rows: [...], idx: 0 } during import conflict resolution
   const [importSummary, setImportSummary] = useState(null);
   const [subKatFilter, setSubKatFilter] = useState("Semua");
+  const [sortBy, setSortBy] = useState("partNumber");
   const [wipeConfirm, setWipeConfirm] = useState(false);
   const [reviewReq, setReviewReq] = useState(null);
   const [reviewForm, setReviewForm] = useState(null);
@@ -2696,7 +2697,21 @@ function MasterPart({
     stok: ["stock", "qty", "quantity", "jumlah"]
   };
   const subKategoriList = ["Semua", ...new Set(parts.map(p => p.subKategori).filter(Boolean))];
-  const filtered = parts.filter(p => (p.partNumber.toLowerCase().includes(search.toLowerCase()) || p.partName.toLowerCase().includes(search.toLowerCase())) && (subKatFilter === "Semua" || p.subKategori === subKatFilter));
+  const SORT_FIELDS = {
+    partNumber: "partNumber",
+    partName: "partName",
+    description: "description"
+  };
+  const filtered = parts.filter(p => {
+    const q = search.toLowerCase();
+    return (p.partNumber.toLowerCase().includes(q) || p.partName.toLowerCase().includes(q) || (p.description || "").toLowerCase().includes(q)) && (subKatFilter === "Semua" || p.subKategori === subKatFilter);
+  }).slice().sort((a, b) => {
+    const field = SORT_FIELDS[sortBy] || "partNumber";
+    return (a[field] || "").toString().localeCompare((b[field] || "").toString(), "id", {
+      numeric: true,
+      sensitivity: "base"
+    });
+  });
   const wipeAllParts = () => {
     setParts([]);
     setWipeConfirm(false);
@@ -2942,9 +2957,9 @@ function MasterPart({
   }, /*#__PURE__*/React.createElement(Input, {
     value: search,
     onChange: setSearch,
-    placeholder: "Cari Part Number / Name...",
+    placeholder: "Cari Part Number / Name / Deskripsi...",
     style: {
-      width: 200
+      width: 220
     }
   }), /*#__PURE__*/React.createElement(Select, {
     value: subKatFilter,
@@ -2955,6 +2970,22 @@ function MasterPart({
     })),
     style: {
       width: 160
+    }
+  }), /*#__PURE__*/React.createElement(Select, {
+    value: sortBy,
+    onChange: setSortBy,
+    options: [{
+      value: "partNumber",
+      label: "Urutkan: Part Number"
+    }, {
+      value: "partName",
+      label: "Urutkan: Part Name"
+    }, {
+      value: "description",
+      label: "Urutkan: Deskripsi"
+    }],
+    style: {
+      width: 190
     }
   }), /*#__PURE__*/React.createElement(ExportExcelBtn, {
     onClick: doExport
