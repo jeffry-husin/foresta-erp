@@ -389,12 +389,12 @@ const ROLE_DEFS = {
   finance_director: {
     label: "Finance Director",
     color: "#f59e0b",
-    modules: ["dashboard", "invoice", "payroll", "customer", "supplier", "financial_dashboard", "client_history", "attendance", "jurnal"]
+    modules: ["dashboard", "invoice", "payroll", "customer", "supplier", "financial_dashboard", "client_history", "attendance", "jurnal", "price_analysis"]
   },
   sales_manager: {
     label: "Sales Manager",
     color: "#3b82f6",
-    modules: ["dashboard", "quotation_unit", "customer", "client_history", "sales_activity", "kpi_sales", "attendance"]
+    modules: ["dashboard", "quotation_unit", "customer", "client_history", "sales_activity", "kpi_sales", "attendance", "price_analysis"]
   },
   service_manager: {
     label: "Service Manager",
@@ -404,7 +404,7 @@ const ROLE_DEFS = {
   sales_admin: {
     label: "Sales Admin",
     color: "#60a5fa",
-    modules: ["dashboard", "sales_order", "customer", "ticketing", "attendance", "mekanik_report", "workshop_ops"]
+    modules: ["dashboard", "sales_order", "customer", "ticketing", "attendance", "mekanik_report", "workshop_ops", "price_analysis", "delivery_order"]
   },
   inventory: {
     label: "Inventory",
@@ -659,6 +659,10 @@ const ALL_MODULES = [{
   id: "sales_activity",
   icon: "📞",
   label: "Sales Activity"
+}, {
+  id: "price_analysis",
+  icon: "📈",
+  label: "Analisa Harga"
 }, {
   id: "payroll",
   icon: "💵",
@@ -2847,35 +2851,7 @@ function MasterPart({
       borderRadius: 8,
       border: `1px dashed ${theme.border}`
     }
-  }, "🔒 ", /*#__PURE__*/React.createElement("strong", null, "Description"), " bersifat internal — tidak akan ditampilkan di Quotation, Invoice, atau Delivery Order yang dilihat client."), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
-    headers: canSeePrice ? ["Part Number", "Part Name", "Description", "Kategori", "Sub-Kategori", "Satuan", "Brand", "Asal", "Harga Beli", "Harga Jual", "Stok"] : ["Part Number", "Part Name", "Description", "Kategori", "Sub-Kategori", "Satuan", "Brand", "Asal", "Stok"],
-    rows: filtered.map(p => {
-      const base = [/*#__PURE__*/React.createElement("span", {
-        style: {
-          color: theme.accentLight,
-          fontWeight: 600
-        }
-      }, p.partNumber), p.partName, /*#__PURE__*/React.createElement("span", {
-        style: {
-          color: theme.muted,
-          fontSize: 12
-        }
-      }, p.description), /*#__PURE__*/React.createElement(Badge, {
-        color: p.kategori === "Service" ? theme.cyan : theme.purple
-      }, p.kategori), p.subKategori ? /*#__PURE__*/React.createElement(Badge, {
-        color: theme.accent
-      }, p.subKategori) : "-", p.satuan, p.brand || "-", /*#__PURE__*/React.createElement(Badge, {
-        color: p.asal === "Overseas" ? theme.yellow : theme.green
-      }, p.asal)];
-      const priceCols = canSeePrice ? [fmt(p.hargaBeli), fmt(p.hargaJual)] : [];
-      const stokCol = p.stok === null ? "-" : /*#__PURE__*/React.createElement(Badge, {
-        color: p.stok > 10 ? theme.green : p.stok > 0 ? theme.yellow : theme.red
-      }, fmtNum(p.stok));
-      return [...base, ...priceCols, stokCol];
-    }),
-    onEdit: onEdit,
-    onDelete: onDelete
-  })), isOwnerLike && editRequests.filter(r => r.module === "Master Part" && r.status === "Menunggu Approval GM").length > 0 && /*#__PURE__*/React.createElement(Card, {
+  }, "🔒 ", /*#__PURE__*/React.createElement("strong", null, "Description"), " bersifat internal — tidak akan ditampilkan di Quotation, Invoice, atau Delivery Order yang dilihat client."), isOwnerLike && editRequests.filter(r => r.module === "Master Part" && r.status === "Menunggu Approval GM").length > 0 && /*#__PURE__*/React.createElement(Card, {
     style: {
       background: theme.yellow + "11",
       border: `1px solid ${theme.yellow}44`
@@ -2924,7 +2900,35 @@ function MasterPart({
     size: "sm",
     variant: "danger",
     onClick: () => rejectEditRequest(req)
-  }, "✗ Tolak"))))), /*#__PURE__*/React.createElement(Modal, {
+  }, "✗ Tolak"))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
+    headers: canSeePrice ? ["Part Number", "Part Name", "Description", "Kategori", "Sub-Kategori", "Satuan", "Brand", "Asal", "Harga Beli", "Harga Jual", "Stok"] : ["Part Number", "Part Name", "Description", "Kategori", "Sub-Kategori", "Satuan", "Brand", "Asal", "Stok"],
+    rows: filtered.map(p => {
+      const base = [/*#__PURE__*/React.createElement("span", {
+        style: {
+          color: theme.accentLight,
+          fontWeight: 600
+        }
+      }, p.partNumber), p.partName, /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: theme.muted,
+          fontSize: 12
+        }
+      }, p.description), /*#__PURE__*/React.createElement(Badge, {
+        color: p.kategori === "Service" ? theme.cyan : theme.purple
+      }, p.kategori), p.subKategori ? /*#__PURE__*/React.createElement(Badge, {
+        color: theme.accent
+      }, p.subKategori) : "-", p.satuan, p.brand || "-", /*#__PURE__*/React.createElement(Badge, {
+        color: p.asal === "Overseas" ? theme.yellow : theme.green
+      }, p.asal)];
+      const priceCols = canSeePrice ? [fmt(p.hargaBeli), fmt(p.hargaJual)] : [];
+      const stokCol = p.stok === null ? "-" : /*#__PURE__*/React.createElement(Badge, {
+        color: p.stok > 10 ? theme.green : p.stok > 0 ? theme.yellow : theme.red
+      }, fmtNum(p.stok));
+      return [...base, ...priceCols, stokCol];
+    }),
+    onEdit: onEdit,
+    onDelete: onDelete
+  })), /*#__PURE__*/React.createElement(Modal, {
     open: modal,
     title: editIdx !== null ? "Edit Part" : "Tambah Part",
     onClose: () => setModal(false),
@@ -3474,6 +3478,37 @@ function MasterUnit({
       added
     });
   };
+  // Export a single unit's BOM (same flattened row shape as the bulk export, just
+  // scoped to one unitCode) so users can share/archive one BOM without pulling the
+  // whole Master Unit list.
+  const doExportOne = u => {
+    const rows = u.bom.map(b => ({
+      unitCode: u.unitCode,
+      unitName: u.unitName,
+      description: u.description,
+      hargaJual: u.hargaJual,
+      bomPartNumber: b.partNumber,
+      bomQty: b.qty
+    }));
+    exportToExcel(rows, `Master_Unit_${u.unitCode}.xlsx`, "Master Unit");
+  };
+  // Duplicate: pre-fill the create form with an existing unit's data (fresh unit code,
+  // "(Copy)" suffix on the name) and open the editor so the user only tweaks what's
+  // different instead of re-entering the whole BOM from scratch.
+  const duplicateUnit = u => {
+    setForm({
+      unitCode: "",
+      unitName: u.unitName + " (Copy)",
+      description: u.description,
+      hargaJual: String(u.hargaJual || ""),
+      bom: u.bom.map(b => ({
+        ...b
+      }))
+    });
+    setEditIdx(null);
+    setDetail(null);
+    setModal(true);
+  };
   const resolveConflict = action => {
     const {
       rows,
@@ -3623,9 +3658,17 @@ function MasterUnit({
   }, 0))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
-      justifyContent: "flex-end"
+      justifyContent: "flex-end",
+      gap: 8
     }
-  }, /*#__PURE__*/React.createElement(PrintBtn, {
+  }, /*#__PURE__*/React.createElement(ExportExcelBtn, {
+    label: "📊 Export BOM Ini",
+    onClick: () => doExportOne(detail)
+  }), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    size: "sm",
+    onClick: () => duplicateUnit(detail)
+  }, "⧉ Duplicate"), /*#__PURE__*/React.createElement(PrintBtn, {
     onClick: () => printDocument({
       company: store.companySettings,
       docTitle: "BILL OF MATERIALS",
@@ -5635,7 +5678,7 @@ function MekanikReport({
   // Visible visits: mekanik sees own, reviewer sees all
   const [visitSearch, setVisitSearch] = useState("");
   const myVisitsAll = isMekanik ? visits.filter(v => v.mekanikUsername === session.username) : visits;
-  const myVisits = visitSearch.trim() ? myVisitsAll.filter(v => [v.id, v.customerNama, v.unitTerkait, v.lokasi, v.mekanikNama].filter(Boolean).some(x => String(x).toLowerCase().includes(visitSearch.trim().toLowerCase()))) : myVisitsAll;
+  const myVisits = (visitSearch.trim() ? myVisitsAll.filter(v => [v.id, v.customerNama, v.unitTerkait, v.lokasi, v.mekanikNama].filter(Boolean).some(x => String(x).toLowerCase().includes(visitSearch.trim().toLowerCase()))) : myVisitsAll).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const saveVisit = () => {
     if (!visitForm.customerId) return alert("Pilih client");
     const cust = customers.find(c => c.id === visitForm.customerId);
@@ -8753,7 +8796,7 @@ function QuotationUnit({
   });
   const [quSearch, setQuSearch] = useState("");
   const myQuotationsAll = isOwnerLike ? quotationsUnit : quotationsUnit.filter(q => q.salesManagerUsername === session.username);
-  const myQuotations = quSearch.trim() ? myQuotationsAll.filter(q => [q.nomor, q.customerNama, q.salesManagerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(quSearch.trim().toLowerCase()))) : myQuotationsAll;
+  const myQuotations = (quSearch.trim() ? myQuotationsAll.filter(q => [q.nomor, q.customerNama, q.salesManagerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(quSearch.trim().toLowerCase()))) : myQuotationsAll).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const newNomor = baseNomor => {
     if (baseNomor) {
       const existingRevisions = quotationsUnit.filter(q => q.revisiDari === baseNomor || q.nomor === baseNomor);
@@ -9944,7 +9987,7 @@ function QuotationPS({
   // box, pending revisions, and internal Sales Discount data, not just owner/gm.
   const isApprover = isOwnerLike;
   const [qpsSearch, setQpsSearch] = useState("");
-  const quotationsPSFiltered = qpsSearch.trim() ? quotationsPS.filter(q => [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(qpsSearch.trim().toLowerCase()))) : quotationsPS;
+  const quotationsPSFiltered = (qpsSearch.trim() ? quotationsPS.filter(q => [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(qpsSearch.trim().toLowerCase()))) : quotationsPS).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const [modal, setModal] = useState(false);
   const [revisionOf, setRevisionOf] = useState(null);
   const [editingQ, setEditingQ] = useState(null); // quotation being edited in-place (same nomor, no new revision)
@@ -10835,7 +10878,7 @@ function QuotationPS({
     },
     options: parts.map(p => ({
       value: p.partNumber,
-      label: `${p.partNumber} - ${p.partName}`
+      label: `${p.partNumber} - ${p.partName}${p.description ? " (" + p.description + ")" : ""}`
     }))
   }), /*#__PURE__*/React.createElement(Input, {
     value: itemForm.qty,
@@ -10858,8 +10901,13 @@ function QuotationPS({
     onClick: addItem,
     size: "sm"
   }, "+ Add")), form.items.length > 0 && /*#__PURE__*/React.createElement(Table, {
-    headers: ["Part Number", "Part Name", "Qty", "Harga", "Subtotal", ""],
-    rows: form.items.map((it, i) => [it.partNumber, it.partName, it.qty, /*#__PURE__*/React.createElement("input", {
+    headers: ["Part Number", "Part Name", "Description", "Qty", "Harga", "Subtotal", ""],
+    rows: form.items.map((it, i) => [it.partNumber, it.partName, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.muted,
+        fontSize: 12
+      }
+    }, it.partDescription || "-"), it.qty, /*#__PURE__*/React.createElement("input", {
       type: "number",
       value: it.harga ?? "",
       onChange: e => updateItemHarga(i, e.target.value),
@@ -11188,7 +11236,9 @@ function SalesOrderModule({
     setQuotationsPS,
     itemRequisitions,
     poLocal,
-    poOverseas
+    poOverseas,
+    deliveryOrders,
+    invoices
   } = store;
   const isEpy = session.role === "sales_admin";
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
@@ -11198,12 +11248,55 @@ function SalesOrderModule({
   const [pickedItems, setPickedItems] = useState([]); // indices (into pickQuot.quot.items) currently checked
   const [shipForm, setShipForm] = useState({
     noPoClient: "",
+    tanggalPO: "",
+    tanggalDelivery: "",
+    catatan: "",
     tujuan: "",
     ekspedisi: "",
     pic: "",
     noTlp: "",
     alamat: ""
   });
+  const [editSO, setEditSO] = useState(null); // SO being revised via the header-fields Edit modal
+  const [editForm, setEditForm] = useState(null);
+  const openEditSO = so => {
+    setEditSO(so);
+    setEditForm({
+      noPoClient: so.noPoClient || "",
+      tanggalPO: so.tanggalPO || "",
+      tanggalDelivery: so.tanggalDelivery || "",
+      catatan: so.catatan || "",
+      tujuan: so.shippingTujuan || "",
+      ekspedisi: so.shippingEkspedisi || "",
+      pic: so.shippingPic || "",
+      noTlp: so.shippingNoTlp || "",
+      alamat: so.shippingAlamat || ""
+    });
+  };
+  const saveEditSO = () => {
+    if (!editSO || !editForm) return;
+    setSalesOrders(salesOrders.map(so => so.nomor === editSO.nomor ? {
+      ...so,
+      noPoClient: editForm.noPoClient,
+      tanggalPO: editForm.tanggalPO,
+      tanggalDelivery: editForm.tanggalDelivery,
+      catatan: editForm.catatan,
+      shippingTujuan: editForm.tujuan,
+      shippingEkspedisi: editForm.ekspedisi,
+      shippingPic: editForm.pic,
+      shippingNoTlp: editForm.noTlp,
+      shippingAlamat: editForm.alamat
+    } : so));
+    logAudit(store, session, {
+      module: "Sales Order",
+      docNomor: editSO.nomor,
+      action: "Revisi",
+      detail: "Update data SO (No. PO/tanggal/catatan/pengiriman)"
+    });
+    setEditSO(null);
+    setEditForm(null);
+    setDetail(null);
+  };
   // A Sales Order has "become a PO" once any Item Requisition tied to it has been pulled into a
   // (local or overseas) Purchase Order — used to split the Kanban into ON GOING vs SO TO PO.
   const soHasBecomePO = so => {
@@ -11211,6 +11304,53 @@ function SalesOrderModule({
     if (relatedIR.length === 0) return false;
     const allPO = [...(poLocal || []), ...(poOverseas || [])];
     return allPO.some(po => (po.irNomors || []).some(n => relatedIR.includes(n)));
+  };
+  // An SO is considered COMPLETED once either a Delivery Order has been issued for it, or its
+  // Invoice is fully paid (Lunas) — auto-detected on the fly — OR the user manually marks it
+  // selesai via the "Tandai Selesai" button (picking a specific DO/Invoice as the reference,
+  // for cases where the DO/Invoice wasn't created through the normal SO-linked flow).
+  const soIsCompleted = so => {
+    const hasDO = (deliveryOrders || []).some(d => d.soNomor === so.nomor);
+    const hasLunasInvoice = (invoices || []).some(i => i.soNomor === so.nomor && i.statusBayar === "Lunas");
+    return hasDO || hasLunasInvoice || !!so.selesaiManual;
+  };
+  const soSelesaiVia = so => {
+    if (so.selesaiManual) return `${so.selesaiManual.via} ${so.selesaiManual.refNomor} (manual oleh ${so.selesaiManual.oleh})`;
+    if ((deliveryOrders || []).some(d => d.soNomor === so.nomor)) return "Delivery Order";
+    return "Invoice Lunas";
+  };
+  const [selesaiModal, setSelesaiModal] = useState(null); // SO being marked selesai
+  const [selesaiForm, setSelesaiForm] = useState({
+    via: "Delivery Order",
+    refNomor: ""
+  });
+  const openSelesaiModal = so => {
+    setSelesaiModal(so);
+    const soDOs = (deliveryOrders || []).filter(d => d.soNomor === so.nomor);
+    const soInvs = (invoices || []).filter(i => i.soNomor === so.nomor);
+    setSelesaiForm({
+      via: soDOs.length ? "Delivery Order" : soInvs.length ? "Invoice" : "Delivery Order",
+      refNomor: soDOs[0]?.nomor || soInvs[0]?.nomor || ""
+    });
+  };
+  const saveSelesai = () => {
+    if (!selesaiForm.refNomor.trim()) return alert("Pilih atau input No. Delivery Order / Invoice sebagai referensi.");
+    setSalesOrders(salesOrders.map(so => so.nomor === selesaiModal.nomor ? {
+      ...so,
+      selesaiManual: {
+        via: selesaiForm.via,
+        refNomor: selesaiForm.refNomor.trim(),
+        tanggal: today(),
+        oleh: session.nama
+      }
+    } : so));
+    logAudit(store, session, {
+      module: "Sales Order",
+      docNomor: selesaiModal.nomor,
+      action: "Tandai Selesai",
+      detail: `${selesaiForm.via} ${selesaiForm.refNomor}`
+    });
+    setSelesaiModal(null);
   };
   const deleteSO = so => {
     if (!isOwnerLike) return alert("Hanya Owner/GM/Finance Director yang dapat menghapus Sales Order.");
@@ -11226,7 +11366,7 @@ function SalesOrderModule({
   const approvedUnit = quotationsUnit.filter(q => q.status === "Disetujui GM");
   const approvedPS = quotationsPS.filter(q => q.status === "Disetujui GM");
   const [soSearch, setSoSearch] = useState("");
-  const salesOrdersFiltered = soSearch.trim() ? salesOrders.filter(so => [so.nomor, so.customerNama, so.salesManagerNama, so.sourceNomor].filter(Boolean).some(x => String(x).toLowerCase().includes(soSearch.trim().toLowerCase()))) : salesOrders;
+  const salesOrdersFiltered = (soSearch.trim() ? salesOrders.filter(so => [so.nomor, so.customerNama, so.salesManagerNama, so.sourceNomor].filter(Boolean).some(x => String(x).toLowerCase().includes(soSearch.trim().toLowerCase()))) : salesOrders).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   // Compute the next number from the max existing sequence in the given (ideally freshly-fetched)
   // array rather than its .length — this avoids both collisions when two users create a record at
   // the same moment (each browser's setter re-fetches fresh data right before merging, so passing
@@ -11254,6 +11394,9 @@ function SalesOrderModule({
     setPickedItems(quot.items.map((_, i) => i)); // default: all items selected
     setShipForm({
       noPoClient: "",
+      tanggalPO: "",
+      tanggalDelivery: "",
+      catatan: "",
       tujuan: "",
       ekspedisi: "",
       pic: "",
@@ -11294,6 +11437,9 @@ function SalesOrderModule({
       createdBy: session.nama,
       status: "Aktif",
       noPoClient: shipForm.noPoClient || "",
+      tanggalPO: shipForm.tanggalPO || "",
+      tanggalDelivery: shipForm.tanggalDelivery || "",
+      catatan: shipForm.catatan || "",
       shippingTujuan: shipForm.tujuan,
       shippingEkspedisi: shipForm.ekspedisi,
       shippingPic: shipForm.pic,
@@ -11363,6 +11509,9 @@ function SalesOrderModule({
       sumberQuotation: so.sourceNomor,
       noPoClient: so.noPoClient || "-",
       tanggal: so.tanggal,
+      tanggalPO: so.tanggalPO || "-",
+      tanggalDelivery: so.tanggalDelivery || "-",
+      catatan: so.catatan || "-",
       customer: so.customerNama,
       salesManager: so.salesManagerNama || "-",
       subtotal: so.subtotal,
@@ -11387,8 +11536,8 @@ function SalesOrderModule({
       fontSize: 15
     }
   }, "ON GOING"), /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. SO", "Tipe", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Status"],
-    rows: salesOrdersFiltered.filter(so => !soHasBecomePO(so)).map(so => [/*#__PURE__*/React.createElement("span", {
+    headers: ["No. SO", "Tipe", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Status", "Selesai"],
+    rows: salesOrdersFiltered.filter(so => !soHasBecomePO(so) && !soIsCompleted(so)).map(so => [/*#__PURE__*/React.createElement("span", {
       style: {
         color: theme.accentLight,
         fontWeight: 600,
@@ -11399,8 +11548,13 @@ function SalesOrderModule({
       color: so.tipe === "Unit" ? theme.purple : theme.cyan
     }, so.tipe), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
       color: theme.green
-    }, so.status)]),
-    onDelete: isOwnerLike ? i => deleteSO(salesOrdersFiltered.filter(so => !soHasBecomePO(so))[i]) : undefined,
+    }, so.status), (isEpy || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => openSelesaiModal(so)
+    }, "✓ Tandai Selesai")]),
+    onEdit: (isEpy || isOwnerLike) ? i => openEditSO(salesOrdersFiltered.filter(so => !soHasBecomePO(so) && !soIsCompleted(so))[i]) : undefined,
+    onDelete: isOwnerLike ? i => deleteSO(salesOrdersFiltered.filter(so => !soHasBecomePO(so) && !soIsCompleted(so))[i]) : undefined,
     emptyMsg: "Belum ada Sales Order on going"
   })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
     style: {
@@ -11409,8 +11563,8 @@ function SalesOrderModule({
       fontSize: 15
     }
   }, "SALES ORDER TO PURCHASE ORDER"), /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. SO", "Tipe", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Status"],
-    rows: salesOrdersFiltered.filter(so => soHasBecomePO(so)).map(so => [/*#__PURE__*/React.createElement("span", {
+    headers: ["No. SO", "Tipe", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Status", "Selesai"],
+    rows: salesOrdersFiltered.filter(so => soHasBecomePO(so) && !soIsCompleted(so)).map(so => [/*#__PURE__*/React.createElement("span", {
       style: {
         color: theme.accentLight,
         fontWeight: 600,
@@ -11421,9 +11575,36 @@ function SalesOrderModule({
       color: so.tipe === "Unit" ? theme.purple : theme.cyan
     }, so.tipe), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
       color: theme.green
-    }, so.status)]),
-    onDelete: isOwnerLike ? i => deleteSO(salesOrdersFiltered.filter(so => soHasBecomePO(so))[i]) : undefined,
+    }, so.status), (isEpy || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => openSelesaiModal(so)
+    }, "✓ Tandai Selesai")]),
+    onEdit: (isEpy || isOwnerLike) ? i => openEditSO(salesOrdersFiltered.filter(so => soHasBecomePO(so) && !soIsCompleted(so))[i]) : undefined,
+    onDelete: isOwnerLike ? i => deleteSO(salesOrdersFiltered.filter(so => soHasBecomePO(so) && !soIsCompleted(so))[i]) : undefined,
     emptyMsg: "Belum ada Sales Order yang sudah menjadi Purchase Order"
+  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.green,
+      fontSize: 15
+    }
+  }, "SALES ORDER COMPLETED"), /*#__PURE__*/React.createElement(Table, {
+    headers: ["No. SO", "Tipe", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Selesai Via"],
+    rows: salesOrdersFiltered.filter(so => soIsCompleted(so)).map(so => [/*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.accentLight,
+        fontWeight: 600,
+        cursor: "pointer"
+      },
+      onClick: () => setDetail(so)
+    }, so.nomor), /*#__PURE__*/React.createElement(Badge, {
+      color: so.tipe === "Unit" ? theme.purple : theme.cyan
+    }, so.tipe), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
+      color: theme.green
+    }, soSelesaiVia(so))]),
+    onDelete: isOwnerLike ? i => deleteSO(salesOrdersFiltered.filter(so => soIsCompleted(so))[i]) : undefined,
+    emptyMsg: "Belum ada Sales Order yang selesai"
   })), /*#__PURE__*/React.createElement(Modal, {
     open: pullModal,
     title: "Pilih Quotation yang Sudah Disetujui GM",
@@ -11545,6 +11726,36 @@ function SalesOrderModule({
     placeholder: "No. PO yang diterbitkan client"
   }), /*#__PURE__*/React.createElement("div", {
     style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal PO",
+    type: "date",
+    value: shipForm.tanggalPO,
+    onChange: v => setShipForm({
+      ...shipForm,
+      tanggalPO: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal Delivery",
+    type: "date",
+    value: shipForm.tanggalDelivery,
+    onChange: v => setShipForm({
+      ...shipForm,
+      tanggalDelivery: v
+    })
+  })), /*#__PURE__*/React.createElement(Input, {
+    label: "Catatan",
+    multiline: true,
+    value: shipForm.catatan,
+    onChange: v => setShipForm({
+      ...shipForm,
+      catatan: v
+    })
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
       border: `1px solid ${theme.border}`,
       borderRadius: 10,
       padding: 14
@@ -11642,7 +11853,20 @@ function SalesOrderModule({
     style: {
       color: theme.text
     }
-  }, detail.noPoClient)), detail.shippingTujuan && /*#__PURE__*/React.createElement("div", {
+  }, detail.noPoClient)), (detail.tanggalPO || detail.tanggalDelivery) && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 13,
+      color: theme.muted
+    }
+  }, detail.tanggalPO && `Tanggal PO: ${detail.tanggalPO}`, detail.tanggalPO && detail.tanggalDelivery && "  ·  ", detail.tanggalDelivery && `Tanggal Delivery: ${detail.tanggalDelivery}`), detail.catatan && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 13,
+      color: theme.muted,
+      whiteSpace: "pre-line"
+    }
+  }, "Catatan: ", detail.catatan), detail.shippingTujuan && /*#__PURE__*/React.createElement("div", {
     style: {
       background: theme.surface,
       borderRadius: 8,
@@ -11690,12 +11914,210 @@ function SalesOrderModule({
       diskon: detail.diskon,
       pajak: detail.pajak,
       total: detail.total,
-      extraInfoRows: [["Sumber Quotation", detail.sourceNomor], ["Tipe", detail.tipe], ["Tujuan Pengiriman", detail.shippingTujuan || "-"], ["Ekspedisi", detail.shippingEkspedisi || "-"], ["PIC / No. Telp", detail.shippingPic ? `${detail.shippingPic} / ${detail.shippingNoTlp || "-"}` : "-"], ["Alamat Pengiriman", detail.shippingAlamat || "-"]],
+      extraInfoRows: [["Sumber Quotation", detail.sourceNomor], ["Tipe", detail.tipe], ["Tanggal PO", detail.tanggalPO || "-"], ["Tanggal Delivery", detail.tanggalDelivery || "-"], ["Catatan", detail.catatan || "-"], ["Tujuan Pengiriman", detail.shippingTujuan || "-"], ["Ekspedisi", detail.shippingEkspedisi || "-"], ["PIC / No. Telp", detail.shippingPic ? `${detail.shippingPic} / ${detail.shippingNoTlp || "-"}` : "-"], ["Alamat Pengiriman", detail.shippingAlamat || "-"]],
       dibuatOleh: {
         nama: detail.createdBy
       }
     })
-  })))));
+  }), (isEpy || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => {
+      openEditSO(detail);
+    }
+  }, "✏️ Revisi")))), /*#__PURE__*/React.createElement(Modal, {
+    open: !!editSO,
+    title: `Revisi ${editSO?.nomor}`,
+    onClose: () => {
+      setEditSO(null);
+      setEditForm(null);
+    },
+    width: 560
+  }, editForm && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Item dan harga SO tidak dapat diubah di sini — hanya data pendukung (No. PO, tanggal, catatan, info pengiriman)."), /*#__PURE__*/React.createElement(Input, {
+    label: "No. Purchase Order Client",
+    value: editForm.noPoClient,
+    onChange: v => setEditForm({
+      ...editForm,
+      noPoClient: v
+    })
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal PO",
+    type: "date",
+    value: editForm.tanggalPO,
+    onChange: v => setEditForm({
+      ...editForm,
+      tanggalPO: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal Delivery",
+    type: "date",
+    value: editForm.tanggalDelivery,
+    onChange: v => setEditForm({
+      ...editForm,
+      tanggalDelivery: v
+    })
+  })), /*#__PURE__*/React.createElement(Input, {
+    label: "Catatan",
+    multiline: true,
+    value: editForm.catatan,
+    onChange: v => setEditForm({
+      ...editForm,
+      catatan: v
+    })
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: `1px solid ${theme.border}`,
+      borderRadius: 10,
+      padding: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 10px",
+      color: theme.muted,
+      fontSize: 13,
+      fontWeight: 600
+    }
+  }, "INFO PENGIRIMAN"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Tujuan Pengiriman",
+    value: editForm.tujuan,
+    onChange: v => setEditForm({
+      ...editForm,
+      tujuan: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Nama Ekspedisi",
+    value: editForm.ekspedisi,
+    onChange: v => setEditForm({
+      ...editForm,
+      ekspedisi: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "PIC",
+    value: editForm.pic,
+    onChange: v => setEditForm({
+      ...editForm,
+      pic: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "No. Telp",
+    value: editForm.noTlp,
+    onChange: v => setEditForm({
+      ...editForm,
+      noTlp: v
+    })
+  })), /*#__PURE__*/React.createElement(Input, {
+    label: "Alamat",
+    value: editForm.alamat,
+    onChange: v => setEditForm({
+      ...editForm,
+      alamat: v
+    }),
+    style: {
+      marginTop: 10
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => {
+      setEditSO(null);
+      setEditForm(null);
+    }
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: saveEditSO
+  }, "✓ Simpan")))), /*#__PURE__*/React.createElement(Modal, {
+    open: !!selesaiModal,
+    title: `Tandai Selesai — ${selesaiModal?.nomor || ""}`,
+    onClose: () => setSelesaiModal(null),
+    width: 480
+  }, selesaiModal && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Pilih referensi Delivery Order atau Invoice yang menandakan Sales Order ini sudah selesai. Bisa dipilih dari data yang sudah ada, atau input manual No. referensi."), /*#__PURE__*/React.createElement(Select, {
+    label: "Sumber Referensi",
+    value: selesaiForm.via,
+    onChange: v => setSelesaiForm({
+      ...selesaiForm,
+      via: v,
+      refNomor: ""
+    }),
+    options: [{
+      value: "Delivery Order",
+      label: "Delivery Order"
+    }, {
+      value: "Invoice",
+      label: "Invoice"
+    }]
+  }), (() => {
+    const refOptions = selesaiForm.via === "Delivery Order" ? (deliveryOrders || []).filter(d => d.soNomor === selesaiModal.nomor) : (invoices || []).filter(i => i.soNomor === selesaiModal.nomor);
+    return refOptions.length > 0 ? /*#__PURE__*/React.createElement(Select, {
+      label: `Pilih No. ${selesaiForm.via}`,
+      value: selesaiForm.refNomor,
+      onChange: v => setSelesaiForm({
+        ...selesaiForm,
+        refNomor: v
+      }),
+      options: refOptions.map(r => ({
+        value: r.nomor,
+        label: r.nomor
+      }))
+    }) : /*#__PURE__*/React.createElement(Input, {
+      label: `No. ${selesaiForm.via} (input manual — tidak ditemukan data terhubung ke SO ini)`,
+      value: selesaiForm.refNomor,
+      onChange: v => setSelesaiForm({
+        ...selesaiForm,
+        refNomor: v
+      }),
+      placeholder: `Masukkan No. ${selesaiForm.via}`
+    });
+  })(), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setSelesaiModal(null)
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: saveSelesai
+  }, "✓ Tandai Selesai")))));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -11717,7 +12139,7 @@ function ItemRequisitionModule({
   const canManage = isPipin || isOwnerLike || isSepti;
   const activeSO = salesOrders.filter(so => so.status === "Aktif");
   const [irSearch, setIrSearch] = useState("");
-  const itemRequisitionsFiltered = irSearch.trim() ? itemRequisitions.filter(r => [r.nomor, r.soNomor].filter(Boolean).some(x => String(x).toLowerCase().includes(irSearch.trim().toLowerCase()))) : itemRequisitions;
+  const itemRequisitionsFiltered = (irSearch.trim() ? itemRequisitions.filter(r => [r.nomor, r.soNomor].filter(Boolean).some(x => String(x).toLowerCase().includes(irSearch.trim().toLowerCase()))) : itemRequisitions).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState(null);
   const [manualModal, setManualModal] = useState(false);
@@ -11735,6 +12157,9 @@ function ItemRequisitionModule({
     soNomor: "",
     items: []
   });
+  const [soPickerOpen, setSoPickerOpen] = useState(false);
+  const [soPickerSearch, setSoPickerSearch] = useState("");
+  const soPickerList = soPickerSearch.trim() ? activeSO.filter(so => [so.nomor, so.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(soPickerSearch.trim().toLowerCase()))) : activeSO;
   const closeManualModal = () => {
     setManualModal(false);
     setEditingNomor(null);
@@ -11952,17 +12377,12 @@ function ItemRequisitionModule({
       gap: 10,
       flexWrap: "wrap"
     }
-  }, React.createElement(Select, {
-    value: "",
-    onChange: loadFromSO,
-    options: activeSO.map(so => ({
-      value: so.nomor,
-      label: `${so.nomor} — ${so.customerNama}`
-    })),
-    style: {
-      width: 280
+  }, React.createElement(Btn, {
+    onClick: () => {
+      setSoPickerSearch("");
+      setSoPickerOpen(true);
     }
-  }), React.createElement(Btn, {
+  }, "+ Buat IR dari SO"), React.createElement(Btn, {
     onClick: () => {
       setEditingNomor(null);
       setManualForm(blankManualForm);
@@ -11985,7 +12405,7 @@ function ItemRequisitionModule({
       marginBottom: 12
     }
   }), React.createElement(Table, {
-    headers: ["No. Requisition", "Tanggal", "No. SO", "Jumlah Item Kurang", "Status", "IR Completed"],
+    headers: ["No. Requisition", "Tanggal", "No. SO", "Nama Client", "Jumlah Item Kurang", "Status", "IR Completed"],
     rows: itemRequisitionsFiltered.map(r => [React.createElement("span", {
       style: {
         color: theme.accentLight,
@@ -11997,7 +12417,7 @@ function ItemRequisitionModule({
       color: theme.blue
     }, "Non-SO — ", r.soNomor) : React.createElement(Badge, {
       color: theme.blue
-    }, "Non-SO / Kandidat BOM") : r.soNomor, React.createElement(Badge, {
+    }, "Non-SO / Kandidat BOM") : r.soNomor, r.soCustomerNama || "-", React.createElement(Badge, {
       color: theme.purple
     }, r.items.length, " part"), React.createElement(Badge, {
       color: r.status === "Menunggu Purchasing" ? theme.yellow : theme.green
@@ -12010,6 +12430,63 @@ function ItemRequisitionModule({
     onDelete: isOwnerLike ? i => deleteIR(itemRequisitionsFiltered[i]) : undefined,
     emptyMsg: "Belum ada Item Requisition"
   })), React.createElement(Modal, {
+    open: soPickerOpen,
+    title: "Pilih Sales Order untuk dijadikan Item Requisition",
+    onClose: () => setSoPickerOpen(false),
+    width: 640
+  }, React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 12
+    }
+  }, React.createElement(Input, {
+    placeholder: "Cari no. SO / nama client...",
+    value: soPickerSearch,
+    onChange: setSoPickerSearch
+  }), React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+      maxHeight: 420,
+      overflowY: "auto"
+    }
+  }, soPickerList.length === 0 && React.createElement("p", {
+    style: {
+      color: theme.muted,
+      fontSize: 13,
+      margin: 0
+    }
+  }, "Tidak ada Sales Order aktif."), soPickerList.map(so => React.createElement("div", {
+    key: so.nomor,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8,
+      padding: "10px 14px",
+      gap: 12
+    }
+  }, React.createElement("div", null, React.createElement("div", {
+    style: {
+      fontWeight: 600,
+      color: theme.text,
+      fontSize: 14
+    }
+  }, so.nomor), React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, so.customerNama, " · ", so.tanggal)), React.createElement(Btn, {
+    size: "sm",
+    onClick: () => {
+      setSoPickerOpen(false);
+      loadFromSO(so.nomor);
+    }
+  }, "Pilih → Buat IR")))))), React.createElement(Modal, {
     open: !!detail,
     title: `Detail ${detail?.nomor}`,
     onClose: () => setDetail(null),
@@ -12260,11 +12737,11 @@ function PurchaseOrderModule({
   const canMarkPaid = ["purchasing", "finance_director", "owner", "gm"].includes(session.role); // Erni or Christine (Finance Director)
   const isMaria = session.role === "purchasing_overseas";
   const [poSearch, setPoSearch] = useState("");
-  const poFiltered = poSearch.trim() ? po.filter(p => {
+  const poFiltered = (poSearch.trim() ? po.filter(p => {
     const q = poSearch.trim().toLowerCase();
     if ([p.nomor, p.supplierNama].filter(Boolean).some(x => String(x).toLowerCase().includes(q))) return true;
     return (p.items || []).some(it => [it.partNumber, it.partName].filter(Boolean).some(x => String(x).toLowerCase().includes(q)));
-  }) : po;
+  }) : po).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState(null);
   const [importCostModal, setImportCostModal] = useState(null);
@@ -13800,13 +14277,28 @@ function GoodsReceiptModule({
     setInternalDOs,
     employees,
     editRequests,
-    setEditRequests
+    setEditRequests,
+    itemRequisitions
   } = store;
+  const [detailGR, setDetailGR] = useState(null);
+  // Derive the No. SO / No. IR chain for a receipt from its linked PO — a PO's irNomors point to
+  // the Item Requisitions that were pulled into it, and each IR carries the originating soNomor.
+  const grRefInfo = g => {
+    const poList = g.poType === "Lokal" ? poLocal : poOverseas;
+    const po = (poList || []).find(p => p.nomor === g.poNomor);
+    const irNomors = po?.irNomors || [];
+    const relatedIRs = (itemRequisitions || []).filter(ir => irNomors.includes(ir.nomor));
+    const soNomors = [...new Set(relatedIRs.map(ir => ir.soNomor).filter(Boolean))];
+    return {
+      irNomors,
+      soNomors
+    };
+  };
   const isJhon = ["storage", "logistic", "inventory", "workshop_manager", "purchasing", "purchasing_overseas"].includes(session.role);
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   const isWorkshopApprover = session.role === "workshop_manager" || isOwnerLike; // WORKSHOP1/WORKSHOP2, plus HO1/HO2/HO3 as company-wide override
   const [grSearch, setGrSearch] = useState("");
-  const goodsReceiptsFiltered = grSearch.trim() ? goodsReceipts.filter(g => [g.nomor, g.poNomor, g.mekanikNama].filter(Boolean).some(x => String(x).toLowerCase().includes(grSearch.trim().toLowerCase()))) : goodsReceipts;
+  const goodsReceiptsFiltered = (grSearch.trim() ? goodsReceipts.filter(g => [g.nomor, g.poNomor, g.mekanikNama].filter(Boolean).some(x => String(x).toLowerCase().includes(grSearch.trim().toLowerCase()))) : goodsReceipts).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const pendingGREdits = editRequests.filter(r => r.module === "Penerimaan Barang" && r.action === "Edit" && r.status === "Menunggu Approval Workshop");
   const [editGR, setEditGR] = useState(null); // the goodsReceipts record currently being edited (opens edit modal)
   const [editGRForm, setEditGRForm] = useState({
@@ -14211,7 +14703,14 @@ function GoodsReceiptModule({
     }
   }), /*#__PURE__*/React.createElement(Table, {
     headers: ["No. Penerimaan", "Tanggal", "No. PO", "Diterima Oleh", "Jumlah Item", "Status"],
-    rows: goodsReceiptsFiltered.map(g => [g.nomor, g.tanggal, g.poNomor, g.diterimaOleh, /*#__PURE__*/React.createElement(Badge, {
+    rows: goodsReceiptsFiltered.map(g => [/*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.accentLight,
+        fontWeight: 600,
+        cursor: "pointer"
+      },
+      onClick: () => setDetailGR(g)
+    }, g.nomor), g.tanggal, g.poNomor, g.diterimaOleh, /*#__PURE__*/React.createElement(Badge, {
       color: theme.green
     }, g.items.length, " part"), /*#__PURE__*/React.createElement(Badge, {
       color: g.statusFinal?.startsWith("Final") ? theme.green : theme.yellow
@@ -14230,6 +14729,92 @@ function GoodsReceiptModule({
     } : undefined,
     emptyMsg: "Belum ada penerimaan barang"
   }), /*#__PURE__*/React.createElement(Modal, {
+    open: !!detailGR,
+    title: `Detail Penerimaan ${detailGR?.nomor || ""}`,
+    onClose: () => setDetailGR(null),
+    width: 640
+  }, detailGR && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, (() => {
+    const {
+      irNomors,
+      soNomors
+    } = grRefInfo(detailGR);
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        background: theme.surface,
+        borderRadius: 8,
+        padding: "10px 14px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 4,
+        fontSize: 13
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        justifyContent: "space-between"
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.muted
+      }
+    }, "No. PO ke Supplier"), /*#__PURE__*/React.createElement("strong", {
+      style: {
+        color: theme.text
+      }
+    }, detailGR.poNomor, " (", detailGR.poType, ")")), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        justifyContent: "space-between"
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.muted
+      }
+    }, "No. Item Requisition"), /*#__PURE__*/React.createElement("strong", {
+      style: {
+        color: theme.text
+      }
+    }, irNomors.length ? irNomors.join(", ") : "-")), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        justifyContent: "space-between"
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.muted
+      }
+    }, "No. Sales Order"), /*#__PURE__*/React.createElement("strong", {
+      style: {
+        color: theme.text
+      }
+    }, soNomors.length ? soNomors.join(", ") : "-")), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        justifyContent: "space-between"
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.muted
+      }
+    }, "Diterima Oleh"), /*#__PURE__*/React.createElement("strong", {
+      style: {
+        color: theme.text
+      }
+    }, detailGR.diterimaOleh, detailGR.mekanikNama ? ` — ${detailGR.mekanikNama}` : "")));
+  })(), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Part Number", "Part Name", "Description", "Qty"],
+    rows: detailGR.items.map(it => {
+      const part = parts.find(p => p.partNumber === it.partNumber);
+      return [it.partNumber, it.partName, part?.description || "-", fmtNum(it.qtyDiterima)];
+    }),
+    emptyMsg: "-"
+  }))), /*#__PURE__*/React.createElement(Modal, {
     open: !!editGR,
     title: editGR ? `Edit Penerimaan ${editGR.nomor}` : "",
     onClose: () => setEditGR(null)
@@ -14558,7 +15143,7 @@ function PartsUseModule({
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState(null);
   const [puSearch, setPuSearch] = useState("");
-  const partsUseFiltered = puSearch.trim() ? partsUse.filter(pu => [pu.nomor, pu.soNomor, pu.mekanikNama].filter(Boolean).some(x => String(x).toLowerCase().includes(puSearch.trim().toLowerCase()))) : partsUse;
+  const partsUseFiltered = (puSearch.trim() ? partsUse.filter(pu => [pu.nomor, pu.soNomor, pu.mekanikNama].filter(Boolean).some(x => String(x).toLowerCase().includes(puSearch.trim().toLowerCase()))) : partsUse).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const [form, setForm] = useState({
     soNomor: "",
     mekanikNama: "",
@@ -14927,10 +15512,11 @@ function DeliveryOrderModule({
     setEditRequests
   } = store;
   const isStefanus = session.role === "logistic";
+  const isEpy = session.role === "sales_admin";
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   const isWorkshopApprover = session.role === "workshop_manager" || isOwnerLike; // WORKSHOP1/WORKSHOP2, plus HO1/HO2/HO3 as company-wide override
   const [doSearch, setDoSearch] = useState("");
-  const deliveryOrdersFiltered = doSearch.trim() ? deliveryOrders.filter(d => [d.nomor, d.soNomor, d.customerNama, d.driver, d.ekspedisi].filter(Boolean).some(x => String(x).toLowerCase().includes(doSearch.trim().toLowerCase()))) : deliveryOrders;
+  const deliveryOrdersFiltered = (doSearch.trim() ? deliveryOrders.filter(d => [d.nomor, d.soNomor, d.customerNama, d.driver, d.ekspedisi].filter(Boolean).some(x => String(x).toLowerCase().includes(doSearch.trim().toLowerCase()))) : deliveryOrders).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const pendingDOEdits = editRequests.filter(r => r.module === "Delivery Order" && r.action === "Edit" && r.status === "Menunggu Approval Workshop");
   const [editDO, setEditDO] = useState(null);
   const [editDOForm, setEditDOForm] = useState({
@@ -15127,7 +15713,7 @@ function DeliveryOrderModule({
       noTelp: d.noTelp || "-",
       status: d.status
     })), "Delivery_Order.xlsx", "DO")
-  }), (isStefanus || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+  }), (isStefanus || isEpy || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
     onClick: () => setModal(true)
   }, "+ Buat Delivery Order"))), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -15567,6 +16153,7 @@ function InvoiceModule({
   const pendingInvEdits = editRequests.filter(r => r.module === "Invoice" && r.action === "Edit" && r.status === "Menunggu Approval GM");
   const [editInv, setEditInv] = useState(null);
   const [editInvForm, setEditInvForm] = useState({
+    nomor: "",
     tipePembayaran: "COD",
     tanggalJatuhTempo: "",
     noFakturPajak: "",
@@ -15576,6 +16163,7 @@ function InvoiceModule({
   const openEditInv = inv => {
     setEditInv(inv);
     setEditInvForm({
+      nomor: inv.nomor || "",
       tipePembayaran: inv.tipePembayaran || "COD",
       tanggalJatuhTempo: inv.tanggalJatuhTempo || "",
       noFakturPajak: inv.noFakturPajak || "",
@@ -15584,12 +16172,20 @@ function InvoiceModule({
     });
   };
   const submitEditInv = () => {
+    // No. Invoice must stay unique — block the submission early rather than letting a collision
+    // slip through to GM approval and silently overwrite another invoice's number.
+    if (editInvForm.nomor.trim() && editInvForm.nomor.trim() !== editInv.nomor && invoices.some(i => i.nomor === editInvForm.nomor.trim())) {
+      return alert("No. Invoice tersebut sudah dipakai oleh invoice lain.");
+    }
     submitEditRequest(store, session, {
       module: "Invoice",
       action: "Edit",
       targetId: editInv.nomor,
       targetLabel: editInv.nomor,
-      payload: editInvForm,
+      payload: {
+        ...editInvForm,
+        nomor: editInvForm.nomor.trim() || editInv.nomor
+      },
       approverLabel: "GM"
     });
     setEditInv(null);
@@ -15610,6 +16206,10 @@ function InvoiceModule({
         ...r,
         status: "Error - Data Tidak Ditemukan"
       } : r));
+      return;
+    }
+    if (payload.nomor && payload.nomor.trim() && payload.nomor.trim() !== inv.nomor && invoices.some(i => i.nomor === payload.nomor.trim())) {
+      alert("No. Invoice tersebut sudah dipakai oleh invoice lain — tidak bisa di-approve. Ubah dulu No. Invoice-nya.");
       return;
     }
     setInvoices(invoices.map(x => x === inv ? {
@@ -15694,17 +16294,21 @@ function InvoiceModule({
     if (isLastRemaining) return Math.max(0, so.total - soTerbayarSoFar(so.nomor));
     return so.total * (parseFloat(t.percent) || 0) / 100;
   };
+  // Invoice numbering format: 001/FRT/VII/2026 — sequence (3 digits) / FRT (fixed) / bulan
+  // romawi / tahun. The sequence resets to 001 every month because we only look at invoices
+  // whose number already ends with the *current* month+year suffix when computing the next seq.
+  const ROMAN_MONTHS = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"];
   const newNomor = (arr = invoices) => {
-    const year = new Date().getFullYear();
-    const prefix = "INV-" + year + "-";
+    const now = new Date();
+    const suffix = `/FRT/${ROMAN_MONTHS[now.getMonth()]}/${now.getFullYear()}`;
     const maxSeq = arr.reduce((max, r) => {
-      if (r.nomor && r.nomor.startsWith(prefix)) {
-        const n = parseInt(r.nomor.slice(prefix.length), 10);
+      if (r.nomor && r.nomor.endsWith(suffix)) {
+        const n = parseInt(r.nomor.slice(0, r.nomor.indexOf("/")), 10);
         if (!isNaN(n) && n > max) return n;
       }
       return max;
     }, 0);
-    return prefix + String(maxSeq + 1).padStart(4, "0");
+    return String(maxSeq + 1).padStart(3, "0") + suffix;
   };
   const addDays = (dateStr, days) => {
     const d = new Date(dateStr);
@@ -15936,7 +16540,7 @@ function InvoiceModule({
     setFakturModal(null);
   };
   const filteredByStatus = filter === "Semua" ? invoices : invoices.filter(i => i.statusBayar === filter);
-  const filtered = invSearch.trim() ? filteredByStatus.filter(i => [i.nomor, i.soNomor, i.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(invSearch.trim().toLowerCase()))) : filteredByStatus;
+  const filtered = (invSearch.trim() ? filteredByStatus.filter(i => [i.nomor, i.soNomor, i.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(invSearch.trim().toLowerCase()))) : filteredByStatus).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const approvalColor = {
     "Menunggu Approval GM": theme.yellow,
     "Disetujui GM": theme.green,
@@ -16183,7 +16787,14 @@ function InvoiceModule({
       fontSize: 12,
       color: theme.muted
     }
-  }, "Diajukan oleh ", reviewInvEdit.requestedBy, " (", reviewInvEdit.tanggal, ")"), /*#__PURE__*/React.createElement(Select, {
+  }, "Diajukan oleh ", reviewInvEdit.requestedBy, " (", reviewInvEdit.tanggal, ")"), /*#__PURE__*/React.createElement(Input, {
+    label: "No. Invoice",
+    value: reviewInvEditForm.nomor || "",
+    onChange: v => setReviewInvEditForm({
+      ...reviewInvEditForm,
+      nomor: v
+    })
+  }), /*#__PURE__*/React.createElement(Select, {
     label: "Tipe Pembayaran",
     value: reviewInvEditForm.tipePembayaran,
     onChange: v => setReviewInvEditForm({
@@ -16310,7 +16921,15 @@ function InvoiceModule({
       fontSize: 12,
       color: theme.muted
     }
-  }, "Perubahan baru berlaku setelah disetujui HO1/HO2/HO3."), /*#__PURE__*/React.createElement(Select, {
+  }, "Perubahan baru berlaku setelah disetujui HO1/HO2/HO3."), /*#__PURE__*/React.createElement(Input, {
+    label: "No. Invoice",
+    value: editInvForm.nomor,
+    onChange: v => setEditInvForm({
+      ...editInvForm,
+      nomor: v
+    }),
+    placeholder: editInv.nomor
+  }), /*#__PURE__*/React.createElement(Select, {
     label: "Tipe Pembayaran",
     value: editInvForm.tipePembayaran,
     onChange: v => setEditInvForm({
@@ -16585,7 +17204,7 @@ function InvoiceModule({
       disetujuiLabel: "Disetujui Oleh",
       disetujuiOleh: {
         nama: "Effendi Husin",
-        jabatan: "Presiden Direktur"
+        jabatan: "DIREKTUR"
       }
     })
   })), detail.statusApproval !== "Disetujui GM" && /*#__PURE__*/React.createElement("p", {
@@ -18071,7 +18690,7 @@ function TicketingModule({
   const ticketTotal = t => t.totalHarga ?? (t.harga * ((t.mekanikNamaList || [t.mekanikNama]).length || 1));
   const totalBulanIni = tickets.filter(t => t.tanggal.slice(0, 7) === today().slice(0, 7)).reduce((s, t) => s + ticketTotal(t), 0);
   const [ticketSearch, setTicketSearch] = useState("");
-  const ticketsFiltered = ticketSearch.trim() ? tickets.filter(t => [t.nomor, t.dari, t.ke, ...(t.mekanikNamaList || [t.mekanikNama])].filter(Boolean).some(x => String(x).toLowerCase().includes(ticketSearch.trim().toLowerCase()))) : tickets;
+  const ticketsFiltered = (ticketSearch.trim() ? tickets.filter(t => [t.nomor, t.dari, t.ke, ...(t.mekanikNamaList || [t.mekanikNama])].filter(Boolean).some(x => String(x).toLowerCase().includes(ticketSearch.trim().toLowerCase()))) : tickets).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -18540,7 +19159,9 @@ function printDocument({
           <tbody>${paymentTerms.map(t => `<tr><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:13px;">${t.label}</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:13px;">${t.percent}%</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:13px;">${t.note || "-"}</td></tr>`).join("")}</tbody>
         </table>
       </div>` : "";
-  const sigBlock = person => person ? `${person.signature ? `<img src="${person.signature}" style="max-height:50px;display:block;margin:0 auto 6px;" />` : "<br/><br/><br/>"}____________________<br/>${person.nama}${person.jabatan ? `<br/><span style="font-size:11px;color:#666;">${person.jabatan}</span>` : ""}` : "<br/><br/><br/>____________________";
+  // skipTopSpace: when the caller already reserves vertical space above the signature line
+  // (e.g. the materai stamp box), don't add the usual blank-line padding on top of that.
+  const sigBlock = (person, skipTopSpace) => person ? `${person.signature ? `<img src="${person.signature}" style="max-height:50px;display:block;margin:0 auto 6px;" />` : skipTopSpace ? "" : "<br/><br/><br/>"}____________________<br/>${person.nama}${person.jabatan ? `<br/><span style="font-size:11px;color:#666;">${person.jabatan}</span>` : ""}` : skipTopSpace ? "____________________" : "<br/><br/><br/>____________________";
   win.document.write(`
     <html><head><title>${docTitle} - ${nomor}</title>
     <style>
@@ -18560,7 +19181,7 @@ function printDocument({
           ${co.logo ? `<img src="${co.logo}" style="max-height:56px;max-width:120px;object-fit:contain;" />` : ""}
           <div>
             <div class="company">${co.nama}</div>
-            ${co.alamat ? `<div style="font-size:12px;color:#666;margin-top:2px;">${co.alamat}</div>` : ""}
+            ${co.alamat ? `<div style="font-size:12px;color:#666;margin-top:2px;white-space:pre-line;">${co.alamat}</div>` : ""}
             <div style="font-size:12px;color:#666;margin-top:2px;">${co.telepon} · ${co.email}${co.npwp ? ` · NPWP: ${co.npwp}` : ""}</div>
           </div>
         </div>
@@ -18593,7 +19214,7 @@ function printDocument({
       ${catatan ? `<div style="margin-top:24px;font-size:12px;color:#666;white-space:pre-wrap;word-break:break-word;"><strong>Catatan:</strong> ${String(catatan).replace(/</g, "&lt;")}</div>` : ""}
       <div style="margin-top:60px;display:flex;justify-content:${disetujuiAlign === "left" ? "flex-start" : hideCreatedBy ? "center" : "space-between"};font-size:12px;">
         ${hideCreatedBy ? "" : `<div style="text-align:center;width:200px;">${dibuatOlehLabel}<br/><br/>${sigBlock(dibuatOleh)}</div>`}
-        <div style="text-align:center;width:200px;">${disetujuiLabel}<br/><br/>${showMateraiSpace ? `<div style="width:94px;height:144px;border:1px dashed #999;border-radius:4px;margin:0 auto 6px;display:flex;align-items:center;justify-content:center;font-size:9px;color:#999;text-align:center;padding:4px;box-sizing:border-box;">Materai<br/>Rp 10.000</div>` : ""}${sigBlock(disetujuiOleh)}</div>
+        <div style="text-align:center;width:200px;">${disetujuiLabel}${showMateraiSpace ? `<div style="width:3cm;height:4cm;margin:4px auto 0;"></div>` : "<br/><br/><br/>"}${sigBlock(disetujuiOleh, showMateraiSpace)}</div>
       </div>
       <div style="margin-top:40px;text-align:center;font-style:italic;font-size:7px;color:#888;border-top:1px solid #ddd;padding-top:10px;line-height:1.5;">
         DISCLAIMER<br/>
@@ -18636,12 +19257,12 @@ function ClientHistoryModule({
   const [selectedId, setSelectedId] = useState("");
   const visibleCustomers = isOwnerLike ? customers : customers.filter(c => customerAccessibleBy(c, session));
   const cust = customers.find(c => c.id === selectedId);
-  const myQuotU = quotationsUnit.filter(q => q.customerId === selectedId || q.customerNama === cust?.nama);
-  const myQuotPS = quotationsPS.filter(q => q.customerId === selectedId || q.customerNama === cust?.nama);
-  const mySO = salesOrders.filter(so => so.customerId === selectedId || so.customerNama === cust?.nama);
-  const myInv = invoices.filter(i => i.customerNama === cust?.nama);
-  const myDO = deliveryOrders.filter(d => d.customerNama === cust?.nama);
-  const myTickets = tickets.filter(t => mySO.some(so => t.soNomors.includes(so.nomor)));
+  const myQuotU = quotationsUnit.filter(q => q.customerId === selectedId || q.customerNama === cust?.nama).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  const myQuotPS = quotationsPS.filter(q => q.customerId === selectedId || q.customerNama === cust?.nama).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  const mySO = salesOrders.filter(so => so.customerId === selectedId || so.customerNama === cust?.nama).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  const myInv = invoices.filter(i => i.customerNama === cust?.nama).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  const myDO = deliveryOrders.filter(d => d.customerNama === cust?.nama).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  const myTickets = tickets.filter(t => mySO.some(so => t.soNomors.includes(so.nomor))).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const totalNilaiSO = mySO.reduce((s, so) => s + so.total, 0);
   const totalTerbayar = myInv.reduce((s, i) => s + (i.terbayar || 0), 0);
   const totalPiutang = myInv.reduce((s, i) => s + (i.total - (i.terbayar || 0)), 0);
@@ -19908,7 +20529,7 @@ function SalesActivityModule({
   });
   const myActivitiesAll = isSalesManager ? salesActivities.filter(a => a.salesUsername === session.username) : salesActivities;
   const [saSearch, setSaSearch] = useState("");
-  const myActivities = saSearch.trim() ? myActivitiesAll.filter(a => [a.salesNama, a.customerNama, a.jenisAktivitas, a.catatan].filter(Boolean).some(x => String(x).toLowerCase().includes(saSearch.trim().toLowerCase()))) : myActivitiesAll;
+  const myActivities = (saSearch.trim() ? myActivitiesAll.filter(a => [a.salesNama, a.customerNama, a.jenisAktivitas, a.catatan].filter(Boolean).some(x => String(x).toLowerCase().includes(saSearch.trim().toLowerCase()))) : myActivitiesAll).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const myCustomers = isSalesManager ? customers.filter(c => customerAccessibleBy(c, session)) : customers;
   const opsCoa = coa.filter(c => c.perOrang);
   const addBiaya = () => {
@@ -20180,6 +20801,298 @@ function SalesActivityModule({
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// ANALISA HARGA — price-history / fluctuation comparison, pulled from every quotation line
+// item ever issued (Unit + Parts/Service). Lets Sales/Finance see how a given part or unit's
+// price has moved over time and across different customers, without touching the quotations
+// themselves (this module is read-only over derived data).
+// ════════════════════════════════════════════════════════════════════════════
+function PriceAnalysisModule({
+  store,
+  session
+}) {
+  const {
+    quotationsUnit,
+    quotationsPS
+  } = store;
+  const allPoints = [];
+  (quotationsUnit || []).forEach(q => {
+    if (q.status === "Draft") return;
+    (q.items || []).forEach(it => {
+      if (!it.unitCode) return;
+      allPoints.push({
+        tipe: "Unit",
+        quotNomor: q.nomor,
+        tanggal: q.tanggal,
+        status: q.status,
+        customerNama: q.customerNama || "-",
+        code: it.unitCode,
+        name: it.unitName || "",
+        harga: it.harga || 0,
+        qty: it.qty || 0
+      });
+    });
+  });
+  (quotationsPS || []).forEach(q => {
+    if (q.status === "Draft") return;
+    (q.items || []).forEach(it => {
+      if (!it.partNumber) return;
+      allPoints.push({
+        tipe: "Part/Service",
+        quotNomor: q.nomor,
+        tanggal: q.tanggal,
+        status: q.status,
+        customerNama: q.customerNama || "-",
+        code: it.partNumber,
+        name: it.partName || "",
+        harga: it.harga || 0,
+        qty: it.qty || 0
+      });
+    });
+  });
+  const codeMap = new Map();
+  allPoints.forEach(p => {
+    if (!codeMap.has(p.code)) codeMap.set(p.code, {
+      code: p.code,
+      name: p.name,
+      tipe: p.tipe,
+      count: 0
+    });
+    codeMap.get(p.code).count++;
+  });
+  const codeOptions = [...codeMap.values()].sort((a, b) => b.count - a.count);
+  const [search, setSearch] = useState("");
+  const filteredCodeOptions = search.trim() ? codeOptions.filter(c => [c.code, c.name].filter(Boolean).some(x => String(x).toLowerCase().includes(search.trim().toLowerCase()))) : codeOptions;
+  const [selectedCode, setSelectedCode] = useState("");
+  const selectedInfo = codeOptions.find(c => c.code === selectedCode);
+  const history = selectedCode ? allPoints.filter(p => p.code === selectedCode).slice().sort((a, b) => (a.tanggal || "").localeCompare(b.tanggal || "")) : [];
+  const historyDesc = history.slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  const custMap = new Map();
+  history.forEach(p => {
+    const key = p.customerNama || "-";
+    if (!custMap.has(key)) custMap.set(key, {
+      customerNama: key,
+      count: 0,
+      min: Infinity,
+      max: -Infinity,
+      sum: 0,
+      lastTanggal: "",
+      lastHarga: 0
+    });
+    const c = custMap.get(key);
+    c.count++;
+    c.min = Math.min(c.min, p.harga);
+    c.max = Math.max(c.max, p.harga);
+    c.sum += p.harga;
+    if (p.tanggal >= c.lastTanggal) {
+      c.lastTanggal = p.tanggal;
+      c.lastHarga = p.harga;
+    }
+  });
+  const perCustomer = [...custMap.values()].sort((a, b) => (b.lastTanggal || "").localeCompare(a.lastTanggal || ""));
+  const overallMin = history.length ? Math.min(...history.map(p => p.harga)) : 0;
+  const overallMax = history.length ? Math.max(...history.map(p => p.harga)) : 0;
+  const overallAvg = history.length ? history.reduce((s, p) => s + p.harga, 0) / history.length : 0;
+  const fluctuationPct = overallMin ? (overallMax - overallMin) / overallMin * 100 : 0;
+
+  // Simple inline SVG chart — no external charting library available in this single-file app.
+  const chartW = 820,
+    chartH = 260,
+    padL = 90,
+    padR = 24,
+    padT = 20,
+    padB = 40;
+  const plotW = chartW - padL - padR,
+    plotH = chartH - padT - padB;
+  const xFor = i => history.length <= 1 ? padL + plotW / 2 : padL + i / (history.length - 1) * plotW;
+  const priceRange = overallMax - overallMin || 1;
+  const yFor = h => padT + plotH - (h - overallMin) / priceRange * plotH;
+  const palette = [theme.accent, theme.green, theme.purple, theme.red, theme.cyan, theme.yellow, "#ec4899", "#14b8a6"];
+  const custNames = [...new Set(history.map(p => p.customerNama))];
+  const custColor = {};
+  custNames.forEach((n, i) => custColor[n] = palette[i % palette.length]);
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      flexWrap: "wrap",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("h2", {
+    style: {
+      margin: 0,
+      color: theme.text
+    }
+  }, "Analisa Harga"), selectedCode && /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setSelectedCode("")
+  }, "← Kembali ke daftar part/unit")), !selectedCode && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      background: theme.surface,
+      padding: "8px 14px",
+      borderRadius: 8,
+      border: `1px dashed ${theme.border}`
+    }
+  }, "ℹ️ Data harga ditarik dari seluruh riwayat Quotation Unit dan Quotation Parts/Service (kecuali Draft). Pilih satu part/unit untuk melihat fluktuasi harga antar waktu dan antar client."), !selectedCode && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari Part Number / Unit Code / Nama...",
+    value: search,
+    onChange: setSearch,
+    style: {
+      marginBottom: 12
+    }
+  }), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Kode", "Nama", "Tipe", "Jumlah Transaksi"],
+    rows: filteredCodeOptions.map(c => [/*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.accentLight,
+        fontWeight: 600,
+        cursor: "pointer"
+      },
+      onClick: () => setSelectedCode(c.code)
+    }, c.code), c.name, /*#__PURE__*/React.createElement(Badge, {
+      color: c.tipe === "Unit" ? theme.purple : theme.cyan
+    }, c.tipe), c.count]),
+    emptyMsg: "Belum ada data harga dari Quotation."
+  })), selectedCode && history.length === 0 && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: theme.muted,
+      margin: 0
+    }
+  }, "Tidak ada riwayat harga untuk part/unit ini.")), selectedCode && history.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 4px",
+      color: theme.text
+    }
+  }, selectedInfo?.code, " — ", selectedInfo?.name), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
+      gap: 12,
+      marginTop: 14
+    }
+  }, [["Harga Terendah", fmt(overallMin), theme.green], ["Harga Tertinggi", fmt(overallMax), theme.red], ["Harga Rata-rata", fmt(overallAvg), theme.text], ["Fluktuasi", fluctuationPct.toFixed(1) + "%", theme.yellow], ["Jumlah Customer", custNames.length, theme.text], ["Jumlah Transaksi", history.length, theme.text]].map(([label, val, color], i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      background: theme.surface,
+      borderRadius: 8,
+      padding: "10px 14px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: theme.muted,
+      marginBottom: 4
+    }
+  }, label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 700,
+      color: color
+    }
+  }, val)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 18,
+      overflowX: "auto"
+    }
+  }, /*#__PURE__*/React.createElement("svg", {
+    width: chartW,
+    height: chartH,
+    style: {
+      display: "block"
+    }
+  }, [0, 0.25, 0.5, 0.75, 1].map((t, i) => {
+    const h = overallMin + t * priceRange;
+    const y = yFor(h);
+    return /*#__PURE__*/React.createElement("g", {
+      key: i
+    }, /*#__PURE__*/React.createElement("line", {
+      x1: padL,
+      y1: y,
+      x2: chartW - padR,
+      y2: y,
+      stroke: theme.border,
+      strokeWidth: 1
+    }), /*#__PURE__*/React.createElement("text", {
+      x: padL - 10,
+      y: y + 4,
+      textAnchor: "end",
+      fontSize: 10,
+      fill: theme.muted
+    }, fmt(h)));
+  }), history.length > 1 && /*#__PURE__*/React.createElement("polyline", {
+    points: history.map((p, i) => `${xFor(i)},${yFor(p.harga)}`).join(" "),
+    fill: "none",
+    stroke: theme.accent,
+    strokeWidth: 1.5,
+    opacity: 0.5
+  }), history.map((p, i) => /*#__PURE__*/React.createElement("circle", {
+    key: i,
+    cx: xFor(i),
+    cy: yFor(p.harga),
+    r: 5,
+    fill: custColor[p.customerNama] || theme.accent,
+    stroke: theme.bg,
+    strokeWidth: 1.5
+  })), history.map((p, i) => /*#__PURE__*/React.createElement("title", {
+    key: "t" + i
+  }, `${p.tanggal} — ${p.customerNama} — ${fmt(p.harga)}`))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 12,
+      marginTop: 10
+    }
+  }, custNames.map((n, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 10,
+      height: 10,
+      borderRadius: "50%",
+      background: custColor[n],
+      display: "inline-block"
+    }
+  }), n)))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.text,
+      fontSize: 15
+    }
+  }, "Perbandingan Antar Customer"), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Customer", "Jumlah Transaksi", "Harga Terendah", "Harga Tertinggi", "Harga Terakhir", "Tanggal Terakhir"],
+    rows: perCustomer.map(c => [c.customerNama, c.count, fmt(c.min), fmt(c.max), fmt(c.lastHarga), c.lastTanggal]),
+    emptyMsg: "-"
+  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.text,
+      fontSize: 15
+    }
+  }, "Riwayat Lengkap"), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Tanggal", "No. Quotation", "Customer", "Status", "Qty", "Harga"],
+    rows: historyDesc.map(p => [p.tanggal, p.quotNomor, p.customerNama, /*#__PURE__*/React.createElement(Badge, {
+      color: p.status === "Disetujui GM" || p.status === "Sudah jadi SO" ? theme.green : theme.yellow
+    }, p.status), fmtNum(p.qty), fmt(p.harga)]),
+    emptyMsg: "-"
+  })))));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // ABSENSI — daily attendance for uang makan/harian + lembur calculation
 // ════════════════════════════════════════════════════════════════════════════
 function AttendanceModule({
@@ -20244,10 +21157,10 @@ function AttendanceModule({
     alert(`${newRecords.length} record absensi berhasil diimport.`);
   };
   const [attSearch, setAttSearch] = useState("");
-  const myAttendanceFiltered = attSearch.trim() ? myAttendance.filter(a => {
+  const myAttendanceFiltered = (attSearch.trim() ? myAttendance.filter(a => {
     const emp = employees.find(e => e.username === a.username);
     return [a.tanggal, emp?.nama, a.username, a.status].filter(Boolean).some(x => String(x).toLowerCase().includes(attSearch.trim().toLowerCase()));
-  }) : myAttendance;
+  }) : myAttendance).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const totalUangHarianBulanIni = myAttendance.filter(a => a.tanggal.slice(0, 7) === today().slice(0, 7) && a.status === "Hadir").reduce((s, a) => s + (a.uangHarian || 0), 0);
   const totalLemburBulanIni = myAttendance.filter(a => a.tanggal.slice(0, 7) === today().slice(0, 7)).reduce((s, a) => s + (a.lembur || 0), 0);
   const statusColor = {
@@ -21308,7 +22221,7 @@ function JurnalModule({
   };
   const filteredByStatus = filter === "Semua" ? jurnal : jurnal.filter(j => j.status === filter);
   const [jurnalSearch, setJurnalSearch] = useState("");
-  const filtered = jurnalSearch.trim() ? filteredByStatus.filter(j => [j.kategori, j.keterangan, j.id].filter(Boolean).some(x => String(x).toLowerCase().includes(jurnalSearch.trim().toLowerCase()))) : filteredByStatus;
+  const filtered = (jurnalSearch.trim() ? filteredByStatus.filter(j => [j.kategori, j.keterangan, j.id].filter(Boolean).some(x => String(x).toLowerCase().includes(jurnalSearch.trim().toLowerCase()))) : filteredByStatus).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const totalHutangBerjalan = jurnal.filter(j => j.status === "Belum Lunas").reduce((s, j) => s + j.nominal, 0);
   const kategoriColor = {
     "Purchase Order Lokal": theme.purple,
@@ -21735,7 +22648,7 @@ function WorkshopOpsModule({
   };
   const totalBulanIni = visibleExpenses.filter(e => e.tanggal.slice(0, 7) === today().slice(0, 7)).reduce((s, e) => s + e.nominal, 0);
   const [wopsSearch, setWopsSearch] = useState("");
-  const visibleExpensesFiltered = wopsSearch.trim() ? visibleExpenses.filter(e => [e.coaNama, e.kategoriLabel, e.kategori, e.catatan, e.inputBy].filter(Boolean).some(x => String(x).toLowerCase().includes(wopsSearch.trim().toLowerCase()))) : visibleExpenses;
+  const visibleExpensesFiltered = (wopsSearch.trim() ? visibleExpenses.filter(e => [e.coaNama, e.kategoriLabel, e.kategori, e.catatan, e.inputBy].filter(Boolean).some(x => String(x).toLowerCase().includes(wopsSearch.trim().toLowerCase()))) : visibleExpenses).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
 
   // Weekly recap: cut off every Wednesday, period runs Thursday through the following Wednesday.
   // Individual entries are rolled up into 1 recap row per period, with a drill-down modal showing
@@ -22099,7 +23012,9 @@ function CompanySettingsModule({
     onChange: v => setForm({
       ...form,
       alamat: v
-    })
+    }),
+    multiline: true,
+    placeholder: "Satu baris per alamat, contoh:\nJl. Paradise 22 Ruko Blok A No.87\nKel. Sunter Agung, Kec. Tanjung Priok\nJakarta Utara 14350\nINDONESIA"
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
@@ -23334,6 +24249,11 @@ function App() {
           store: store,
           session: session
         });
+      case "price_analysis":
+        return /*#__PURE__*/React.createElement(PriceAnalysisModule, {
+          store: store,
+          session: session
+        });
       case "attendance":
         return /*#__PURE__*/React.createElement(AttendanceModule, {
           store: store,
@@ -23372,329 +24292,4 @@ function App() {
       case "workshop_dashboard":
         return /*#__PURE__*/React.createElement(WorkshopDashboardModule, {
           store: store,
-          session: session
-        });
-      case "payroll":
-        return hasPayrollAccess(session.role) ? /*#__PURE__*/React.createElement(PayrollModule, {
-          store: store,
-          session: session
-        }) : /*#__PURE__*/React.createElement(AccessDenied, {
-          label: "Payroll"
-        });
-      default:
-        return /*#__PURE__*/React.createElement(ComingSoon, {
-          label: activeMenu?.label || "Modul",
-          icon: activeMenu?.icon || "🚧"
-        });
-    }
-  };
-  return /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      height: "100vh",
-      background: theme.bg,
-      fontFamily: "'Segoe UI', system-ui, sans-serif",
-      color: theme.text,
-      overflow: "hidden",
-      position: "relative"
-    }
-  }, isMobile && mobileNavOpen && /*#__PURE__*/React.createElement("div", {
-    onClick: () => setMobileNavOpen(false),
-    style: {
-      position: "fixed",
-      inset: 0,
-      background: "#000000aa",
-      zIndex: 40
-    }
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      width: isMobile ? 250 : sidebarOpen ? 240 : 60,
-      background: theme.surface,
-      borderRight: `1px solid ${theme.border}`,
-      display: "flex",
-      flexDirection: "column",
-      transition: "width .2s, transform .2s",
-      flexShrink: 0,
-      overflow: "hidden",
-      position: isMobile ? "fixed" : "relative",
-      height: isMobile ? "100vh" : "auto",
-      zIndex: 50,
-      transform: isMobile ? mobileNavOpen ? "translateX(0)" : "translateX(-100%)" : "none"
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      padding: "16px",
-      borderBottom: `1px solid ${theme.border}`,
-      display: "flex",
-      alignItems: "center",
-      gap: 10
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      width: 32,
-      height: 32,
-      background: "linear-gradient(135deg,#3b82f6,#06b6d4)",
-      borderRadius: 8,
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      fontSize: 16,
-      flexShrink: 0
-    }
-  }, "⚙️"), (sidebarOpen || isMobile) && /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontWeight: 800,
-      fontSize: 14,
-      color: theme.accent,
-      whiteSpace: "nowrap"
-    }
-  }, "FORESTA ERP"), !isMobile && /*#__PURE__*/React.createElement("button", {
-    onClick: () => setSidebarOpen(s => !s),
-    style: {
-      marginLeft: "auto",
-      background: "none",
-      border: "none",
-      color: theme.muted,
-      cursor: "pointer",
-      fontSize: 18,
-      flexShrink: 0
-    }
-  }, "☰"), isMobile && /*#__PURE__*/React.createElement("button", {
-    onClick: () => setMobileNavOpen(false),
-    style: {
-      marginLeft: "auto",
-      background: "none",
-      border: "none",
-      color: theme.muted,
-      cursor: "pointer",
-      fontSize: 20,
-      flexShrink: 0
-    }
-  }, "×")), /*#__PURE__*/React.createElement("nav", {
-    style: {
-      flex: 1,
-      overflowY: "auto",
-      padding: "8px 0"
-    }
-  }, allowedMenus.map(m => {
-    const count = getBadgeCount(m.id);
-    return /*#__PURE__*/React.createElement("button", {
-      key: m.id,
-      onClick: () => selectMenu(m.id),
-      style: {
-        width: "100%",
-        display: "flex",
-        alignItems: "center",
-        gap: 12,
-        padding: "11px 16px",
-        border: "none",
-        background: activeMenu?.id === m.id ? theme.accent + "22" : "none",
-        borderLeft: activeMenu?.id === m.id ? `3px solid ${theme.accent}` : "3px solid transparent",
-        color: activeMenu?.id === m.id ? theme.accent : theme.muted,
-        cursor: "pointer",
-        fontFamily: "inherit",
-        fontSize: 13,
-        fontWeight: activeMenu?.id === m.id ? 600 : 400,
-        textAlign: "left",
-        whiteSpace: "nowrap"
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: {
-        fontSize: 17,
-        flexShrink: 0,
-        position: "relative"
-      }
-    }, m.icon, count > 0 && /*#__PURE__*/React.createElement("span", {
-      style: {
-        position: "absolute",
-        top: -4,
-        right: -8,
-        background: theme.red,
-        color: "#fff",
-        borderRadius: 10,
-        fontSize: 9,
-        fontWeight: 700,
-        padding: "1px 4px",
-        minWidth: 14,
-        textAlign: "center",
-        lineHeight: 1.4
-      }
-    }, count)), (sidebarOpen || isMobile) && /*#__PURE__*/React.createElement("span", {
-      style: {
-        flex: 1
-      }
-    }, m.label), (sidebarOpen || isMobile) && count > 0 && /*#__PURE__*/React.createElement("span", {
-      style: {
-        background: theme.red,
-        color: "#fff",
-        borderRadius: 10,
-        fontSize: 10,
-        fontWeight: 700,
-        padding: "1px 6px"
-      }
-    }, count));
-  })), /*#__PURE__*/React.createElement("div", {
-    style: {
-      borderTop: `1px solid ${theme.border}`,
-      padding: "12px 14px"
-    }
-  }, sidebarOpen || isMobile ? /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      alignItems: "center",
-      gap: 10,
-      marginBottom: 10
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      width: 32,
-      height: 32,
-      borderRadius: "50%",
-      background: def.color + "33",
-      border: `2px solid ${def.color}66`,
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      fontSize: 14,
-      flexShrink: 0
-    }
-  }, session.nama[0]), /*#__PURE__*/React.createElement("div", {
-    style: {
-      minWidth: 0
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12.5,
-      fontWeight: 600,
-      color: theme.text,
-      overflow: "hidden",
-      textOverflow: "ellipsis",
-      whiteSpace: "nowrap"
-    }
-  }, session.nama), /*#__PURE__*/React.createElement(Badge, {
-    color: def.color
-  }, def.label))), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setChangePwOpen(true),
-    style: {
-      width: "100%",
-      background: theme.surface,
-      border: `1px solid ${theme.border}`,
-      borderRadius: 6,
-      padding: "8px",
-      color: theme.muted,
-      fontSize: 12,
-      cursor: "pointer",
-      fontFamily: "inherit",
-      marginBottom: 6
-    }
-  }, "🔑 Ganti Password"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setSignatureOpen(true),
-    style: {
-      width: "100%",
-      background: theme.surface,
-      border: `1px solid ${theme.border}`,
-      borderRadius: 6,
-      padding: "8px",
-      color: theme.muted,
-      fontSize: 12,
-      cursor: "pointer",
-      fontFamily: "inherit",
-      marginBottom: 6
-    }
-  }, "✍️ Tanda Tangan"), /*#__PURE__*/React.createElement("button", {
-    onClick: logout,
-    style: {
-      width: "100%",
-      background: theme.red + "22",
-      border: `1px solid ${theme.red}44`,
-      borderRadius: 6,
-      padding: "8px",
-      color: theme.red,
-      fontSize: 12,
-      cursor: "pointer",
-      fontFamily: "inherit"
-    }
-  }, "🚪 Logout")) : /*#__PURE__*/React.createElement("button", {
-    onClick: logout,
-    style: {
-      width: "100%",
-      background: "none",
-      border: "none",
-      color: theme.red,
-      cursor: "pointer",
-      fontSize: 18
-    }
-  }, "🚪"))), /*#__PURE__*/React.createElement("div", {
-    style: {
-      flex: 1,
-      display: "flex",
-      flexDirection: "column",
-      overflow: "hidden",
-      minWidth: 0
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      padding: isMobile ? "12px 16px" : "12px 24px",
-      borderBottom: `1px solid ${theme.border}`,
-      display: "flex",
-      alignItems: "center",
-      gap: 10,
-      background: theme.surface
-    }
-  }, isMobile && /*#__PURE__*/React.createElement("button", {
-    onClick: () => setMobileNavOpen(true),
-    style: {
-      background: "none",
-      border: "none",
-      color: theme.text,
-      cursor: "pointer",
-      fontSize: 20,
-      padding: 0,
-      flexShrink: 0
-    }
-  }, "☰"), /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 18,
-      flexShrink: 0
-    }
-  }, activeMenu?.icon), /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontWeight: 700,
-      fontSize: isMobile ? 14 : 15,
-      overflow: "hidden",
-      textOverflow: "ellipsis",
-      whiteSpace: "nowrap"
-    }
-  }, activeMenu?.label), !isMobile && /*#__PURE__*/React.createElement("span", {
-    style: {
-      marginLeft: "auto",
-      fontSize: 12,
-      color: theme.muted
-    }
-  }, new Date().toLocaleDateString("id-ID", {
-    weekday: "long",
-    year: "numeric",
-    month: "long",
-    day: "numeric"
-  }))), /*#__PURE__*/React.createElement("div", {
-    style: {
-      flex: 1,
-      overflowY: "auto",
-      padding: isMobile ? "16px 14px" : "24px 28px"
-    }
-  }, renderPage())), /*#__PURE__*/React.createElement(ChangePasswordModal, {
-    open: changePwOpen,
-    onClose: () => setChangePwOpen(false),
-    session: session
-  }), /*#__PURE__*/React.createElement(SignatureModal, {
-    open: signatureOpen,
-    onClose: () => setSignatureOpen(false),
-    session: session,
-    store: store
-  }));
-}
-const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(React.createElement(App));
-</script>
-</body>
-</html>
+  
