@@ -154,6 +154,27 @@ const terbilang = n => {
 };
 const today = () => new Date().toISOString().split("T")[0];
 const uid = () => Math.random().toString(36).slice(2, 9).toUpperCase();
+// Unified document-numbering format used across the whole app: TYPE-000-FRT-ROMAN-YEAR
+// (e.g. "SO-001-FRT-VII-2026"). The sequence resets to 001 every calendar month per document
+// type. `arr` must be the freshest array of existing records of that type (matching the
+// collision-safe max-seq pattern already used elsewhere) so concurrent creation across browsers
+// can't produce a duplicate number; `numberField` defaults to "nomor" (Cuti stores its number in
+// "id" instead).
+const DOC_ROMAN_MONTHS = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"];
+const genDocNumber = (arr, typeCode, numberField = "nomor") => {
+  const now = new Date();
+  const prefix = typeCode + "-";
+  const suffix = `-FRT-${DOC_ROMAN_MONTHS[now.getMonth()]}-${now.getFullYear()}`;
+  const maxSeq = (arr || []).reduce((max, r) => {
+    const val = r && r[numberField];
+    if (val && val.startsWith(prefix) && val.endsWith(suffix)) {
+      const n = parseInt(val.slice(prefix.length, val.length - suffix.length), 10);
+      if (!isNaN(n) && n > max) return n;
+    }
+    return max;
+  }, 0);
+  return `${prefix}${String(maxSeq + 1).padStart(3, "0")}${suffix}`;
+};
 // Whole-day difference between a stored date string and today, for stale/follow-up checks.
 const daysSince = dateStr => {
   if (!dateStr) return 0;
@@ -310,6 +331,28 @@ function readExcelFile(file) {
       reject(e);
     }
   });
+}
+
+// Normalize an imported row-object's keys against a set of accepted header aliases, so a user
+// who doesn't type the exact template header (different casing/spacing, or an Indonesian label
+// like "Nama Part" instead of "partName") still gets mapped to the correct field. Without this,
+// unmatched headers silently produce undefined values and rows get skipped during import.
+function normalizeImportRow(row, fieldAliases) {
+  const lookup = {};
+  Object.keys(row).forEach(k => {
+    lookup[String(k).trim().toLowerCase().replace(/[\s_-]+/g, "")] = row[k];
+  });
+  const out = {};
+  Object.entries(fieldAliases).forEach(([field, aliases]) => {
+    for (const alias of [field, ...aliases]) {
+      const key = alias.toLowerCase().replace(/[\s_-]+/g, "");
+      if (lookup[key] !== undefined && String(lookup[key]).trim() !== "") {
+        out[field] = lookup[key];
+        break;
+      }
+    }
+  });
+  return out;
 }
 
 // Generic Excel Import Button + file input. onParsed receives array of row-objects.
@@ -1522,6 +1565,95 @@ function logAudit(store, session, {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// CASCADING REVISION — when a Quotation is revised, walk the downstream document
+// chain (SO -> IR -> PO) and flag every linked record with a manual-review alert.
+// Per standing instruction, this NEVER silently rewrites items/pricing on a live
+// commercial document (SO items may be a hand-picked subset of the quotation, PO
+// pricing may already be negotiated/approved, etc.) — it only surfaces a clear
+// notification so the responsible user can check and adjust manually. Documents
+// that are already locked (shipped, invoiced Lunas, marked selesai) get a more
+// urgent wording making clear they were NOT auto-changed.
+// ════════════════════════════════════════════════════════════════════════════
+function cascadeQuotationRevision(store, session, {
+  oldNomor,
+  baseNomor,
+  newNomor
+}) {
+  const chainNomors = [baseNomor, ...store.quotationsUnit.filter(q => q.revisiDari === baseNomor).map(q => q.nomor), ...store.quotationsPS.filter(q => q.revisiDari === baseNomor).map(q => q.nomor)];
+  const affectedSOs = store.salesOrders.filter(so => chainNomors.includes(so.sourceNomor));
+  if (affectedSOs.length === 0) return;
+  const soIsLocked = so => {
+    const hasShipment = store.deliveryOrders.some(d => d.soNomor === so.nomor);
+    const hasLunasInvoice = store.invoices.some(i => i.soNomor === so.nomor && i.statusBayar === "Lunas");
+    return hasShipment || hasLunasInvoice || !!so.selesaiManual;
+  };
+  const mkAlert = locked => ({
+    message: locked ? `Quotation sumber (${oldNomor}) direvisi menjadi ${newNomor}. Dokumen ini sudah berjalan (ada pengiriman / invoice lunas / ditandai selesai) sehingga TIDAK diubah otomatis — mohon cek manual apakah perlu penyesuaian.` : `Quotation sumber (${oldNomor}) direvisi menjadi ${newNomor}. Mohon cek apakah dokumen ini perlu disesuaikan mengikuti revisi tersebut.`,
+    fromNomor: oldNomor,
+    toNomor: newNomor,
+    flaggedAt: new Date().toISOString()
+  });
+  const soArr = [...store.salesOrders];
+  const irArr = [...store.itemRequisitions];
+  const poLocalArr = [...store.poLocal];
+  const poOverseasArr = [...store.poOverseas];
+  const auditEntries = [];
+  affectedSOs.forEach(so => {
+    const locked = soIsLocked(so);
+    const idx = soArr.findIndex(s => s.nomor === so.nomor);
+    if (idx >= 0) {
+      soArr[idx] = {
+        ...soArr[idx],
+        cascadeAlert: mkAlert(locked)
+      };
+      auditEntries.push({
+        module: "Sales Order",
+        docNomor: so.nomor,
+        action: "Cascade: Perlu Review Manual",
+        detail: `Quotation ${oldNomor} -> ${newNomor}${locked ? " (SO sudah berjalan)" : ""}`
+      });
+    }
+    const linkedIRs = irArr.filter(ir => ir.soNomor === so.nomor);
+    linkedIRs.forEach(ir => {
+      const irIdx = irArr.findIndex(x => x.nomor === ir.nomor);
+      if (irIdx >= 0) {
+        irArr[irIdx] = {
+          ...irArr[irIdx],
+          cascadeAlert: mkAlert(locked)
+        };
+        auditEntries.push({
+          module: "Item Requisition",
+          docNomor: ir.nomor,
+          action: "Cascade: Perlu Review Manual",
+          detail: `Terkait revisi Quotation ${oldNomor} -> ${newNomor} via SO ${so.nomor}`
+        });
+      }
+      [["Purchase Order Lokal", poLocalArr], ["Purchase Order Overseas", poOverseasArr]].forEach(([label, arr]) => {
+        arr.forEach((po, pIdx) => {
+          if ((po.irNomors || []).includes(ir.nomor) && po.status !== "Sudah Diterima") {
+            arr[pIdx] = {
+              ...arr[pIdx],
+              cascadeAlert: mkAlert(locked)
+            };
+            auditEntries.push({
+              module: label,
+              docNomor: po.nomor,
+              action: "Cascade: Perlu Review Manual",
+              detail: `Terkait revisi Quotation ${oldNomor} -> ${newNomor} via IR ${ir.nomor}`
+            });
+          }
+        });
+      });
+    });
+  });
+  store.setSalesOrders(soArr);
+  store.setItemRequisitions(irArr);
+  store.setPoLocal(poLocalArr);
+  store.setPoOverseas(poOverseasArr);
+  auditEntries.forEach(e => logAudit(store, session, e));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // UI ATOMS
 // ════════════════════════════════════════════════════════════════════════════
 function Card({
@@ -2547,6 +2679,22 @@ function MasterPart({
     setReviewReq(reqArr[idx]);
   };
   const PART_TEMPLATE_HEADERS = ["partNumber", "partName", "description", "kategori", "subKategori", "satuan", "brand", "asal", "hargaBeli", "hargaJual", "stok"];
+  // Accepted header aliases per field — lets users import a spreadsheet that doesn't use the exact
+  // template header text (different casing/spacing, or common Indonesian labels) without every row
+  // silently being skipped for having an "empty" Part Number.
+  const PART_FIELD_ALIASES = {
+    partNumber: ["part number", "no part", "nomor part", "kode part", "part no", "pn"],
+    partName: ["part name", "nama part", "nama barang", "nama item"],
+    description: ["deskripsi", "keterangan"],
+    kategori: ["category"],
+    subKategori: ["sub kategori", "sub category", "subcategory"],
+    satuan: ["unit", "uom"],
+    brand: ["merk", "merek"],
+    asal: ["origin"],
+    hargaBeli: ["harga beli", "purchase price", "cost", "harga modal"],
+    hargaJual: ["harga jual", "sell price", "selling price"],
+    stok: ["stock", "qty", "quantity", "jumlah"]
+  };
   const subKategoriList = ["Semua", ...new Set(parts.map(p => p.subKategori).filter(Boolean))];
   const filtered = parts.filter(p => (p.partNumber.toLowerCase().includes(search.toLowerCase()) || p.partName.toLowerCase().includes(search.toLowerCase())) && (subKatFilter === "Semua" || p.subKategori === subKatFilter));
   const wipeAllParts = () => {
@@ -2660,26 +2808,44 @@ function MasterPart({
     hargaJual: p.hargaJual,
     stok: p.stok ?? ""
   })), "Master_Part.xlsx", "Master Part");
-  const handleImportRows = rows => {
+  // Auto-generate a unique Part Number against a given (possibly still-growing) parts array —
+  // used during import so rows with a blank Part Number get a fresh one that can't collide with
+  // existing parts OR with another part number just generated earlier in the same import batch.
+  const genPartNumberAgainst = arr => {
+    let n = arr.length + 1;
+    let candidate;
+    do {
+      candidate = "PN-" + new Date().getFullYear() + "-" + String(n).padStart(4, "0");
+      n++;
+    } while (arr.find(p => p.partNumber === candidate));
+    return candidate;
+  };
+  const handleImportRows = rawRows => {
     const conflictRows = [];
     const newParts = [...parts];
     let added = 0;
-    rows.forEach(r => {
-      const partNumber = String(r.partNumber || "").trim();
-      if (!partNumber) return;
+    let autoGenerated = 0;
+    rawRows.forEach(raw => {
+      const r = normalizeImportRow(raw, PART_FIELD_ALIASES);
+      let partNumber = String(r.partNumber || "").trim();
+      if (!partNumber) {
+        partNumber = genPartNumberAgainst(newParts);
+        autoGenerated++;
+      }
       const existingIdx = newParts.findIndex(p => p.partNumber === partNumber);
+      const kategori = r.kategori || "Parts";
       const item = {
         partNumber,
         partName: r.partName || "",
         description: r.description || "",
-        kategori: r.kategori || "Parts",
+        kategori,
         subKategori: r.subKategori || "",
         satuan: r.satuan || "Unit",
         brand: r.brand || "",
         asal: r.asal || "Lokal",
         hargaBeli: parseFloat(r.hargaBeli) || 0,
         hargaJual: parseFloat(r.hargaJual) || 0,
-        stok: r.kategori === "Service" ? null : parseInt(r.stok) || 0
+        stok: kategori === "Service" ? null : parseInt(r.stok) || 0
       };
       if (existingIdx >= 0) conflictRows.push({
         existingIdx,
@@ -2694,11 +2860,15 @@ function MasterPart({
       rows: conflictRows,
       idx: 0,
       baseAdded: added,
+      baseAutoGen: autoGenerated,
       workingParts: newParts
     });else setImportSummary({
       added,
       skipped: 0,
-      replaced: 0
+      replaced: 0,
+      // Let the user know some rows got an auto-generated Part Number (blank in the source file)
+      // instead of silently guessing what happened.
+      autoGenWarning: autoGenerated > 0 ? `${autoGenerated} baris tidak memiliki Part Number di file, sehingga dibuatkan Part Number baru otomatis (format PN-TAHUN-XXXX, dijamin tidak bentrok dengan yang sudah ada).` : null
     });
   };
   const resolveConflict = action => {
@@ -2727,7 +2897,8 @@ function MasterPart({
       setImportSummary({
         added: conflicts.baseAdded,
         skipped: rows.filter((_, i) => i < next).length,
-        total: rows.length
+        total: rows.length,
+        autoGenWarning: conflicts.baseAutoGen > 0 ? `${conflicts.baseAutoGen} baris tidak memiliki Part Number di file, sehingga dibuatkan Part Number baru otomatis.` : null
       });
     }
   };
@@ -2817,6 +2988,12 @@ function MasterPart({
     }
   }, "+ Tambah Part"))), importSummary && /*#__PURE__*/React.createElement("div", {
     style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
       fontSize: 13,
       color: theme.green,
       background: theme.green + "11",
@@ -2834,7 +3011,16 @@ function MasterPart({
       color: theme.green,
       cursor: "pointer"
     }
-  }, "×")), !canSeePrice && /*#__PURE__*/React.createElement("div", {
+  }, "×")), importSummary.autoGenWarning && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.yellow,
+      background: theme.yellow + "11",
+      padding: "8px 14px",
+      borderRadius: 8,
+      border: `1px solid ${theme.yellow}44`
+    }
+  }, "ℹ️ ", importSummary.autoGenWarning)), !canSeePrice && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
       color: theme.muted,
@@ -5636,12 +5822,7 @@ function MekanikReport({
   };
   const [stForm, setSTForm] = useState(emptySTForm);
   const [editingSTId, setEditingSTId] = useState(null);
-  const romanMonths = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"];
-  const nextSTNomor = (arr = suratTugas) => {
-    const year = new Date().getFullYear();
-    const count = arr.filter(s => s.nomor && s.nomor.endsWith("/" + year)).length + 1;
-    return `${String(count).padStart(3, "0")}/${romanMonths[new Date().getMonth()]}/${year}`;
-  };
+  const nextSTNomor = (arr = suratTugas) => genDocNumber(arr, "ST");
   const addSTAssignee = () => {
     if (!stAssigneeForm.nama.trim()) return alert("Isi nama yang ditugaskan");
     setSTAssigneeCart([...stAssigneeCart, {
@@ -5953,7 +6134,7 @@ function MekanikReport({
       setBasts(arr);
     } else {
       setBasts([...basts, {
-        id: "BAPP-" + uid(),
+        id: genDocNumber(basts, "BAPP", "id"),
         visitId: detailVisit.id,
         ...bastForm,
         customerNama: cust?.nama,
@@ -6059,7 +6240,7 @@ function MekanikReport({
       setInspectionReports(arr);
     } else {
       setInspectionReports([...inspectionReports, {
-        id: "INSP-" + uid(),
+        id: genDocNumber(inspectionReports, "IN", "id"),
         visitId: detailVisit.id,
         tanggal: detailVisit.tanggal,
         tipeCrane: inspectionForm.tipeCrane,
@@ -8803,7 +8984,7 @@ function QuotationUnit({
       const revNum = existingRevisions.length; // R1, R2, ...
       return `${baseNomor}-R${revNum}`;
     }
-    return "QU-" + new Date().getFullYear() + "-" + String(quotationsUnit.filter(q => !q.revisiDari).length + 1).padStart(4, "0");
+    return genDocNumber(quotationsUnit.filter(q => !q.revisiDari), "UQ");
   };
   const openCreate = () => {
     setRevisionOf(null);
@@ -9049,6 +9230,13 @@ function QuotationUnit({
       action: asDraft ? "Simpan Draft" : revisionOf ? "Ajukan Revisi" : "Ajukan Tambah",
       detail: `${cust?.nama || "-"} — ${fmt(total)}`
     });
+    if (!asDraft && revisionOf) {
+      cascadeQuotationRevision(store, session, {
+        oldNomor: revisionOf.nomor,
+        baseNomor,
+        newNomor: nomor
+      });
+    }
     setModal(false);
     setRevisionOf(null);
   };
@@ -10029,7 +10217,7 @@ function QuotationPS({
       const existingRevisions = quotationsPS.filter(q => q.revisiDari === baseNomor || q.nomor === baseNomor);
       return `${baseNomor}-R${existingRevisions.length}`;
     }
-    return "QPS-" + new Date().getFullYear() + "-" + String(quotationsPS.filter(q => !q.revisiDari).length + 1).padStart(4, "0");
+    return genDocNumber(quotationsPS.filter(q => !q.revisiDari), "SQ");
   };
   const pendingRecs = partRecs.filter(r => r.status === "Menunggu").map(r => r.items ? r : {
     ...r,
@@ -10302,6 +10490,13 @@ function QuotationPS({
         };
       });
       setPartRecs(arr);
+    }
+    if (!asDraft && revisionOf) {
+      cascadeQuotationRevision(store, session, {
+        oldNomor: revisionOf.nomor,
+        baseNomor,
+        newNomor: nomor
+      });
     }
     setModal(false);
     setRevisionOf(null);
@@ -11373,18 +11568,7 @@ function SalesOrderModule({
   // the same moment (each browser's setter re-fetches fresh data right before merging, so passing
   // that fresh array in here yields a number that reflects what's actually on the server) and reuse
   // of a number after a record is deleted.
-  const newNomor = (arr = salesOrders) => {
-    const year = new Date().getFullYear();
-    const prefix = "SO-" + year + "-";
-    const maxSeq = arr.reduce((max, r) => {
-      if (r.nomor && r.nomor.startsWith(prefix)) {
-        const n = parseInt(r.nomor.slice(prefix.length), 10);
-        if (!isNaN(n) && n > max) return n;
-      }
-      return max;
-    }, 0);
-    return prefix + String(maxSeq + 1).padStart(4, "0");
-  };
+  const newNomor = (arr = salesOrders) => genDocNumber(arr, "SO");
   // Step 1: user picked a quotation — open the item-selection + shipping-info step instead of
   // immediately creating the SO, since not all quoted parts necessarily need to ship/PO out.
   const openPickItems = (quot, type) => {
@@ -11545,7 +11729,7 @@ function SalesOrderModule({
         cursor: "pointer"
       },
       onClick: () => setDetail(so)
-    }, so.nomor), /*#__PURE__*/React.createElement(Badge, {
+    }, so.cascadeAlert ? "⚠ " + so.nomor : so.nomor), /*#__PURE__*/React.createElement(Badge, {
       color: so.tipe === "Unit" ? theme.purple : theme.cyan
     }, so.tipe), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
       color: theme.green
@@ -11572,7 +11756,7 @@ function SalesOrderModule({
         cursor: "pointer"
       },
       onClick: () => setDetail(so)
-    }, so.nomor), /*#__PURE__*/React.createElement(Badge, {
+    }, so.cascadeAlert ? "⚠ " + so.nomor : so.nomor), /*#__PURE__*/React.createElement(Badge, {
       color: so.tipe === "Unit" ? theme.purple : theme.cyan
     }, so.tipe), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
       color: theme.green
@@ -11599,7 +11783,7 @@ function SalesOrderModule({
         cursor: "pointer"
       },
       onClick: () => setDetail(so)
-    }, so.nomor), /*#__PURE__*/React.createElement(Badge, {
+    }, so.cascadeAlert ? "⚠ " + so.nomor : so.nomor), /*#__PURE__*/React.createElement(Badge, {
       color: so.tipe === "Unit" ? theme.purple : theme.cyan
     }, so.tipe), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
       color: theme.green
@@ -11834,7 +12018,43 @@ function SalesOrderModule({
       flexDirection: "column",
       gap: 14
     }
-  }, /*#__PURE__*/React.createElement(Table, {
+  }, detail.cascadeAlert && /*#__PURE__*/React.createElement(Card, {
+    style: {
+      background: theme.red + "11",
+      border: `1px solid ${theme.red}44`
+    }
+  }, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 8px",
+      color: theme.red,
+      fontSize: 15
+    }
+  }, "⚠ Perlu Review Manual (Cascade Revisi Quotation)"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 10px",
+      fontSize: 13,
+      color: theme.text
+    }
+  }, detail.cascadeAlert.message), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => {
+      setSalesOrders(salesOrders.map(s => s.nomor === detail.nomor ? {
+        ...s,
+        cascadeAlert: null
+      } : s));
+      logAudit(store, session, {
+        module: "Sales Order",
+        docNomor: detail.nomor,
+        action: "Cascade: Ditandai Sudah Direview",
+        detail: ""
+      });
+      setDetail({
+        ...detail,
+        cascadeAlert: null
+      });
+    }
+  }, "✓ Tandai Sudah Direview")), /*#__PURE__*/React.createElement(Table, {
     headers: detail.tipe === "Unit" ? ["Unit Code", "Unit Name", "Description", "Qty", "Harga", "Subtotal"] : ["Part Number", "Part Name", "Description", "Qty", "Harga", "Subtotal"],
     rows: detail.items.map(it => detail.tipe === "Unit" ? [it.unitCode, it.unitName, it.partDescription || it.description || "-", fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)] : [it.partNumber, it.partName, it.partDescription || it.description || "-", fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)])
   }), /*#__PURE__*/React.createElement("div", {
@@ -12226,18 +12446,7 @@ function ItemRequisitionModule({
     }
     closeManualModal();
   };
-  const newNomor = (arr = itemRequisitions) => {
-    const year = new Date().getFullYear();
-    const prefix = "IR-" + year + "-";
-    const maxSeq = arr.reduce((max, r) => {
-      if (r.nomor && r.nomor.startsWith(prefix)) {
-        const n = parseInt(r.nomor.slice(prefix.length), 10);
-        if (!isNaN(n) && n > max) return n;
-      }
-      return max;
-    }, 0);
-    return prefix + String(maxSeq + 1).padStart(4, "0");
-  };
+  const newNomor = (arr = itemRequisitions) => genDocNumber(arr, "IR");
   const deleteIR = r => {
     if (!canManage) return alert("Hanya Purchasing/Workshop Manager/Owner/GM/Finance Director yang dapat menghapus Item Requisition.");
     if (r.status === "Sudah di-PO" && !confirm(`Item Requisition ${r.nomor} sudah menjadi Purchase Order. Purchase Order terkait TIDAK akan otomatis terhapus/berubah — perlu dicek manual bila perlu. Lanjutkan hapus?`)) return;
@@ -12490,7 +12699,7 @@ function ItemRequisitionModule({
         cursor: "pointer"
       },
       onClick: () => setDetail(r)
-    }, r.nomor), r.tanggal, r.bomCandidate ? r.soNomor ? React.createElement(Badge, {
+    }, r.cascadeAlert ? "⚠ " + r.nomor : r.nomor), r.tanggal, r.bomCandidate ? r.soNomor ? React.createElement(Badge, {
       color: theme.blue
     }, "Non-SO — ", r.soNomor) : React.createElement(Badge, {
       color: theme.blue
@@ -12574,7 +12783,43 @@ function ItemRequisitionModule({
       flexDirection: "column",
       gap: 14
     }
-  }, React.createElement(Table, {
+  }, detail.cascadeAlert && React.createElement(Card, {
+    style: {
+      background: theme.red + "11",
+      border: `1px solid ${theme.red}44`
+    }
+  }, React.createElement("h3", {
+    style: {
+      margin: "0 0 8px",
+      color: theme.red,
+      fontSize: 15
+    }
+  }, "⚠ Perlu Review Manual (Cascade Revisi Quotation)"), React.createElement("p", {
+    style: {
+      margin: "0 0 10px",
+      fontSize: 13,
+      color: theme.text
+    }
+  }, detail.cascadeAlert.message), React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => {
+      setItemRequisitions(itemRequisitions.map(r => r.nomor === detail.nomor ? {
+        ...r,
+        cascadeAlert: null
+      } : r));
+      logAudit(store, session, {
+        module: "Item Requisition",
+        docNomor: detail.nomor,
+        action: "Cascade: Ditandai Sudah Direview",
+        detail: ""
+      });
+      setDetail({
+        ...detail,
+        cascadeAlert: null
+      });
+    }
+  }, "✓ Tandai Sudah Direview")), React.createElement(Table, {
     headers: ["Part Number", "Part Name", "Qty Dibutuhkan", "Stok Tersedia", "Qty Kurang", "Catatan", "Status Diterima"],
     rows: detail.items.map(it => {
       const diterima = irRefInfo(detail).receivedByPart[it.partNumber] || 0;
@@ -12886,18 +13131,7 @@ function PurchaseOrderModule({
   const [irPick, setIrPick] = useState(null);
   const [irPickedIdx, setIrPickedIdx] = useState([]);
   const [irPickTarget, setIrPickTarget] = useState("create"); // 'create' | 'revise'
-  const newNomor = (arr = po) => {
-    const year = new Date().getFullYear();
-    const prefix = (isLocal ? "POL-" : "POO-") + year + "-";
-    const maxSeq = arr.reduce((max, r) => {
-      if (r.nomor && r.nomor.startsWith(prefix)) {
-        const n = parseInt(r.nomor.slice(prefix.length), 10);
-        if (!isNaN(n) && n > max) return n;
-      }
-      return max;
-    }, 0);
-    return prefix + String(maxSeq + 1).padStart(4, "0");
-  };
+  const newNomor = (arr = po) => genDocNumber(arr, isLocal ? "PL" : "PO");
   const addDays = (dateStr, days) => {
     const d = new Date(dateStr);
     d.setDate(d.getDate() + parseInt(days));
@@ -13433,7 +13667,7 @@ function PurchaseOrderModule({
           cursor: "pointer"
         },
         onClick: () => setDetail(p)
-      }, p.nomor), p.urgent && /*#__PURE__*/React.createElement("span", {
+      }, p.cascadeAlert ? "⚠ " + p.nomor : p.nomor), p.urgent && /*#__PURE__*/React.createElement("span", {
         style: {
           marginLeft: 6
         }
@@ -13525,7 +13759,43 @@ function PurchaseOrderModule({
       flexDirection: "column",
       gap: 14
     }
-  }, /*#__PURE__*/React.createElement("div", {
+  }, detail.cascadeAlert && /*#__PURE__*/React.createElement(Card, {
+    style: {
+      background: theme.red + "11",
+      border: `1px solid ${theme.red}44`
+    }
+  }, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 8px",
+      color: theme.red,
+      fontSize: 15
+    }
+  }, "⚠ Perlu Review Manual (Cascade Revisi Quotation)"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 10px",
+      fontSize: 13,
+      color: theme.text
+    }
+  }, detail.cascadeAlert.message), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => {
+      setPo(po.map(p => p.nomor === detail.nomor ? {
+        ...p,
+        cascadeAlert: null
+      } : p));
+      logAudit(store, session, {
+        module: isLocal ? "Purchase Order Lokal" : "Purchase Order Overseas",
+        docNomor: detail.nomor,
+        action: "Cascade: Ditandai Sudah Direview",
+        detail: ""
+      });
+      setDetail({
+        ...detail,
+        cascadeAlert: null
+      });
+    }
+  }, "✓ Tandai Sudah Direview")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
       gridTemplateColumns: "1fr 1fr",
@@ -14624,7 +14894,7 @@ function GoodsReceiptModule({
     const pickedItems = form.items.filter(it => it.included && it.qtyDiterima > 0);
     if (pickedItems.length === 0) return alert("Pilih minimal 1 barang untuk diterima");
     if (!form.mekanikNama) return alert("Pilih atau isi nama mekanik penerima");
-    const grNomor = "GR-" + uid();
+    const grNomor = genDocNumber(goodsReceipts, "GR");
     const isFinalAtWorkshop = form.diterimaOleh === "Workshop";
     setGoodsReceipts([...goodsReceipts, {
       nomor: grNomor,
@@ -15861,18 +16131,7 @@ function DeliveryOrderModule({
     noTelp: "",
     catatan: ""
   });
-  const newNomor = (arr = deliveryOrders) => {
-    const year = new Date().getFullYear();
-    const prefix = "DO-" + year + "-";
-    const maxSeq = arr.reduce((max, r) => {
-      if (r.nomor && r.nomor.startsWith(prefix)) {
-        const n = parseInt(r.nomor.slice(prefix.length), 10);
-        if (!isNaN(n) && n > max) return n;
-      }
-      return max;
-    }, 0);
-    return prefix + String(maxSeq + 1).padStart(4, "0");
-  };
+  const newNomor = (arr = deliveryOrders) => genDocNumber(arr, "DO");
   const addMonths = (dateStr, months) => {
     const d = new Date(dateStr);
     d.setMonth(d.getMonth() + months);
@@ -16180,22 +16439,26 @@ function DeliveryOrderModule({
       justifyContent: "flex-end"
     }
   }, /*#__PURE__*/React.createElement(PrintBtn, {
-    onClick: () => printDocument({
-      company: store.companySettings,
-      docTitle: "DELIVERY ORDER",
-      nomor: detail.nomor,
-      tanggal: detail.tanggal,
-      partyLabel: "Kepada:",
-      partyName: detail.customerNama,
-      itemHeaders: ["Nama Barang", "Qty"],
-      items: detail.items.map(it => [it.nama, fmtNum(it.qty)]),
-      showPrice: false,
-      catatan: detail.catatan,
-      extraInfoRows: [...(detail.ekspedisi ? [["Ekspedisi", detail.ekspedisi]] : []), ...(detail.noResi ? [["No. Resi", detail.noResi]] : []), ...(detail.driver ? [["Nama Driver", detail.driver]] : []), ...(detail.noKendaraan ? [["No. Mobil", detail.noKendaraan]] : []), ...(detail.noTelp ? [["No. Telp", detail.noTelp]] : [])],
-      dibuatOleh: {
-        nama: detail.createdBy
-      }
-    })
+    onClick: () => {
+      const so = salesOrders.find(s => s.nomor === detail.soNomor);
+      return printDocument({
+        company: store.companySettings,
+        docTitle: "DELIVERY ORDER",
+        nomor: detail.nomor,
+        tanggal: detail.tanggal,
+        partyLabel: "Kepada:",
+        partyName: detail.customerNama,
+        partyExtra: customers.find(c => c.nama === detail.customerNama)?.alamat || "",
+        itemHeaders: ["Part Number", "Nama Barang", "Qty"],
+        items: detail.items.map(it => [it.partNumber || "-", it.nama, fmtNum(it.qty)]),
+        showPrice: false,
+        catatan: detail.catatan,
+        extraInfoRows: [["No. PO", so?.noPoClient || "-"], ["Ekspedisi", so?.shippingEkspedisi || detail.ekspedisi || "-"], ...(detail.noResi ? [["No. Resi", detail.noResi]] : []), ...(detail.driver ? [["Nama Driver", detail.driver]] : []), ...(detail.noKendaraan ? [["No. Mobil", detail.noKendaraan]] : []), ...(detail.noTelp ? [["No. Telp", detail.noTelp]] : [])],
+        dibuatOleh: {
+          nama: detail.createdBy
+        }
+      });
+    }
   })))), /*#__PURE__*/React.createElement(Modal, {
     open: modal,
     title: "Buat Delivery Order",
@@ -16218,7 +16481,7 @@ function DeliveryOrderModule({
       });
       setShipItems(soItemsRemaining(so));
     },
-    options: salesOrders.map(so => ({
+    options: salesOrders.filter(so => soItemsRemaining(so).some(it => it.sisa > 0)).map(so => ({
       value: so.nomor,
       label: `${so.nomor} — ${so.customerNama} (${so.tipe})`
     })),
@@ -16532,22 +16795,8 @@ function InvoiceModule({
     if (isLastRemaining) return Math.max(0, so.total - soTerbayarSoFar(so.nomor));
     return so.total * (parseFloat(t.percent) || 0) / 100;
   };
-  // Invoice numbering format: 001/FRT/VII/2026 — sequence (3 digits) / FRT (fixed) / bulan
-  // romawi / tahun. The sequence resets to 001 every month because we only look at invoices
-  // whose number already ends with the *current* month+year suffix when computing the next seq.
-  const ROMAN_MONTHS = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"];
-  const newNomor = (arr = invoices) => {
-    const now = new Date();
-    const suffix = `/FRT/${ROMAN_MONTHS[now.getMonth()]}/${now.getFullYear()}`;
-    const maxSeq = arr.reduce((max, r) => {
-      if (r.nomor && r.nomor.endsWith(suffix)) {
-        const n = parseInt(r.nomor.slice(0, r.nomor.indexOf("/")), 10);
-        if (!isNaN(n) && n > max) return n;
-      }
-      return max;
-    }, 0);
-    return String(maxSeq + 1).padStart(3, "0") + suffix;
-  };
+  // Invoice numbering now follows the unified app-wide format: INV-000-FRT-ROMAN-YEAR.
+  const newNomor = (arr = invoices) => genDocNumber(arr, "INV");
   const addDays = (dateStr, days) => {
     const d = new Date(dateStr);
     d.setDate(d.getDate() + parseInt(days));
@@ -18826,18 +19075,7 @@ function TicketingModule({
   const [namaPicker, setNamaPicker] = useState("");
   const [namaBebas, setNamaBebas] = useState("");
   const mekanikList = employees.filter(e => e.role === "mekanik").map(e => e.nama);
-  const newNomor = (arr = tickets) => {
-    const year = new Date().getFullYear();
-    const prefix = "TKT-" + year + "-";
-    const maxSeq = arr.reduce((max, r) => {
-      if (r.nomor && r.nomor.startsWith(prefix)) {
-        const n = parseInt(r.nomor.slice(prefix.length), 10);
-        if (!isNaN(n) && n > max) return n;
-      }
-      return max;
-    }, 0);
-    return prefix + String(maxSeq + 1).padStart(4, "0");
-  };
+  const newNomor = (arr = tickets) => genDocNumber(arr, "TK");
   const toggleSO = nomor => {
     setForm(f => ({
       ...f,
@@ -21649,18 +21887,7 @@ function FormCutiModule({
   const sisaCuti = username => Math.max(0, 12 - cutiTerpakai(username));
   const mySisaCuti = sisaCuti(session.username);
   const jumlahHariForm = countDays(form.dariTanggal, form.sampaiTanggal);
-  const newNomor = (arr = leaveRequests) => {
-    const year = new Date().getFullYear();
-    const prefix = "CUTI-" + year + "-";
-    const maxSeq = arr.reduce((max, r) => {
-      if (r.id && r.id.startsWith(prefix)) {
-        const n = parseInt(r.id.slice(prefix.length), 10);
-        if (!isNaN(n) && n > max) return n;
-      }
-      return max;
-    }, 0);
-    return prefix + String(maxSeq + 1).padStart(4, "0");
-  };
+  const newNomor = (arr = leaveRequests) => genDocNumber(arr, "CT", "id");
   const myRequests = leaveRequests.filter(r => r.username === session.username);
   const listRequests = isApprover ? leaveRequests : myRequests;
   const sortedRequests = [...listRequests].sort((a, b) => (b.diajukanTanggal || "").localeCompare(a.diajukanTanggal || ""));
