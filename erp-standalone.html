@@ -15509,7 +15509,8 @@ function DeliveryOrderModule({
     maintenanceSchedules,
     setMaintenanceSchedules,
     editRequests,
-    setEditRequests
+    setEditRequests,
+    parts
   } = store;
   const isStefanus = session.role === "logistic";
   const isEpy = session.role === "sales_admin";
@@ -15590,11 +15591,13 @@ function DeliveryOrderModule({
     return (so.items || []).map(it => {
       const key = it.partNumber || it.unitCode;
       const nama = it.unitName || it.partName;
+      const description = parts.find(p => p.partNumber === key)?.description || "";
       const shippedQty = priorDOs.reduce((sum, d) => sum + (d.items || []).filter(di => di.partNumber === key).reduce((s, di) => s + (Number(di.qty) || 0), 0), 0);
       const sisa = Math.max(0, (Number(it.qty) || 0) - shippedQty);
       return {
         partNumber: key,
         nama,
+        description,
         orderedQty: it.qty,
         shippedQty,
         sisa,
@@ -15970,7 +15973,17 @@ function DeliveryOrderModule({
       fontSize: 13,
       color: theme.text
     }
-  }, it.nama, /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontWeight: 600
+    }
+  }, it.partNumber), " — ", it.nama, it.description && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: theme.muted,
+      fontStyle: "italic"
+    }
+  }, "🔒 ", it.description), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 11,
       color: theme.muted
