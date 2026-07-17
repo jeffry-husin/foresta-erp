@@ -12405,7 +12405,7 @@ function ItemRequisitionModule({
       marginBottom: 12
     }
   }), React.createElement(Table, {
-    headers: ["No. Requisition", "Tanggal", "No. SO", "Nama Client", "Jumlah Item Kurang", "Status", "IR Completed"],
+    headers: ["No. Requisition", "Tanggal", "No. SO", "No. PO Client", "Nama Client", "Jumlah Item Kurang", "Status", "IR Completed"],
     rows: itemRequisitionsFiltered.map(r => [React.createElement("span", {
       style: {
         color: theme.accentLight,
@@ -12417,7 +12417,7 @@ function ItemRequisitionModule({
       color: theme.blue
     }, "Non-SO — ", r.soNomor) : React.createElement(Badge, {
       color: theme.blue
-    }, "Non-SO / Kandidat BOM") : r.soNomor, r.soCustomerNama || "-", React.createElement(Badge, {
+    }, "Non-SO / Kandidat BOM") : r.soNomor, (salesOrders.find(s => s.nomor === r.soNomor)?.noPoClient) || "-", r.soCustomerNama || "-", React.createElement(Badge, {
       color: theme.purple
     }, r.items.length, " part"), React.createElement(Badge, {
       color: r.status === "Menunggu Purchasing" ? theme.yellow : theme.green
@@ -15517,7 +15517,6 @@ function DeliveryOrderModule({
   const isWorkshopApprover = session.role === "workshop_manager" || isOwnerLike; // WORKSHOP1/WORKSHOP2, plus HO1/HO2/HO3 as company-wide override
   const [doSearch, setDoSearch] = useState("");
   const deliveryOrdersFiltered = (doSearch.trim() ? deliveryOrders.filter(d => [d.nomor, d.soNomor, d.customerNama, d.driver, d.ekspedisi].filter(Boolean).some(x => String(x).toLowerCase().includes(doSearch.trim().toLowerCase()))) : deliveryOrders).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
-  const pendingDOEdits = editRequests.filter(r => r.module === "Delivery Order" && r.action === "Edit" && r.status === "Menunggu Approval Workshop");
   const [editDO, setEditDO] = useState(null);
   const [editDOForm, setEditDOForm] = useState({
     ekspedisi: "",
@@ -15527,6 +15526,7 @@ function DeliveryOrderModule({
     noTelp: "",
     catatan: ""
   });
+  const canEditDO = d => !!d && (d.createdBy === session.nama || isStefanus || isEpy || isOwnerLike);
   const openEditDO = d => {
     setEditDO(d);
     setEditDOForm({
@@ -15538,67 +15538,19 @@ function DeliveryOrderModule({
       catatan: d.catatan || ""
     });
   };
-  const submitEditDO = () => {
-    submitEditRequest(store, session, {
+  // Creator (and logistics/sales-admin/owner-like roles) can save changes directly — no GM/Workshop approval needed.
+  const saveEditDO = () => {
+    setDeliveryOrders(deliveryOrders.map(x => x === editDO ? {
+      ...x,
+      ...editDOForm
+    } : x));
+    logAudit(store, session, {
       module: "Delivery Order",
+      docNomor: editDO.nomor,
       action: "Edit",
-      targetId: editDO.nomor,
-      targetLabel: editDO.nomor,
-      payload: editDOForm,
-      approverLabel: "Workshop"
+      detail: `Diubah oleh ${session.nama}`
     });
     setEditDO(null);
-  };
-  const [reviewDO, setReviewDO] = useState(null);
-  const [reviewDOForm, setReviewDOForm] = useState(null);
-  const openReviewDO = r => {
-    setReviewDO(r);
-    setReviewDOForm({
-      ...r.payload
-    });
-  };
-  const approveDOEdit = (req, payloadOverride) => {
-    const payload = payloadOverride || req.payload;
-    const d = deliveryOrders.find(x => x.nomor === req.targetId);
-    if (!d) {
-      setEditRequests(editRequests.map(r => r.id === req.id ? {
-        ...r,
-        status: "Error - Data Tidak Ditemukan"
-      } : r));
-      return;
-    }
-    setDeliveryOrders(deliveryOrders.map(x => x === d ? {
-      ...d,
-      ...payload
-    } : x));
-    setEditRequests(editRequests.map(r => r.id === req.id ? {
-      ...r,
-      payload,
-      status: "Disetujui Workshop"
-    } : r));
-    logAudit(store, session, {
-      module: "Delivery Order",
-      docNomor: d.nomor,
-      action: "Approve Edit",
-      detail: `Disetujui oleh ${session.nama}`
-    });
-    setReviewDO(null);
-  };
-  const rejectDOEdit = req => {
-    const reason = prompt("Alasan penolakan edit:");
-    if (!reason) return;
-    setEditRequests(editRequests.map(r => r.id === req.id ? {
-      ...r,
-      status: "Ditolak Workshop",
-      rejectReason: reason
-    } : r));
-    logAudit(store, session, {
-      module: "Delivery Order",
-      docNomor: req.targetId,
-      action: "Reject Edit",
-      detail: reason
-    });
-    setReviewDO(null);
   };
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState(null);
@@ -15629,9 +15581,49 @@ function DeliveryOrderModule({
     d.setMonth(d.getMonth() + months);
     return d.toISOString().split("T")[0];
   };
+  // Partial shipment support: for the selected SO, compute per-item qty already shipped across
+  // existing DOs, so the user can choose which items — and how much of each — go in THIS shipment.
+  const [shipItems, setShipItems] = useState([]);
+  const soItemsRemaining = so => {
+    if (!so) return [];
+    const priorDOs = deliveryOrders.filter(d => d.soNomor === so.nomor);
+    return (so.items || []).map(it => {
+      const key = it.partNumber || it.unitCode;
+      const nama = it.unitName || it.partName;
+      const shippedQty = priorDOs.reduce((sum, d) => sum + (d.items || []).filter(di => di.partNumber === key).reduce((s, di) => s + (Number(di.qty) || 0), 0), 0);
+      const sisa = Math.max(0, (Number(it.qty) || 0) - shippedQty);
+      return {
+        partNumber: key,
+        nama,
+        orderedQty: it.qty,
+        shippedQty,
+        sisa,
+        selected: sisa > 0,
+        shipQty: sisa
+      };
+    });
+  };
+  const toggleShipItem = key => {
+    setShipItems(shipItems.map(it => it.partNumber === key ? {
+      ...it,
+      selected: !it.selected
+    } : it));
+  };
+  const setShipQty = (key, qty) => {
+    setShipItems(shipItems.map(it => it.partNumber === key ? {
+      ...it,
+      shipQty: qty
+    } : it));
+  };
   const save = () => {
     if (!form.soNomor) return alert("Pilih Sales Order");
     const so = salesOrders.find(s => s.nomor === form.soNomor);
+    const itemsToShip = shipItems.filter(it => it.selected && Number(it.shipQty) > 0);
+    if (!itemsToShip.length) return alert("Pilih minimal satu barang untuk dikirim, dengan qty lebih dari 0.");
+    const overQty = itemsToShip.find(it => Number(it.shipQty) > it.sisa);
+    if (overQty) return alert(`Qty kirim untuk "${overQty.nama}" melebihi sisa yang belum dikirim (${overQty.sisa}).`);
+    const shippedKeys = new Set(itemsToShip.map(it => it.partNumber));
+    const isPartial = itemsToShip.some(it => Number(it.shipQty) < it.sisa) || shippedKeys.size < (so?.items || []).length;
     let doNomor;
     setDeliveryOrders(prev => {
       doNomor = newNomor(prev);
@@ -15640,18 +15632,19 @@ function DeliveryOrderModule({
         ...form,
         customerNama: so?.customerNama,
         tipe: so?.tipe,
-        items: so?.items.map(it => ({
-          partNumber: it.partNumber || it.unitCode,
-          nama: it.unitName || it.partName,
-          qty: it.qty
-        })) || [],
+        items: itemsToShip.map(it => ({
+          partNumber: it.partNumber,
+          nama: it.nama,
+          qty: Number(it.shipQty)
+        })),
+        partial: isPartial,
         createdBy: session.nama,
         status: "Dikirim"
       }];
     });
-    // Auto-generate maintenance schedule for Unit-type SO — every 3 months from DO date
+    // Auto-generate maintenance schedule for Unit-type SO — only for the units actually shipped in this DO
     if (so?.tipe === "Unit") {
-      const newSchedules = so.items.map(it => ({
+      const newSchedules = so.items.filter(it => shippedKeys.has(it.partNumber || it.unitCode)).map(it => ({
         id: "MS-" + uid(),
         soNomor: so.nomor,
         doNomor,
@@ -15666,6 +15659,7 @@ function DeliveryOrderModule({
       setMaintenanceSchedules([...maintenanceSchedules, ...newSchedules]);
     }
     setModal(false);
+    setShipItems([]);
     setForm({
       soNomor: "",
       tanggal: today(),
@@ -15724,128 +15718,7 @@ function DeliveryOrderModule({
       borderRadius: 8,
       border: `1px dashed ${theme.border}`
     }
-  }, "🔒 Description part bersifat internal — tidak ditampilkan di Delivery Order yang diserahkan ke client."), isWorkshopApprover && pendingDOEdits.length > 0 && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
-    style: {
-      margin: "0 0 12px",
-      color: theme.text,
-      fontSize: 15
-    }
-  }, "Menunggu Approval Edit (Workshop)"), pendingDOEdits.map(r => /*#__PURE__*/React.createElement("div", {
-    key: r.id,
-    style: {
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "center",
-      padding: "10px 0",
-      borderBottom: `1px solid ${theme.border}`
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 13
-    }
-  }, /*#__PURE__*/React.createElement("strong", {
-    style: {
-      color: theme.text
-    }
-  }, r.targetLabel), " — diajukan oleh ", r.requestedBy, " (", r.tanggal, ")"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 8
-    }
-  }, /*#__PURE__*/React.createElement(Btn, {
-    size: "sm",
-    variant: "ghost",
-    onClick: () => openReviewDO(r)
-  }, "👁 Detail/Edit"), /*#__PURE__*/React.createElement(Btn, {
-    size: "sm",
-    variant: "danger",
-    onClick: () => rejectDOEdit(r)
-  }, "✗ Tolak"), /*#__PURE__*/React.createElement(Btn, {
-    size: "sm",
-    variant: "success",
-    onClick: () => approveDOEdit(r)
-  }, "✓ Approve"))))), /*#__PURE__*/React.createElement(Modal, {
-    open: !!reviewDO,
-    title: reviewDO ? `Detail / Edit Pengajuan — ${reviewDO.targetLabel}` : "",
-    onClose: () => setReviewDO(null)
-  }, reviewDO && reviewDOForm && /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      flexDirection: "column",
-      gap: 14
-    }
-  }, /*#__PURE__*/React.createElement("p", {
-    style: {
-      margin: 0,
-      fontSize: 12,
-      color: theme.muted
-    }
-  }, "Diajukan oleh ", reviewDO.requestedBy, " (", reviewDO.tanggal, ")"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr",
-      gap: 14
-    }
-  }, /*#__PURE__*/React.createElement(Input, {
-    label: "Ekspedisi",
-    value: reviewDOForm.ekspedisi,
-    onChange: v => setReviewDOForm({
-      ...reviewDOForm,
-      ekspedisi: v
-    })
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "No. Resi",
-    value: reviewDOForm.noResi,
-    onChange: v => setReviewDOForm({
-      ...reviewDOForm,
-      noResi: v
-    })
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "Driver",
-    value: reviewDOForm.driver,
-    onChange: v => setReviewDOForm({
-      ...reviewDOForm,
-      driver: v
-    })
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "No. Kendaraan",
-    value: reviewDOForm.noKendaraan,
-    onChange: v => setReviewDOForm({
-      ...reviewDOForm,
-      noKendaraan: v
-    })
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "No. Telp",
-    value: reviewDOForm.noTelp,
-    onChange: v => setReviewDOForm({
-      ...reviewDOForm,
-      noTelp: v
-    })
-  })), /*#__PURE__*/React.createElement(Input, {
-    label: "Catatan",
-    multiline: true,
-    value: reviewDOForm.catatan,
-    onChange: v => setReviewDOForm({
-      ...reviewDOForm,
-      catatan: v
-    })
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 10,
-      justifyContent: "flex-end",
-      flexWrap: "wrap"
-    }
-  }, /*#__PURE__*/React.createElement(Btn, {
-    variant: "ghost",
-    onClick: () => setReviewDO(null)
-  }, "Tutup"), /*#__PURE__*/React.createElement(Btn, {
-    variant: "danger",
-    onClick: () => rejectDOEdit(reviewDO)
-  }, "✗ Tolak"), /*#__PURE__*/React.createElement(Btn, {
-    variant: "success",
-    onClick: () => approveDOEdit(reviewDO, reviewDOForm)
-  }, "✓ Approve")))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
+  }, "🔒 Description part bersifat internal — tidak ditampilkan di Delivery Order yang diserahkan ke client."), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari no. DO / no. SO / client / driver / ekspedisi...",
     value: doSearch,
     onChange: setDoSearch,
@@ -15866,7 +15739,7 @@ function DeliveryOrderModule({
     }, d.tipe), d.customerNama, d.ekspedisi || d.driver || "-", /*#__PURE__*/React.createElement(Badge, {
       color: theme.green
     }, d.status)]),
-    onEdit: isStefanus || isOwnerLike ? i => openEditDO(deliveryOrdersFiltered[i]) : undefined,
+    onEdit: i => canEditDO(deliveryOrdersFiltered[i]) ? openEditDO(deliveryOrdersFiltered[i]) : alert("Hanya pembuat Delivery Order ini (atau Logistic/Sales Admin/HO) yang bisa mengedit."),
     onDelete: isOwnerLike ? i => {
       const d = deliveryOrdersFiltered[i];
       if (!confirm(`Hapus Delivery Order ${d.nomor}?`)) return;
@@ -15895,7 +15768,7 @@ function DeliveryOrderModule({
       fontSize: 12,
       color: theme.muted
     }
-  }, "Perubahan baru berlaku setelah disetujui WORKSHOP1/WORKSHOP2 (atau HO1/HO2/HO3)."), /*#__PURE__*/React.createElement(Input, {
+  }, "Perubahan disimpan langsung — tidak memerlukan approval."), /*#__PURE__*/React.createElement(Input, {
     label: "Ekspedisi",
     value: editDOForm.ekspedisi,
     onChange: v => setEditDOForm({
@@ -15948,8 +15821,8 @@ function DeliveryOrderModule({
     variant: "ghost",
     onClick: () => setEditDO(null)
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
-    onClick: submitEditDO
-  }, "Ajukan Perubahan"))))), /*#__PURE__*/React.createElement(Modal, {
+    onClick: saveEditDO
+  }, "Simpan Perubahan"))))), /*#__PURE__*/React.createElement(Modal, {
     open: !!detail,
     title: `Detail ${detail?.nomor}`,
     onClose: () => setDetail(null),
@@ -16038,10 +15911,14 @@ function DeliveryOrderModule({
   }, /*#__PURE__*/React.createElement(Select, {
     label: "Sales Order",
     value: form.soNomor,
-    onChange: v => setForm({
-      ...form,
-      soNomor: v
-    }),
+    onChange: v => {
+      const so = salesOrders.find(s => s.nomor === v);
+      setForm({
+        ...form,
+        soNomor: v
+      });
+      setShipItems(soItemsRemaining(so));
+    },
     options: salesOrders.map(so => ({
       value: so.nomor,
       label: `${so.nomor} — ${so.customerNama} (${so.tipe})`
@@ -16055,7 +15932,59 @@ function DeliveryOrderModule({
       tanggal: v
     }),
     type: "date"
+  }), form.soNomor && /*#__PURE__*/React.createElement("div", {
+    style: {
+      borderTop: `1px solid ${theme.border}`,
+      paddingTop: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 10px",
+      fontSize: 12,
+      color: theme.muted,
+      fontWeight: 600
+    }
+  }, "BARANG YANG DIKIRIM — centang & atur qty (mendukung pengiriman partial)"), shipItems.length === 0 ? /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Sales Order ini tidak punya barang.") : shipItems.map(it => /*#__PURE__*/React.createElement("div", {
+    key: it.partNumber,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      padding: "8px 0",
+      borderBottom: `1px solid ${theme.border}`,
+      opacity: it.sisa > 0 ? 1 : 0.45
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: it.selected,
+    disabled: it.sisa <= 0,
+    onChange: () => toggleShipItem(it.partNumber)
   }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      fontSize: 13,
+      color: theme.text
+    }
+  }, it.nama, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: theme.muted
+    }
+  }, "Dipesan: ", fmtNum(it.orderedQty), it.shippedQty > 0 ? ` · Sudah dikirim: ${fmtNum(it.shippedQty)} · Sisa: ${fmtNum(it.sisa)}` : "")), /*#__PURE__*/React.createElement(Input, {
+    type: "number",
+    min: 0,
+    value: it.shipQty,
+    disabled: !it.selected || it.sisa <= 0,
+    onChange: v => setShipQty(it.partNumber, v),
+    style: {
+      width: 90
+    }
+  })))), /*#__PURE__*/React.createElement("div", {
     style: {
       borderTop: `1px solid ${theme.border}`,
       paddingTop: 14
