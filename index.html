@@ -11238,7 +11238,8 @@ function SalesOrderModule({
     poLocal,
     poOverseas,
     deliveryOrders,
-    invoices
+    invoices,
+    customers
   } = store;
   const isEpy = session.role === "sales_admin";
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
@@ -11908,13 +11909,14 @@ function SalesOrderModule({
       tanggal: detail.tanggal,
       partyLabel: "Kepada:",
       partyName: detail.customerNama,
+      partyExtra: customers.find(c => c.nama === detail.customerNama)?.alamat || "",
       itemHeaders: detail.tipe === "Unit" ? ["Unit Code", "Unit Name", "Description", "Qty", "Harga", "Subtotal"] : ["Part Number", "Part Name", "Description", "Qty", "Harga", "Subtotal"],
       items: detail.items.map(it => detail.tipe === "Unit" ? [it.unitCode, it.unitName, it.partDescription || it.description || "-", fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)] : [it.partNumber, it.partName, it.partDescription || it.description || "-", fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)]),
       subtotal: detail.subtotal,
       diskon: detail.diskon,
       pajak: detail.pajak,
       total: detail.total,
-      extraInfoRows: [["Sumber Quotation", detail.sourceNomor], ["Tipe", detail.tipe], ["Tanggal PO", detail.tanggalPO || "-"], ["Tanggal Delivery", detail.tanggalDelivery || "-"], ["Catatan", detail.catatan || "-"], ["Tujuan Pengiriman", detail.shippingTujuan || "-"], ["Ekspedisi", detail.shippingEkspedisi || "-"], ["PIC / No. Telp", detail.shippingPic ? `${detail.shippingPic} / ${detail.shippingNoTlp || "-"}` : "-"], ["Alamat Pengiriman", detail.shippingAlamat || "-"]],
+      extraInfoRows: [["Sumber Quotation", detail.sourceNomor], ["Tipe", detail.tipe], ["No. PO Client", detail.noPoClient || "-"], ["Tanggal PO", detail.tanggalPO || "-"], ["Tanggal Delivery", detail.tanggalDelivery || "-"], ["Catatan", detail.catatan || "-"], ["Tujuan Pengiriman", detail.shippingTujuan || "-"], ["Ekspedisi", detail.shippingEkspedisi || "-"], ["PIC / No. Telp", detail.shippingPic ? `${detail.shippingPic} / ${detail.shippingNoTlp || "-"}` : "-"], ["Alamat Pengiriman", detail.shippingAlamat || "-"]],
       dibuatOleh: {
         nama: detail.createdBy
       }
@@ -12131,7 +12133,11 @@ function ItemRequisitionModule({
     itemRequisitions,
     setItemRequisitions,
     salesOrders,
-    parts
+    parts,
+    units,
+    poLocal,
+    poOverseas,
+    goodsReceipts
   } = store;
   const isPipin = session.role === "inventory" || session.role === "admin2";
   const isSepti = session.role === "workshop_manager";
@@ -12233,7 +12239,8 @@ function ItemRequisitionModule({
     return prefix + String(maxSeq + 1).padStart(4, "0");
   };
   const deleteIR = r => {
-    if (!isOwnerLike) return alert("Hanya Owner/GM/Finance Director yang dapat menghapus Item Requisition.");
+    if (!canManage) return alert("Hanya Purchasing/Workshop Manager/Owner/GM/Finance Director yang dapat menghapus Item Requisition.");
+    if (r.status === "Sudah di-PO" && !confirm(`Item Requisition ${r.nomor} sudah menjadi Purchase Order. Purchase Order terkait TIDAK akan otomatis terhapus/berubah — perlu dicek manual bila perlu. Lanjutkan hapus?`)) return;
     if (!confirm(`Hapus Item Requisition ${r.nomor}?`)) return;
     setItemRequisitions(itemRequisitions.filter(x => x !== r));
     logAudit(store, session, {
@@ -12243,24 +12250,94 @@ function ItemRequisitionModule({
       detail: r.soNomor
     });
   };
+  // BOM Explosion: for SO items sourced from Master Unit (sumber === "Master Unit"),
+  // pull ALL component parts from that Unit's BOM (Master Unit BOM) instead of treating
+  // the unit code itself as a single purchasable "part". Qty per part = BOM qty-per-unit x
+  // qty of the unit ordered on the SO. Parts sourced directly from Master Part pass through
+  // unchanged. Parts appearing more than once (e.g. shared across multiple BOM lines, or a
+  // part ordered both directly and via a Unit) are merged into a single requisition line.
+  const explodeSOItems = so => {
+    const exploded = [];
+    (so.items || []).forEach(it => {
+      const isUnitSourced = it.sumber === "Master Unit" || !!(!it.partNumber && it.unitCode && (units || []).find(u => u.unitCode === it.unitCode));
+      if (isUnitSourced) {
+        const unit = (units || []).find(u => u.unitCode === it.unitCode);
+        if (unit && Array.isArray(unit.bom) && unit.bom.length > 0) {
+          unit.bom.forEach(b => {
+            exploded.push({
+              partNumber: b.partNumber,
+              partName: b.partName,
+              qty: (Number(b.qty) || 0) * (Number(it.qty) || 0),
+              fromUnit: unit.unitCode
+            });
+          });
+          return;
+        }
+        // Unit not found in Master Unit BOM, or has no BOM parts defined yet — fall back to
+        // the old behavior (treat the unit code as a pseudo-part) so nothing silently disappears.
+      }
+      exploded.push({
+        partNumber: it.partNumber || it.unitCode,
+        partName: it.partName || it.unitName,
+        qty: Number(it.qty) || 0,
+        fromUnit: null
+      });
+    });
+    const merged = {};
+    exploded.forEach(e => {
+      if (!e.partNumber) return;
+      if (!merged[e.partNumber]) merged[e.partNumber] = {
+        partNumber: e.partNumber,
+        partName: e.partName,
+        qty: 0,
+        fromUnits: new Set()
+      };
+      merged[e.partNumber].qty += e.qty;
+      if (e.fromUnit) merged[e.partNumber].fromUnits.add(e.fromUnit);
+    });
+    return Object.values(merged);
+  };
   const checkStockForSO = soNomor => {
     const so = salesOrders.find(s => s.nomor === soNomor);
     if (!so) return [];
-    return so.items.map(it => {
-      const pn = it.partNumber || it.unitCode;
-      const part = parts.find(p => p.partNumber === pn);
+    return explodeSOItems(so).map(m => {
+      const part = parts.find(p => p.partNumber === m.partNumber);
       const stok = part?.stok ?? 0;
-      const kurang = Math.max(0, it.qty - stok);
+      const kurang = Math.max(0, m.qty - stok);
       return {
-        partNumber: pn,
-        partName: it.partName || it.unitName,
+        partNumber: m.partNumber,
+        partName: m.partName || part?.partName || m.partNumber,
         description: part?.description || "",
-        qtyButuh: it.qty,
+        qtyButuh: m.qty,
         stokTersedia: stok,
         qtyKurang: kurang,
-        catatan: ""
+        catatan: m.fromUnits && m.fromUnits.size > 0 ? `Dari BOM Unit: ${[...m.fromUnits].join(", ")}` : ""
       };
     }).filter(x => x.qtyKurang > 0); // only short items
+  };
+  // Traces IR -> PO (Lokal/Overseas, matched via po.irNomors) -> per-part received qty
+  // (summed from po.receivedMap, which Goods Receipt maintains as items get received at
+  // Office/Workshop). Lets the IR view show which requested parts have actually arrived.
+  const irRefInfo = ir => {
+    const linkedPOs = [...(poLocal || []).map(p => ({
+      ...p,
+      _type: "Lokal"
+    })), ...(poOverseas || []).map(p => ({
+      ...p,
+      _type: "Overseas"
+    }))].filter(po => (po.irNomors || []).includes(ir.nomor));
+    const poNomors = linkedPOs.map(po => po.nomor);
+    const receivedByPart = {};
+    linkedPOs.forEach(po => {
+      const rm = po.receivedMap || {};
+      Object.keys(rm).forEach(pn => {
+        receivedByPart[pn] = (receivedByPart[pn] || 0) + (Number(rm[pn]) || 0);
+      });
+    });
+    return {
+      poNomors,
+      receivedByPart
+    };
   };
   const loadFromSO = soNomor => {
     const shortItems = checkStockForSO(soNomor);
@@ -12300,7 +12377,7 @@ function ItemRequisitionModule({
     });
   };
   const onEditIR = r => {
-    if (r.status === "Sudah di-PO" && !isOwnerLike) return alert("Item Requisition yang sudah di-PO tidak dapat direvisi.");
+    if (r.status === "Sudah di-PO" && !confirm(`Item Requisition ${r.nomor} sudah menjadi Purchase Order. Purchase Order terkait TIDAK akan otomatis mengikuti perubahan ini — perlu dicek/disesuaikan manual bila perlu. Lanjutkan revisi?`)) return;
     setEditingNomor(r.nomor);
     if (r.bomCandidate) {
       const it = r.items[0] || {};
@@ -12427,7 +12504,7 @@ function ItemRequisitionModule({
       color: theme.yellow
     }, "Belum")]),
     onEdit: canManage ? i => onEditIR(itemRequisitionsFiltered[i]) : undefined,
-    onDelete: isOwnerLike ? i => deleteIR(itemRequisitionsFiltered[i]) : undefined,
+    onDelete: canManage ? i => deleteIR(itemRequisitionsFiltered[i]) : undefined,
     emptyMsg: "Belum ada Item Requisition"
   })), React.createElement(Modal, {
     open: soPickerOpen,
@@ -12498,15 +12575,25 @@ function ItemRequisitionModule({
       gap: 14
     }
   }, React.createElement(Table, {
-    headers: ["Part Number", "Part Name", "Qty Dibutuhkan", "Stok Tersedia", "Qty Kurang", "Catatan"],
-    rows: detail.items.map(it => [it.partNumber, it.partName, fmtNum(it.qtyButuh), fmtNum(it.stokTersedia), React.createElement("span", {
-      style: {
-        color: theme.red,
-        fontWeight: 600
-      }
-    }, fmtNum(it.qtyKurang)), React.createElement("span", {
-      style: catatanStyle
-    }, it.catatan || "-")])
+    headers: ["Part Number", "Part Name", "Qty Dibutuhkan", "Stok Tersedia", "Qty Kurang", "Catatan", "Status Diterima"],
+    rows: detail.items.map(it => {
+      const diterima = irRefInfo(detail).receivedByPart[it.partNumber] || 0;
+      const statusBadge = diterima <= 0 ? React.createElement(Badge, {
+        color: theme.red
+      }, "Belum Diterima") : diterima < (Number(it.qtyButuh) || 0) ? React.createElement(Badge, {
+        color: theme.yellow
+      }, `Sebagian (${fmtNum(diterima)}/${fmtNum(it.qtyButuh)})`) : React.createElement(Badge, {
+        color: theme.green
+      }, `✓ Lengkap (${fmtNum(diterima)})`);
+      return [it.partNumber, it.partName, fmtNum(it.qtyButuh), fmtNum(it.stokTersedia), React.createElement("span", {
+        style: {
+          color: theme.red,
+          fontWeight: 600
+        }
+      }, fmtNum(it.qtyKurang)), React.createElement("span", {
+        style: catatanStyle
+      }, it.catatan || "-"), statusBadge];
+    })
   }), detail && React.createElement("div", {
     style: {
       display: "flex",
@@ -12525,19 +12612,25 @@ function ItemRequisitionModule({
       itemHeaders: ["Part Number", "Part Name", "Qty Dibutuhkan", "Stok Tersedia", "Qty Kurang", "Catatan"],
       items: detail.items.map(it => [it.partNumber, it.partName, fmtNum(it.qtyButuh), fmtNum(it.stokTersedia), fmtNum(it.qtyKurang), it.catatan || "-"]),
       showPrice: false,
-      extraInfoRows: [["Status", detail.status]],
+      extraInfoRows: [["Status", detail.status], ["No. Sales Order", detail.soNomor || "-"], ["No. PO Client", (salesOrders.find(s => s.nomor === detail.soNomor)?.noPoClient) || "-"], ["No. Purchase Order", irRefInfo(detail).poNomors.join(", ") || "-"]],
       dibuatOleh: {
         nama: detail.createdBy
       },
       hideCreatedBy: false
     })
-  }), canManage && detail.status !== "Sudah di-PO" && React.createElement(Btn, {
+  }), canManage && React.createElement(Btn, {
     variant: "ghost",
     onClick: () => {
       onEditIR(detail);
       setDetail(null);
     }
-  }, "✏️ Revisi")))), React.createElement(Modal, {
+  }, "✏️ Revisi"), canManage && React.createElement(Btn, {
+    variant: "danger",
+    onClick: () => {
+      deleteIR(detail);
+      setDetail(null);
+    }
+  }, "🗑️ Hapus")))), React.createElement(Modal, {
     open: modal,
     title: editingNomor ? "Revisi Item Requisition" : "Buat Item Requisition",
     onClose: closeModal,
@@ -14281,6 +14374,46 @@ function GoodsReceiptModule({
     itemRequisitions
   } = store;
   const [detailGR, setDetailGR] = useState(null);
+  const [detailIDO, setDetailIDO] = useState(null);
+  const [editIDO, setEditIDO] = useState(null); // Internal DO record currently being edited
+  const [editIDOForm, setEditIDOForm] = useState({
+    mekanikNama: "",
+    items: []
+  });
+  const openEditIDO = d => {
+    setEditIDO(d);
+    setEditIDOForm({
+      mekanikNama: d.mekanikNama || "",
+      items: d.items.map(it => ({
+        ...it
+      }))
+    });
+  };
+  const updateEditIDOQty = (i, val) => {
+    const items = [...editIDOForm.items];
+    items[i] = {
+      ...items[i],
+      qty: parseFloat(val) || 0
+    };
+    setEditIDOForm({
+      ...editIDOForm,
+      items
+    });
+  };
+  const saveEditIDO = () => {
+    setInternalDOs(internalDOs.map(x => x === editIDO ? {
+      ...x,
+      mekanikNama: editIDOForm.mekanikNama,
+      items: editIDOForm.items
+    } : x));
+    logAudit(store, session, {
+      module: "Internal Delivery Order",
+      docNomor: editIDO.nomor,
+      action: "Edit",
+      detail: `Diubah oleh ${session.nama}`
+    });
+    setEditIDO(null);
+  };
   // Derive the No. SO / No. IR chain for a receipt from its linked PO — a PO's irNomors point to
   // the Item Requisitions that were pulled into it, and each IR carries the originating soNomor.
   const grRefInfo = g => {
@@ -14931,7 +15064,14 @@ function GoodsReceiptModule({
     }
   }, "Otomatis terbuat saat barang diterima sementara di Head Office. Workshop harus konfirmasi penerimaan final di sini."), /*#__PURE__*/React.createElement(Table, {
     headers: ["No. Internal DO", "Tanggal", "No. PO", "Jumlah Item", "Status", "Aksi"],
-    rows: internalDOs.map(d => [d.nomor, d.tanggal, d.poNomor, /*#__PURE__*/React.createElement(Badge, {
+    rows: internalDOs.map(d => [/*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.accent,
+        cursor: "pointer",
+        fontWeight: 600
+      },
+      onClick: () => setDetailIDO(d)
+    }, d.nomor), d.tanggal, d.poNomor, /*#__PURE__*/React.createElement(Badge, {
       color: theme.purple
     }, d.items.length, " part"), /*#__PURE__*/React.createElement(Badge, {
       color: d.statusKonfirmasi === "Diterima Workshop" ? theme.green : theme.yellow
@@ -14955,11 +15095,167 @@ function GoodsReceiptModule({
       })
     }), d.statusKonfirmasi === "Menunggu Diterima Workshop" && (isJhon || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
+      variant: "ghost",
+      onClick: () => openEditIDO(d)
+    }, "✏️ Edit"), d.statusKonfirmasi === "Menunggu Diterima Workshop" && (isJhon || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
       variant: "success",
       onClick: () => openConfirm(d)
     }, "✓ Konfirmasi Diterima Workshop"))]),
     emptyMsg: "Belum ada Internal DO"
   })), /*#__PURE__*/React.createElement(Modal, {
+    open: !!detailIDO,
+    title: `Detail Internal DO ${detailIDO?.nomor || ""}`,
+    onClose: () => setDetailIDO(null),
+    width: 640
+  }, detailIDO && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: theme.surface,
+      borderRadius: 8,
+      padding: "10px 14px",
+      display: "flex",
+      flexDirection: "column",
+      gap: 4,
+      fontSize: 13
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted
+    }
+  }, "No. PO Sumber"), /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, detailIDO.poNomor || "-")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted
+    }
+  }, "Dari → Ke"), /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, `${detailIDO.dari} → ${detailIDO.ke}`)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted
+    }
+  }, "Mekanik"), /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, detailIDO.mekanikNama || "-")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted
+    }
+  }, "Status"), /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, detailIDO.statusKonfirmasi)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted
+    }
+  }, "Dibuat oleh"), /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, detailIDO.createdBy || "-"))), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Part Number", "Part Name", "Qty"],
+    rows: detailIDO.items.map(it => [it.partNumber, it.partName, fmtNum(it.qty)]),
+    emptyMsg: "-"
+  }), detailIDO.statusKonfirmasi === "Menunggu Diterima Workshop" && (isJhon || isOwnerLike) && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => {
+      openEditIDO(detailIDO);
+      setDetailIDO(null);
+    }
+  }, "✏️ Edit")))), /*#__PURE__*/React.createElement(Modal, {
+    open: !!editIDO,
+    title: editIDO ? `Edit Internal DO ${editIDO.nomor}` : "",
+    onClose: () => setEditIDO(null)
+  }, editIDO && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Mekanik",
+    value: editIDOForm.mekanikNama,
+    onChange: v => setEditIDOForm({
+      ...editIDOForm,
+      mekanikNama: v
+    })
+  }), editIDOForm.items.map((it, i) => /*#__PURE__*/React.createElement("div", {
+    key: it.partNumber,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      padding: "8px 0",
+      borderBottom: `1px solid ${theme.border}`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      fontSize: 13,
+      color: theme.text
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontWeight: 600
+    }
+  }, it.partNumber), " — ", it.partName), /*#__PURE__*/React.createElement(Input, {
+    type: "number",
+    min: 0,
+    value: it.qty,
+    onChange: v => updateEditIDOQty(i, v),
+    style: {
+      width: 100
+    }
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    onClick: saveEditIDO
+  }, "Simpan Perubahan")))), /*#__PURE__*/React.createElement(Modal, {
     open: modal,
     title: "Catat Penerimaan Barang",
     onClose: () => setModal(false),
@@ -24560,4 +24856,3 @@ root.render(React.createElement(App));
 </script>
 </body>
 </html>
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           
