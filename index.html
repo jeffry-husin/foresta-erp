@@ -11583,11 +11583,37 @@ function SalesOrderModule({
     if (!isOwnerLike) return alert("Hanya Owner/GM/Finance Director yang dapat menghapus Sales Order.");
     if (!confirm(`Hapus Sales Order ${so.nomor}?`)) return;
     setSalesOrders(salesOrders.filter(x => x !== so));
+    // Revert the source Quotation back to "Disetujui GM" so it reappears in the Buat SO list and
+    // a new Sales Order can be created from it again — otherwise it stays permanently stuck at
+    // "Sudah jadi SO" even though the SO that made it so no longer exists.
+    if (so.sourceNomor) {
+      if (so.tipe === "Unit") {
+        const idx = quotationsUnit.findIndex(q => q.nomor === so.sourceNomor);
+        if (idx >= 0 && quotationsUnit[idx].status === "Sudah jadi SO") {
+          const arr = [...quotationsUnit];
+          arr[idx] = {
+            ...arr[idx],
+            status: "Disetujui GM"
+          };
+          setQuotationsUnit(arr);
+        }
+      } else {
+        const idx = quotationsPS.findIndex(q => q.nomor === so.sourceNomor);
+        if (idx >= 0 && quotationsPS[idx].status === "Sudah jadi SO") {
+          const arr = [...quotationsPS];
+          arr[idx] = {
+            ...arr[idx],
+            status: "Disetujui GM"
+          };
+          setQuotationsPS(arr);
+        }
+      }
+    }
     logAudit(store, session, {
       module: "Sales Order",
       docNomor: so.nomor,
       action: "Hapus",
-      detail: `${so.customerNama} — ${fmt(so.total)}`
+      detail: `${so.customerNama} — ${fmt(so.total)}${so.sourceNomor ? ` — Quotation ${so.sourceNomor} dibuka kembali untuk SO baru` : ""}`
     });
   };
   const approvedUnit = quotationsUnit.filter(q => q.status === "Disetujui GM");
@@ -15153,12 +15179,47 @@ function GoodsReceiptModule({
     onDelete: isOwnerLike ? i => {
       const g = goodsReceiptsFiltered[i];
       if (!confirm(`Hapus data penerimaan ${g.nomor}? Catatan: stock yang sudah masuk dari penerimaan ini TIDAK otomatis dikurangi — sesuaikan stock secara manual di Master Part bila perlu.`)) return;
-      setGoodsReceipts(goodsReceipts.filter(x => x !== g));
+      const remainingGRs = goodsReceipts.filter(x => x !== g);
+      setGoodsReceipts(remainingGRs);
+      // Recompute the linked PO's receivedMap/status from the remaining receipts (rather than just
+      // subtracting this one) — this is what keeps "sisa qty yang bisa diterima" and the received-status
+      // badges (IR/PO detail) accurate after a Goods Receipt is deleted, instead of leaving the PO
+      // permanently stuck at "Sudah Diterima"/"Diterima Sebagian" even after its receipt is gone.
+      const poList = g.poType === "Lokal" ? poLocal : poOverseas;
+      const setPoList = g.poType === "Lokal" ? store.setPoLocal : store.setPoOverseas;
+      const poIdx = poList.findIndex(p => p.nomor === g.poNomor);
+      if (poIdx >= 0) {
+        const poRec = poList[poIdx];
+        const relatedGRs = remainingGRs.filter(gr => gr.poNomor === g.poNomor && gr.poType === g.poType);
+        const newReceivedMap = {};
+        relatedGRs.forEach(gr => {
+          (gr.items || []).forEach(it => {
+            newReceivedMap[it.partNumber] = (newReceivedMap[it.partNumber] || 0) + (it.qtyDiterima || 0);
+          });
+        });
+        const fullyReceived = (poRec.items || []).every(it => (newReceivedMap[it.partNumber] || 0) >= it.qty);
+        const anyReceived = Object.keys(newReceivedMap).length > 0;
+        const arr = [...poList];
+        arr[poIdx] = {
+          ...poRec,
+          receivedMap: newReceivedMap,
+          status: fullyReceived ? "Sudah Diterima" : anyReceived ? "Diterima Sebagian" : "Disetujui GM - Kirim ke Supplier"
+        };
+        setPoList(arr);
+      }
+      // Any Internal DO (Office -> Workshop transfer) created by this receipt that Workshop hasn't
+      // confirmed yet has nothing to confirm anymore — drop it so nobody can later confirm receiving
+      // stock for a receipt that no longer exists. Already-confirmed transfers are left alone since
+      // that stock movement already happened (consistent with not auto-touching Master Part stock here).
+      const pendingIDO = internalDOs.filter(d => d.grNomor === g.nomor && d.statusKonfirmasi !== "Diterima Workshop");
+      if (pendingIDO.length > 0) {
+        setInternalDOs(internalDOs.filter(d => !(d.grNomor === g.nomor && d.statusKonfirmasi !== "Diterima Workshop")));
+      }
       logAudit(store, session, {
         module: "Penerimaan Barang",
         docNomor: g.nomor,
         action: "Hapus",
-        detail: g.poNomor
+        detail: `${g.poNomor}${pendingIDO.length > 0 ? " — Internal DO terkait (belum dikonfirmasi Workshop) ikut dibatalkan" : ""}`
       });
     } : undefined,
     emptyMsg: "Belum ada penerimaan barang"
