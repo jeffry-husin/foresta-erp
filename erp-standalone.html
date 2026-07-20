@@ -2627,15 +2627,20 @@ function MasterPart({
     });
   };
   const approveEditRequest = (req, payload) => {
-    const arr = [...parts];
-    if (req.action === "Hapus") {
-      const idx = arr.findIndex(p => p.partNumber === req.targetId);
-      if (idx >= 0) arr.splice(idx, 1);
-    } else {
-      const idx = arr.findIndex(p => p.partNumber === req.targetId);
-      if (idx >= 0) arr[idx] = payload;else arr.push(payload);
-    }
-    setParts(arr);
+    // Functional form — re-fetches the latest server parts list right before applying this
+    // approval, so approving one pending request (which may sit for a while before GM gets to it)
+    // can't silently overwrite parts someone else added/edited in the meantime.
+    setParts(prev => {
+      const arr = [...prev];
+      if (req.action === "Hapus") {
+        const idx = arr.findIndex(p => p.partNumber === req.targetId);
+        if (idx >= 0) arr.splice(idx, 1);
+      } else {
+        const idx = arr.findIndex(p => p.partNumber === req.targetId);
+        if (idx >= 0) arr[idx] = payload;else arr.push(payload);
+      }
+      return arr;
+    });
     const reqArr = [...editRequests];
     reqArr[editRequests.indexOf(req)] = {
       ...req,
@@ -2742,12 +2747,19 @@ function MasterPart({
     };
     if (isOwnerLike) {
       if (editIdx !== null) {
-        const a = [...parts];
-        a[editIdx] = item;
-        setParts(a);
+        // Functional-update form: re-fetches the latest server data right before writing, so this
+        // edit can't silently wipe out a part someone else added/edited a moment ago (see the
+        // concurrency note on usePersisted). Match by partNumber, not the stale editIdx position.
+        setParts(prev => {
+          const idx = prev.findIndex(p => p.partNumber === item.partNumber);
+          if (idx < 0) return [...prev, item];
+          const a = [...prev];
+          a[idx] = item;
+          return a;
+        });
       } else {
         if (parts.find(p => p.partNumber === item.partNumber)) return alert("Part Number sudah ada");
-        setParts([...parts, item]);
+        setParts(prev => prev.find(p => p.partNumber === item.partNumber) ? prev : [...prev, item]);
       }
       logAudit(store, session, {
         module: "Master Part",
@@ -2793,9 +2805,7 @@ function MasterPart({
     const target = filtered[i];
     if (isOwnerLike) {
       if (confirm("Hapus part ini?")) {
-        const a = [...parts];
-        a.splice(parts.indexOf(target), 1);
-        setParts(a);
+        setParts(prev => prev.filter(p => p.partNumber !== target.partNumber));
       }
     } else {
       if (confirm(`Ajukan penghapusan part "${target.partName}" ke GM untuk approval?`)) {
@@ -3563,6 +3573,7 @@ function MasterUnit({
         partNumber: part.partNumber,
         partName: part.partName,
         description: part.description || "",
+        satuan: part.satuan || "",
         qty: parseInt(bomItem.qty) || 1
       }]
     }));
@@ -3574,6 +3585,14 @@ function MasterUnit({
   const removeBom = i => setForm(f => ({
     ...f,
     bom: f.bom.filter((_, j) => j !== i)
+  }));
+  // Simple inline Qty edit: type a new quantity directly in the BOM line, no separate modal.
+  const updateBomQty = (i, v) => setForm(f => ({
+    ...f,
+    bom: f.bom.map((b, j) => j === i ? {
+      ...b,
+      qty: v === "" ? "" : Math.max(1, parseInt(v) || 1)
+    } : b)
   }));
   const bomCost = form.bom.reduce((s, b) => {
     const p = parts.find(x => x.partNumber === b.partNumber);
@@ -3860,8 +3879,8 @@ function MasterUnit({
       fontSize: 13
     }
   }, detail.description), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Part Number", "Part Name", "Qty Dibutuhkan"],
-    rows: detail.bom.map(b => [b.partNumber, b.partName, fmtNum(b.qty)])
+    headers: ["Part Number", "Part Name", "Satuan", "Qty Dibutuhkan"],
+    rows: detail.bom.map(b => [b.partNumber, b.partName, b.satuan || parts.find(p => p.partNumber === b.partNumber)?.satuan || "-", fmtNum(b.qty)])
   }), canSeePrice && /*#__PURE__*/React.createElement("div", {
     style: {
       textAlign: "right",
@@ -3881,7 +3900,7 @@ function MasterUnit({
   }, /*#__PURE__*/React.createElement(ExportExcelBtn, {
     label: "📊 Export BOM Ini",
     onClick: () => doExportOne(detail)
-  }), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+  }), /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
     size: "sm",
     onClick: () => duplicateUnit(detail)
@@ -3893,8 +3912,8 @@ function MasterUnit({
       tanggal: today(),
       partyLabel: "Unit:",
       partyName: detail.unitName,
-      itemHeaders: ["Part Number", "Part Name", "Qty"],
-      items: detail.bom.map(b => [b.partNumber, b.partName, fmtNum(b.qty)]),
+      itemHeaders: ["Part Number", "Part Name", "Satuan", "Qty"],
+      items: detail.bom.map(b => [b.partNumber, b.partName, b.satuan || parts.find(p => p.partNumber === b.partNumber)?.satuan || "-", fmtNum(b.qty)]),
       showPrice: canSeePrice,
       subtotal: detail.bom.reduce((s, b) => {
         const p = parts.find(x => x.partNumber === b.partNumber);
@@ -3998,8 +4017,16 @@ function MasterUnit({
     onClick: addBom,
     size: "sm"
   }, "+ Add")), form.bom.length > 0 && /*#__PURE__*/React.createElement(Table, {
-    headers: ["Part Number", "Part Name", "Description", "Qty", ""],
-    rows: form.bom.map((b, i) => [b.partNumber, b.partName, b.description || parts.find(p => p.partNumber === b.partNumber)?.description || "-", fmtNum(b.qty), /*#__PURE__*/React.createElement(Btn, {
+    headers: ["Part Number", "Part Name", "Description", "Satuan", "Qty", ""],
+    rows: form.bom.map((b, i) => [b.partNumber, b.partName, b.description || parts.find(p => p.partNumber === b.partNumber)?.description || "-", b.satuan || parts.find(p => p.partNumber === b.partNumber)?.satuan || "-", /*#__PURE__*/React.createElement(Input, {
+      value: b.qty,
+      onChange: v => updateBomQty(i, v),
+      type: "number",
+      min: "1",
+      style: {
+        width: 70
+      }
+    }), /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "danger",
       onClick: () => removeBom(i)
@@ -9336,16 +9363,18 @@ function QuotationUnit({
   const needsFollowUp = q => q.status === "Disetujui GM" && daysSince(q.followUpExtendedAt || q.approvedDate || q.tanggal) >= 14;
   const extendFollowUp = q => {
     const arr = [...quotationsUnit];
+    const newCount = (q.extensionCount || 0) + 1;
     arr[quotationsUnit.indexOf(q)] = {
       ...q,
-      followUpExtendedAt: today()
+      followUpExtendedAt: today(),
+      extensionCount: newCount
     };
     setQuotationsUnit(arr);
     logAudit(store, session, {
       module: "Unit Quotation",
       docNomor: q.nomor,
       action: "Extend Follow-up",
-      detail: `${q.customerNama} — follow-up diperpanjang 14 hari`
+      detail: `${q.customerNama} — follow-up diperpanjang 14 hari (perpanjangan ke-${newCount})`
     });
   };
   const closeQuotation = q => {
@@ -9400,7 +9429,13 @@ function QuotationUnit({
     }
   }, /*#__PURE__*/React.createElement(Badge, {
     color: theme.yellow
-  }, "⚠ Follow-up 14 hari"))), /*#__PURE__*/React.createElement("div", {
+  }, "⚠ Follow-up 14 hari")), q.extensionCount > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 4,
+      fontSize: 11,
+      color: theme.muted
+    }
+  }, "Diperpanjang ", q.extensionCount, "x")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 6,
@@ -9566,7 +9601,7 @@ function QuotationUnit({
     style: {
       color: theme.text
     }
-  }, q.nomor), " — ", q.customerNama, " — ", fmt(q.total)), /*#__PURE__*/React.createElement("div", {
+  }, q.nomor), " — ", q.customerNama, " — ", fmt(q.total), q.extensionCount > 0 && ` — sudah diperpanjang ${q.extensionCount}x`), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 8
@@ -10616,16 +10651,18 @@ function QuotationPS({
   const needsFollowUp = q => q.status === "Disetujui GM" && daysSince(q.followUpExtendedAt || q.approvedDate || q.tanggal) >= 14;
   const extendFollowUp = q => {
     const arr = [...quotationsPS];
+    const newCount = (q.extensionCount || 0) + 1;
     arr[quotationsPS.indexOf(q)] = {
       ...q,
-      followUpExtendedAt: today()
+      followUpExtendedAt: today(),
+      extensionCount: newCount
     };
     setQuotationsPS(arr);
     logAudit(store, session, {
       module: "Parts & Service Quotation",
       docNomor: q.nomor,
       action: "Extend Follow-up",
-      detail: `${q.customerNama} — follow-up diperpanjang 14 hari`
+      detail: `${q.customerNama} — follow-up diperpanjang 14 hari (perpanjangan ke-${newCount})`
     });
   };
   const closeQuotationPS = q => {
@@ -10673,7 +10710,13 @@ function QuotationPS({
     }
   }, /*#__PURE__*/React.createElement(Badge, {
     color: theme.yellow
-  }, "⚠ Follow-up 14 hari"))), /*#__PURE__*/React.createElement("div", {
+  }, "⚠ Follow-up 14 hari")), q.extensionCount > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 4,
+      fontSize: 11,
+      color: theme.muted
+    }
+  }, "Diperpanjang ", q.extensionCount, "x")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 6,
@@ -10836,7 +10879,7 @@ function QuotationPS({
     style: {
       color: theme.text
     }
-  }, q.nomor), " — ", q.customerNama, " — ", fmt(q.total)), /*#__PURE__*/React.createElement("div", {
+  }, q.nomor), " — ", q.customerNama, " — ", fmt(q.total), q.extensionCount > 0 && ` — sudah diperpanjang ${q.extensionCount}x`), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 8
@@ -11474,6 +11517,7 @@ function SalesOrderModule({
   const [pickQuot, setPickQuot] = useState(null); // { quot, type } — quotation chosen, now picking which items become the SO
   const [pickedItems, setPickedItems] = useState([]); // indices (into pickQuot.quot.items) currently checked
   const [shipForm, setShipForm] = useState({
+    tanggalSO: today(),
     noPoClient: "",
     tanggalPO: "",
     tanggalDelivery: "",
@@ -11635,6 +11679,7 @@ function SalesOrderModule({
     });
     setPickedItems(quot.items.map((_, i) => i)); // default: all items selected
     setShipForm({
+      tanggalSO: today(),
       noPoClient: "",
       tanggalPO: "",
       tanggalDelivery: "",
@@ -11664,7 +11709,7 @@ function SalesOrderModule({
     const diskon = subtotal * diskonRatio;
     const total = subtotal - diskon + pajak;
     const so = {
-      tanggal: today(),
+      tanggal: shipForm.tanggalSO || today(),
       tipe: type,
       sourceNomor: quot.nomor,
       customerId: quot.customerId,
@@ -11959,6 +12004,14 @@ function SalesOrderModule({
       marginTop: 2
     }
   }, it.partDescription || it.description))))), /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal SO Dibuat",
+    type: "date",
+    value: shipForm.tanggalSO,
+    onChange: v => setShipForm({
+      ...shipForm,
+      tanggalSO: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
     label: "No. Purchase Order Client",
     value: shipForm.noPoClient,
     onChange: v => setShipForm({
