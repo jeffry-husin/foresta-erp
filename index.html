@@ -11897,6 +11897,15 @@ function SalesOrderModule({
   };
   const deleteSO = so => {
     if (!isOwnerLike) return alert("Hanya Owner/GM/Finance Director yang dapat menghapus Sales Order.");
+    // Warn before deleting an SO that already has an Item Requisition (and possibly a Purchase
+    // Order) built from it — deleting it here does NOT touch those downstream documents, so
+    // without this warning they're silently left pointing at an SO that no longer exists.
+    const linkedIRs = (itemRequisitions || []).filter(r => r.soNomor === so.nomor);
+    if (linkedIRs.length > 0) {
+      const linkedPOs = [...(poLocal || []), ...(poOverseas || [])].filter(p => (p.irNomors || []).some(n => linkedIRs.some(r => r.nomor === n)));
+      const warnMsg = linkedPOs.length > 0 ? `Sales Order ${so.nomor} sudah punya Item Requisition (${linkedIRs.map(r => r.nomor).join(", ")}) DAN sudah lanjut jadi Purchase Order (${linkedPOs.map(p => p.nomor).join(", ")}) ke supplier. Menghapus SO ini TIDAK akan menghapus/mengubah IR/PO tersebut — mereka akan tertinggal menunjuk ke SO yang sudah tidak ada. Lanjutkan hapus?` : `Sales Order ${so.nomor} sudah punya Item Requisition (${linkedIRs.map(r => r.nomor).join(", ")}). Menghapus SO ini TIDAK akan menghapus/mengubah IR tersebut — IR akan tertinggal menunjuk ke SO yang sudah tidak ada. Lanjutkan hapus?`;
+      if (!confirm(warnMsg)) return;
+    }
     if (!confirm(`Hapus Sales Order ${so.nomor}?`)) return;
     setSalesOrders(salesOrders.filter(x => x !== so));
     // Revert the source Quotation back to "Disetujui GM" so it reappears in the Buat SO list and
