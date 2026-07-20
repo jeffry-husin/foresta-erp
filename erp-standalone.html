@@ -154,6 +154,18 @@ const terbilang = n => {
 };
 const today = () => new Date().toISOString().split("T")[0];
 const uid = () => Math.random().toString(36).slice(2, 9).toUpperCase();
+// Compares a document's bomSnapshot (captured at creation time, {unitCode: bomUpdatedAt}) against
+// the CURRENT live Master Unit records. Returns the list of unitCodes whose BOM has since been
+// revised (empty array = nothing changed). Used to power a non-blocking warning badge on
+// SalesOrder/ItemRequisition — never used to auto-mutate any document.
+const bomRevisedUnits = (bomSnapshot, units) => {
+  if (!bomSnapshot) return [];
+  return Object.keys(bomSnapshot).filter(unitCode => {
+    const unit = (units || []).find(u => u.unitCode === unitCode);
+    const currentStamp = unit?.bomUpdatedAt || null;
+    return currentStamp !== bomSnapshot[unitCode];
+  });
+};
 // Unified document-numbering format used across the whole app: TYPE-000-FRT-ROMAN-YEAR
 // (e.g. "SO-001-FRT-VII-2026"). The sequence resets to 001 every calendar month per document
 // type. `arr` must be the freshest array of existing records of that type (matching the
@@ -3871,10 +3883,16 @@ function MasterUnit({
     if (!form.unitName) return alert("Unit Name wajib diisi");
     if (form.bom.length === 0) return alert("BOM minimal 1 part");
     const unitCode = editIdx !== null ? form.unitCode : form.unitCode.trim() || genUnitCode();
+    // bomUpdatedAt is stamped only when the BOM parts list itself actually changes (not on every
+    // edit, e.g. price-only edits shouldn't trip the "BOM sudah direvisi" warning on SO/IR that
+    // already used this unit). Sales Order and Item Requisition snapshot this value at creation
+    // time so they can later detect "the BOM I was built from has since been revised".
+    const bomChanged = editIdx === null || JSON.stringify(units[editIdx].bom) !== JSON.stringify(form.bom);
     const item = {
       ...form,
       unitCode,
-      hargaJual: parseFloat(form.hargaJual) || 0
+      hargaJual: parseFloat(form.hargaJual) || 0,
+      bomUpdatedAt: bomChanged ? new Date().toISOString() : units[editIdx]?.bomUpdatedAt || null
     };
     if (editIdx !== null) {
       const a = [...units];
@@ -11780,10 +11798,19 @@ function SalesOrderModule({
     poOverseas,
     deliveryOrders,
     invoices,
-    customers
+    customers,
+    units
   } = store;
   const isEpy = session.role === "sales_admin";
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
+  // Label for the SO number cell: prefixes ⚠ for an existing cascade alert, and 🔧 when the
+  // Master Unit BOM this SO was built from has been revised since creation (see bomRevisedUnits).
+  // Never blocks anything — purely informational, so the user knows to check whether downstream
+  // IR/PO still match the current BOM.
+  const soLabel = so => {
+    const revised = bomRevisedUnits(so.bomSnapshot, units).length > 0;
+    return (so.cascadeAlert ? "⚠ " : "") + (revised ? "🔧 " : "") + so.nomor;
+  };
   const [pullModal, setPullModal] = useState(false);
   const [detail, setDetail] = useState(null);
   const [pickQuot, setPickQuot] = useState(null); // { quot, type } — quotation chosen, now picking which items become the SO
@@ -11989,10 +12016,21 @@ function SalesOrderModule({
     const diskonRatio = quot.subtotal ? (quot.clientDiskon || 0) / quot.subtotal : 0;
     const diskon = subtotal * diskonRatio;
     const total = subtotal - diskon + pajak;
+    // Snapshot each referenced Master Unit's current bomUpdatedAt so we can later detect "the BOM
+    // this SO was built from has since been revised" (see MasterUnit's save()) — never used to
+    // auto-change anything, only to power a warning badge and the IR recheck-vs-BOM tool.
+    const bomSnapshot = {};
+    items.forEach(it => {
+      if (it.sumber === "Master Unit" && it.unitCode) {
+        const unit = units.find(u => u.unitCode === it.unitCode);
+        bomSnapshot[it.unitCode] = unit?.bomUpdatedAt || null;
+      }
+    });
     const so = {
       tanggal: shipForm.tanggalSO || today(),
       tipe: type,
       sourceNomor: quot.nomor,
+      bomSnapshot,
       customerId: quot.customerId,
       customerNama: quot.customerNama,
       items,
@@ -12112,7 +12150,7 @@ function SalesOrderModule({
         cursor: "pointer"
       },
       onClick: () => setDetail(so)
-    }, so.cascadeAlert ? "⚠ " + so.nomor : so.nomor), /*#__PURE__*/React.createElement(Badge, {
+    }, soLabel(so)), /*#__PURE__*/React.createElement(Badge, {
       color: so.tipe === "Unit" ? theme.purple : theme.cyan
     }, so.tipe), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
       color: theme.green
@@ -12139,7 +12177,7 @@ function SalesOrderModule({
         cursor: "pointer"
       },
       onClick: () => setDetail(so)
-    }, so.cascadeAlert ? "⚠ " + so.nomor : so.nomor), /*#__PURE__*/React.createElement(Badge, {
+    }, soLabel(so)), /*#__PURE__*/React.createElement(Badge, {
       color: so.tipe === "Unit" ? theme.purple : theme.cyan
     }, so.tipe), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
       color: theme.green
@@ -12166,7 +12204,7 @@ function SalesOrderModule({
         cursor: "pointer"
       },
       onClick: () => setDetail(so)
-    }, so.cascadeAlert ? "⚠ " + so.nomor : so.nomor), /*#__PURE__*/React.createElement(Badge, {
+    }, soLabel(so)), /*#__PURE__*/React.createElement(Badge, {
       color: so.tipe === "Unit" ? theme.purple : theme.cyan
     }, so.tipe), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
       color: theme.green
@@ -12445,7 +12483,24 @@ function SalesOrderModule({
         cascadeAlert: null
       });
     }
-  }, "✓ Tandai Sudah Direview")), /*#__PURE__*/React.createElement(Table, {
+  }, "✓ Tandai Sudah Direview")), bomRevisedUnits(detail.bomSnapshot, units).length > 0 && /*#__PURE__*/React.createElement(Card, {
+    style: {
+      background: theme.yellow + "11",
+      border: `1px solid ${theme.yellow}44`
+    }
+  }, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 8px",
+      color: theme.yellow,
+      fontSize: 15
+    }
+  }, "🔧 BOM Sudah Direvisi Sejak SO Ini Dibuat"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 13,
+      color: theme.text
+    }
+  }, `BOM untuk Unit ${bomRevisedUnits(detail.bomSnapshot, units).join(", ")} telah direvisi di Master Unit setelah SO ini dibuat. Data item di SO ini TIDAK otomatis berubah — cek Item Requisition terkait (gunakan "Cek Ulang vs BOM Terbaru") bila perlu menyesuaikan.`)), /*#__PURE__*/React.createElement(Table, {
     headers: detail.tipe === "Unit" ? ["Unit Code", "Unit Name", "Description", "Qty", "Harga", "Subtotal"] : ["Part Number", "Part Name", "Description", "Qty", "Harga", "Subtotal"],
     rows: detail.items.map(it => detail.tipe === "Unit" ? [it.unitCode, it.unitName, it.partDescription || it.description || "-", fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)] : [it.partNumber, it.partName, it.partDescription || it.description || "-", fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)])
   }), /*#__PURE__*/React.createElement("div", {
@@ -12761,6 +12816,10 @@ function ItemRequisitionModule({
   const [detail, setDetail] = useState(null);
   const [manualModal, setManualModal] = useState(false);
   const [editingNomor, setEditingNomor] = useState(null);
+  // "Cek Ulang vs BOM Terbaru": recomputes explodeSOItems() against the CURRENT live Master Unit
+  // BOM and diffs it against this IR's currently-stored items. Never auto-applies — user must
+  // explicitly click "Terapkan Perubahan Ini", which is logged to Audit Trail.
+  const [recheckModal, setRecheckModal] = useState(null); // { ir, diff }
   const blankManualForm = {
     soNomor: "",
     partNumber: "",
@@ -13017,17 +13076,118 @@ function ItemRequisitionModule({
       });
     } else {
       const so = salesOrders.find(s => s.nomor === form.soNomor);
+      // Snapshot the current bomUpdatedAt of every Master Unit referenced by this SO, same as
+      // SalesOrderModule.createSO — lets this IR later detect "the BOM I was built from has
+      // since been revised" even if it differs from the SO's own snapshot (e.g. IR created
+      // later than SO, after an intervening BOM edit).
+      const bomSnapshot = {};
+      (so?.items || []).forEach(it => {
+        if (it.sumber === "Master Unit" && it.unitCode) {
+          const unit = (units || []).find(u => u.unitCode === it.unitCode);
+          bomSnapshot[it.unitCode] = unit?.bomUpdatedAt || null;
+        }
+      });
       setItemRequisitions(prev => [...prev, {
         nomor: newNomor(prev),
         tanggal: today(),
         soNomor: form.soNomor,
         soCustomerNama: so?.customerNama || "",
         items: form.items,
+        bomSnapshot,
         createdBy: session.nama,
         status: "Menunggu Purchasing"
       }]);
     }
     closeModal();
+  };
+  // "Cek Ulang vs BOM Terbaru" — recomputes the merged part list for this IR's source SO against
+  // the CURRENT live Master Unit BOM (via explodeSOItems, same logic used at IR-creation time) and
+  // diffs it against what's currently stored on the IR. Only meaningful for SO-based IRs (not
+  // manual/non-SO requests) that haven't been converted to PO yet. Purely a read/preview — nothing
+  // is written until the user clicks "Terapkan Perubahan Ini" in the modal.
+  const buildRecheckDiff = ir => {
+    const so = salesOrders.find(s => s.nomor === ir.soNomor);
+    if (!so) return { rows: [], soMissing: true };
+    const latest = explodeSOItems(so); // [{partNumber, partName, qty, fromUnits}]
+    const oldByPart = {};
+    (ir.items || []).forEach(it => {
+      oldByPart[it.partNumber] = it;
+    });
+    const newByPart = {};
+    latest.forEach(m => {
+      newByPart[m.partNumber] = m;
+    });
+    const allParts = Array.from(new Set([...Object.keys(oldByPart), ...Object.keys(newByPart)]));
+    const rows = allParts.map(pn => {
+      const oldIt = oldByPart[pn];
+      const newM = newByPart[pn];
+      const oldQty = oldIt?.qtyButuh ?? null;
+      const newQty = newM?.qty ?? null;
+      let status;
+      if (oldIt && !newM) status = "Hilang dari BOM";else if (!oldIt && newM) status = "Baru di BOM";else if (Number(oldQty) !== Number(newQty)) status = "Qty Berubah";else status = "Sama";
+      return {
+        partNumber: pn,
+        partName: newM?.partName || oldIt?.partName || pn,
+        oldQty,
+        newQty,
+        status
+      };
+    }).filter(r => r.status !== "Sama");
+    return {
+      rows,
+      soMissing: false
+    };
+  };
+  const openRecheck = ir => {
+    const {
+      rows,
+      soMissing
+    } = buildRecheckDiff(ir);
+    if (soMissing) return alert("Sales Order sumber untuk IR ini sudah tidak ditemukan — tidak bisa cek ulang vs BOM.");
+    if (rows.length === 0) return alert("Tidak ada perbedaan — item pada IR ini sudah sesuai dengan BOM terbaru.");
+    setRecheckModal({
+      ir,
+      rows
+    });
+  };
+  const applyRecheck = () => {
+    if (!recheckModal) return;
+    const { ir, rows } = recheckModal;
+    const part = pn => parts.find(p => p.partNumber === pn);
+    const nextItems = [];
+    // Keep existing items not in the diff (unchanged), update/insert diffed ones, drop those
+    // marked "Hilang dari BOM" (qty becomes 0 in the new BOM).
+    const diffedParts = new Set(rows.map(r => r.partNumber));
+    (ir.items || []).forEach(it => {
+      if (!diffedParts.has(it.partNumber)) nextItems.push(it);
+    });
+    rows.forEach(r => {
+      if (r.status === "Hilang dari BOM") return; // dropped
+      const p = part(r.partNumber);
+      const stok = p?.stok ?? 0;
+      const qtyButuh = Number(r.newQty) || 0;
+      nextItems.push({
+        partNumber: r.partNumber,
+        partName: r.partName,
+        description: p?.description || "",
+        qtyButuh,
+        stokTersedia: stok,
+        qtyKurang: Math.max(0, qtyButuh - stok),
+        catatan: ""
+      });
+    });
+    setItemRequisitions(itemRequisitions.map(r => r.nomor === ir.nomor ? {
+      ...r,
+      items: nextItems
+    } : r));
+    logAudit(store, session, {
+      module: "Item Requisition",
+      docNomor: ir.nomor,
+      action: "Cek Ulang vs BOM Terbaru — Diterapkan",
+      detail: rows.map(r => `${r.partNumber}: ${r.status} (${r.oldQty ?? "-"} → ${r.newQty ?? "-"})`).join("; ")
+    });
+    setRecheckModal(null);
+    setDetail(null);
   };
   return React.createElement("div", {
     style: {
@@ -13090,7 +13250,7 @@ function ItemRequisitionModule({
         cursor: "pointer"
       },
       onClick: () => setDetail(r)
-    }, r.cascadeAlert ? "⚠ " + r.nomor : r.nomor), r.tanggal, r.bomCandidate ? r.soNomor ? React.createElement(Badge, {
+    }, (r.cascadeAlert ? "⚠ " : "") + (bomRevisedUnits(r.bomSnapshot, units).length > 0 ? "🔧 " : "") + r.nomor), r.tanggal, r.bomCandidate ? r.soNomor ? React.createElement(Badge, {
       color: theme.blue
     }, "Non-SO — ", r.soNomor) : React.createElement(Badge, {
       color: theme.blue
@@ -13210,7 +13370,27 @@ function ItemRequisitionModule({
         cascadeAlert: null
       });
     }
-  }, "✓ Tandai Sudah Direview")), React.createElement(Table, {
+  }, "✓ Tandai Sudah Direview")), bomRevisedUnits(detail.bomSnapshot, units).length > 0 && React.createElement(Card, {
+    style: {
+      background: theme.yellow + "11",
+      border: `1px solid ${theme.yellow}44`
+    }
+  }, React.createElement("h3", {
+    style: {
+      margin: "0 0 8px",
+      color: theme.yellow,
+      fontSize: 15
+    }
+  }, "🔧 BOM Sudah Direvisi Sejak IR Ini Dibuat"), React.createElement("p", {
+    style: {
+      margin: "0 0 10px",
+      fontSize: 13,
+      color: theme.text
+    }
+  }, `BOM untuk Unit ${bomRevisedUnits(detail.bomSnapshot, units).join(", ")} telah direvisi di Master Unit setelah IR ini dibuat. Item pada IR ini TIDAK otomatis berubah.`), detail.soNomor && !detail.bomCandidate && detail.status !== "Sudah di-PO" && canManage && React.createElement(Btn, {
+    size: "sm",
+    onClick: () => openRecheck(detail)
+  }, "🔄 Cek Ulang vs BOM Terbaru")), React.createElement(Table, {
     headers: ["Part Number", "Part Name", "Qty Dibutuhkan", "Stok Tersedia", "Qty Kurang", "Catatan", "Status Diterima"],
     rows: detail.items.map(it => {
       const diterima = irRefInfo(detail).receivedByPart[it.partNumber] || 0;
@@ -13267,6 +13447,39 @@ function ItemRequisitionModule({
       setDetail(null);
     }
   }, "🗑️ Hapus")))), React.createElement(Modal, {
+    open: !!recheckModal,
+    title: `Cek Ulang vs BOM Terbaru — ${recheckModal?.ir?.nomor || ""}`,
+    onClose: () => setRecheckModal(null),
+    width: 680
+  }, recheckModal && React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 13,
+      color: theme.muted
+    }
+  }, "Perbandingan item IR saat ini dengan hasil BOM explosion terbaru dari SO ", recheckModal.ir.soNomor, ". Tidak ada perubahan tersimpan sampai Anda klik \"Terapkan Perubahan Ini\"."), React.createElement(Table, {
+    headers: ["Part Number", "Part Name", "Qty Lama", "Qty Baru", "Status"],
+    rows: recheckModal.rows.map(r => [r.partNumber, r.partName, r.oldQty ?? "-", r.newQty ?? "-", React.createElement(Badge, {
+      color: r.status === "Baru di BOM" ? theme.green : r.status === "Hilang dari BOM" ? theme.red : theme.yellow
+    }, r.status)])
+  }), React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      gap: 10
+    }
+  }, React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setRecheckModal(null)
+  }, "Batal"), React.createElement(Btn, {
+    onClick: applyRecheck
+  }, "✓ Terapkan Perubahan Ini")))), React.createElement(Modal, {
     open: modal,
     title: editingNomor ? "Revisi Item Requisition" : "Buat Item Requisition",
     onClose: closeModal,
