@@ -370,6 +370,172 @@ function readExcelFile(file) {
   });
 }
 
+// Parse a raw weekly fingerprint-machine export ("LAP REKAPITULASI - [tgl] - [tgl].xls") into a
+// {periode, karyawan[]} structure. The machine's layout is fixed by row/column position (not
+// named headers), so this reads in array mode (header:1) instead of the object-mode
+// readExcelFile above. See AttendanceModule's "Rekap Mesin" tab for how this feeds the
+// national-holiday / dinas-luar correction step.
+function parseMesinAbsensiXLS(file) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const XLSX = await loadXLSXLibrary();
+      const reader = new FileReader();
+      reader.onload = e => {
+        try {
+          const data = new Uint8Array(e.target.result);
+          const workbook = XLSX.read(data, {
+            type: "array"
+          });
+          const sheet = workbook.Sheets[workbook.SheetNames[0]];
+          const raw = XLSX.utils.sheet_to_json(sheet, {
+            header: 1,
+            defval: 0
+          });
+          // Periode: row 2, col 27 — e.g. " Dari 09-06-2026 s/d 15-06-2026"
+          const periodeStr = String(raw[2]?.[27] || "");
+          const match = periodeStr.match(/(\d{2}-\d{2}-\d{4}).*?(\d{2}-\d{2}-\d{4})/);
+          const periode = match ? {
+            mulai: match[1].split("-").reverse().join("-"),
+            selesai: match[2].split("-").reverse().join("-")
+          } : {
+            mulai: "",
+            selesai: ""
+          };
+          // Data karyawan mulai row 12, berhenti di baris "Total:" / "Grand Total:" / baris kosong
+          const karyawan = [];
+          for (let i = 12; i < raw.length; i++) {
+            const row = raw[i] || [];
+            const nama = String(row[1] || "").trim();
+            if (!nama || nama.startsWith("Total") || nama.startsWith("Grand")) break;
+            karyawan.push({
+              nama,
+              karyawanId: String(row[6] || ""),
+              normal: Number(row[10]) || 0,
+              riil: Number(row[11]) || 0,
+              absen: Number(row[12]) || 0,
+              terlambat: Number(row[14]) || 0,
+              plgCpt: Number(row[15]) || 0,
+              lembur: Number(row[17]) || 0,
+              jmlIjin: Number(row[18]) || 0,
+              dLuar: Number(row[19]) || 0,
+              nIn: Number(row[22]) || 0,
+              nOut: Number(row[23]) || 0,
+              scan: Number(row[24]) || 0,
+              sakit: Number(row[25]) || 0,
+              cuti: Number(row[26]) || 0,
+              ijin: Number(row[28]) || 0,
+              jamKerja: Number(row[32]) || 0
+            });
+          }
+          resolve({
+            periode,
+            karyawan
+          });
+        } catch (err) {
+          reject(err);
+        }
+      };
+      reader.onerror = () => reject(new Error("Gagal membaca file"));
+      reader.readAsArrayBuffer(file);
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+// Correction algorithm for the weekly machine export. HRD supplies `hariLibur` (count of national
+// holidays inside the period — the machine always counts these as normal work days) and, per
+// employee who needs it, a `penyesuaian` row (dinas luar days, and/or overrides for ijin/cuti/
+// sakit/normal/absen that the machine didn't capture correctly).
+//
+// Key subtlety validated against real HRD-corrected weekly data: days spent on dinas luar
+// (off-site duty) are NOT a "leave" category that reduces attendance — the employee was working,
+// the machine just has no scan for them. So dLuar is added back into Riil (present) rather than
+// subtracted from Normal like Cuti/Ijin/Sakit are. And when an employee is on dinas luar for the
+// *entire* period (dLuar >= raw Normal), Normal itself isn't reduced by hariLibur either, since
+// off-site work isn't affected by an office holiday. A manual "Normal Override" input still wins
+// over both of these if HRD explicitly sets one.
+function hitungKoreksiAbsensi(karyawan, hariLibur, penyesuaian) {
+  const liburNum = Number(hariLibur) || 0;
+  const numOrNull = v => v !== "" && v !== null && v !== undefined && !Number.isNaN(Number(v)) ? Number(v) : null;
+  return (karyawan || []).map(k => {
+    const p = (penyesuaian || []).find(row => String(row.nama || "").toLowerCase().trim() === k.nama.toLowerCase().trim()) || {};
+    const dLuar = numOrNull(p.dLuar) || 0;
+    const cutiEdit = numOrNull(p.cuti) ?? k.cuti;
+    const jmlIjinEdit = k.jmlIjin; // not exposed for manual override in the current UI (raw only)
+    const ijinEdit = numOrNull(p.ijin) ?? k.ijin;
+    const sakitEdit = numOrNull(p.sakit) ?? k.sakit;
+    const otherLeave = cutiEdit + jmlIjinEdit + ijinEdit + sakitEdit;
+    const normalOverride = numOrNull(p.normalOverride);
+    const fullDinasLuar = dLuar > 0 && dLuar >= k.normal;
+    const normalEdit = normalOverride !== null ? normalOverride : fullDinasLuar ? k.normal : Math.max(0, k.normal - liburNum);
+    const riilCapped = Math.min(k.riil, Math.max(0, normalEdit - dLuar - otherLeave));
+    const riilEdit = riilCapped + dLuar;
+    const absenManual = numOrNull(p.absenManual);
+    const absenEdit = absenManual !== null ? absenManual : Math.max(0, normalEdit - riilEdit - otherLeave);
+    // Portion of this employee's total lemburJam (from the machine, weekly aggregate — no
+    // day-by-day breakdown available) that HRD says happened on a hari libur/istirahat mingguan,
+    // for the legal overtime-pay multiplier table (see hitungLemburLegal). Defaults to 0 (all
+    // overtime treated as regular working-day overtime), capped so it never exceeds the raw total.
+    const lemburLiburEdit = Math.min(numOrNull(p.lemburLibur) || 0, k.lembur);
+    return {
+      ...k,
+      normalEdit,
+      riilEdit,
+      absenEdit,
+      dLuarEdit: dLuar,
+      cutiEdit,
+      jmlIjinEdit,
+      ijinEdit,
+      sakitEdit,
+      lemburLiburEdit
+    };
+  });
+}
+
+// Legal overtime-pay calculation per PP No. 35 Tahun 2021 Pasal 31-32 (Indonesian Government
+// Regulation on overtime), sourced and verified against the current regulation text:
+//   - Upah sejam (hourly rate) = upah sebulan / 173  (Pasal 32 ayat 1-2)
+//   - Hari kerja biasa (regular working day): jam ke-1 = 1.5x upah sejam, jam berikutnya = 2x
+//   - Hari libur resmi / istirahat mingguan (Pasal 31), sistem 6 hari kerja/minggu:
+//       jam 1-7 = 2x, jam 8 = 3x, jam 9-11 = 4x
+//   - Hari libur resmi / istirahat mingguan, sistem 5 hari kerja/minggu:
+//       jam 1-8 = 2x, jam 9 = 3x, jam 10-12 = 4x
+//   - Legal max: 4 jam/hari, 18 jam/minggu (Pasal 26 ayat 1) — the machine only reports a weekly
+//     total, so only the weekly cap can be checked here; per-day cap needs manual verification.
+// `upahSebulan` should be gajiPokok + tunjangan tetap (this app uses gajiPokok + tunjangan as the
+// closest available proxy — adjust here if Foresta's actual "upah" definition for lembur differs).
+function hitungLemburLegal(lemburJamHariKerja, lemburJamLibur, upahSebulan, hariKerjaSeminggu) {
+  const hourlyRate = (Number(upahSebulan) || 0) / 173;
+  const jamKerja = Math.max(0, Number(lemburJamHariKerja) || 0);
+  const jamLibur = Math.max(0, Number(lemburJamLibur) || 0);
+  const jam1 = Math.min(jamKerja, 1);
+  const jamSisa = Math.max(0, jamKerja - 1);
+  const payHariKerja = jam1 * 1.5 * hourlyRate + jamSisa * 2 * hourlyRate;
+  let payLibur = 0;
+  if (jamLibur > 0) {
+    if (Number(hariKerjaSeminggu) === 6) {
+      const tier1 = Math.min(jamLibur, 7);
+      const tier2 = Math.min(Math.max(jamLibur - 7, 0), 1);
+      const tier3 = Math.min(Math.max(jamLibur - 8, 0), 3);
+      payLibur = tier1 * 2 * hourlyRate + tier2 * 3 * hourlyRate + tier3 * 4 * hourlyRate;
+    } else {
+      const tier1 = Math.min(jamLibur, 8);
+      const tier2 = Math.min(Math.max(jamLibur - 8, 0), 1);
+      const tier3 = Math.min(Math.max(jamLibur - 9, 0), 3);
+      payLibur = tier1 * 2 * hourlyRate + tier2 * 3 * hourlyRate + tier3 * 4 * hourlyRate;
+    }
+  }
+  const totalJam = jamKerja + jamLibur;
+  return {
+    hourlyRate,
+    payHariKerja,
+    payLibur,
+    totalPay: payHariKerja + payLibur,
+    melebihiBatasMingguan: totalJam > 18 // Pasal 26 ayat 1 PP 35/2021
+  };
+}
+
 // Normalize an imported row-object's keys against a set of accepted header aliases, so a user
 // who doesn't type the exact template header (different casing/spacing, or an Indonesian label
 // like "Nama Part" instead of "partName") still gets mapped to the correct field. Without this,
@@ -1256,7 +1422,14 @@ const seedEmployees = [...DEFAULT_USER_SEED, ...USER_DAN_AKSES_SEED].map(u => ({
   bpjsKesPct: 1,
   ktp: "",
   kk: "",
-  keluarga: []
+  keluarga: [],
+  uangHarianRate: 50000,
+  // Rp per hari Riil hadir, used by Absensi "Rekap Mesin" + Payroll to compute Uang Makan Harian
+  lemburDibayarJam: 0,
+  // Cumulative jam lembur yang sudah dibayar/dicairkan — dikurangkan dari total lembur (rekapAbsensi) untuk dapat "Sisa Lembur"
+  absenTerlambatJamSisa: 0,
+  // Sisa jam akumulasi (absen*8 + terlambat) yang belum genap 8 jam — dipakai untuk auto-potong cuti; direset tiap kali genap 8 jam
+  hariKerjaSeminggu: 5 // 5 atau 6 — dipakai untuk pilih tabel pengali lembur hari libur/istirahat mingguan (PP 35/2021 Pasal 31)
 }));
 const seedCOA = [{
   kode: "OPS-001",
@@ -1429,6 +1602,7 @@ function useStore() {
   const [coa, setCoa] = usePersisted("erp_coa", seedCOA); // Master COA - office operational cost accounts
   const [salesActivities, setSalesActivities] = usePersisted("erp_sales_activities", []); // Daily sales activity log: visits, calls, operational costs
   const [attendance, setAttendance] = usePersisted("erp_attendance", []); // Absensi: daily check-in records for uang makan/harian + lembur calc
+  const [rekapAbsensi, setRekapAbsensi] = usePersisted("erp_rekap_absensi", []); // Absensi "Rekap Mesin": corrected weekly recap parsed from fingerprint-machine XLS, feeds Payroll
   const [jurnal, setJurnal] = usePersisted("erp_jurnal", []); // Jurnal: all outgoing costs (auto from PO/Payroll/Travel + manual entries), approve when paid
   const [internalDOs, setInternalDOs] = usePersisted("erp_internal_do", []); // Internal Delivery Order: Office -> Workshop, auto-created on Goods Receipt
   const [workshopOpsExpenses, setWorkshopOpsExpenses] = usePersisted("erp_workshop_ops", []); // Workshop operational expenses (Epy inputs, from Master COA)
@@ -1524,6 +1698,8 @@ function useStore() {
     setSalesActivities,
     attendance,
     setAttendance,
+    rekapAbsensi,
+    setRekapAbsensi,
     jurnal,
     setJurnal,
     internalDOs,
@@ -2189,7 +2365,7 @@ function PartPicker({
   const [open, setOpen] = useState(false);
   const selected = parts.find(p => p.partNumber === value);
   const q = query.trim().toLowerCase();
-  const filtered = q ? parts.filter(p => p.partNumber.toLowerCase().includes(q) || (p.partName || "").toLowerCase().includes(q)).slice(0, 50) : parts.slice(0, 50);
+  const filtered = q ? parts.filter(p => p.partNumber.toLowerCase().includes(q) || (p.partName || "").toLowerCase().includes(q) || (p.description || "").toLowerCase().includes(q)).slice(0, 50) : parts.slice(0, 50);
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -18672,7 +18848,8 @@ function PayrollModule({
     setPayrollRuns,
     salesOrders,
     customers,
-    attendance
+    attendance,
+    rekapAbsensi
   } = store;
   const [tab, setTab] = useState("run");
   const [bulan, setBulan] = useState(new Date().toISOString().slice(0, 7));
@@ -18688,8 +18865,48 @@ function PayrollModule({
     kk: "",
     alamat: "",
     noTelp: "",
-    keluarga: []
+    keluarga: [],
+    uangHarianRate: 50000,
+    hariKerjaSeminggu: 5
   });
+  // Uang Makan Harian for a given month: sums riilHari x uangHarianRate across every saved Rekap
+  // Mesin periode whose periodeMulai falls in that month, matched by employee name (rekapAbsensi
+  // only stores nama/karyawanId from the machine file, not username).
+  const calcUangMakan = (empNama, bulanStr) => {
+    const rows = (rekapAbsensi || []).filter(r => r.periodeMulai && r.periodeMulai.slice(0, 7) === bulanStr && String(r.namaKaryawan || "").toLowerCase().trim() === String(empNama || "").toLowerCase().trim());
+    const rate = (employees.find(e => e.nama === empNama) || {}).uangHarianRate || 0;
+    const totalRiil = rows.reduce((s, r) => s + (Number(r.riilHari) || 0), 0);
+    return {
+      totalRiil,
+      uangMakan: totalRiil * rate,
+      periodeCount: rows.length
+    };
+  };
+  // Sisa Lembur (jam) = total lemburJam recorded via Rekap Mesin across all saved periods, minus
+  // lemburDibayarJam (manual running counter HRD updates when overtime is compensated/paid out).
+  const calcSisaLembur = empNama => {
+    const rows = (rekapAbsensi || []).filter(r => String(r.namaKaryawan || "").toLowerCase().trim() === String(empNama || "").toLowerCase().trim());
+    const totalLembur = rows.reduce((s, r) => s + (Number(r.lemburJam) || 0), 0);
+    const emp = employees.find(e => e.nama === empNama) || {};
+    return {
+      totalLembur,
+      sisa: Math.max(0, totalLembur - (emp.lemburDibayarJam || 0))
+    };
+  };
+  // Estimated legal overtime pay for a given month (PP 35/2021) — purely a suggestion shown next
+  // to the manual "Lembur (Rp)" input so Payroll doesn't have to compute it by hand; never
+  // auto-fills without a click, consistent with keeping money fields manually confirmed.
+  const calcLemburLegalBulan = (emp, bulanStr) => {
+    const rows = (rekapAbsensi || []).filter(r => r.periodeMulai && r.periodeMulai.slice(0, 7) === bulanStr && String(r.namaKaryawan || "").toLowerCase().trim() === String(emp.nama || "").toLowerCase().trim());
+    const totalLemburJam = rows.reduce((s, r) => s + (Number(r.lemburJam) || 0), 0);
+    const totalLemburLiburJam = rows.reduce((s, r) => s + (Number(r.lemburLiburJam) || 0), 0);
+    const totalLemburKerja = Math.max(0, totalLemburJam - totalLemburLiburJam);
+    const upahSebulan = (emp.gajiPokok || 0) + (emp.tunjangan || 0);
+    return {
+      ...hitungLemburLegal(totalLemburKerja, totalLemburLiburJam, upahSebulan, emp.hariKerjaSeminggu || 5),
+      totalLemburJam
+    };
+  };
   const [keluargaForm, setKeluargaForm] = useState({
     nama: "",
     hubungan: "",
@@ -18835,7 +19052,9 @@ function PayrollModule({
       kk: empForm.kk,
       alamat: empForm.alamat,
       noTelp: empForm.noTelp,
-      keluarga: empForm.keluarga
+      keluarga: empForm.keluarga,
+      uangHarianRate: parseFloat(empForm.uangHarianRate) || 0,
+      hariKerjaSeminggu: parseFloat(empForm.hariKerjaSeminggu) || 5
     } : e);
     setEmployees(arr);
     setEditEmp(null);
@@ -18872,7 +19091,11 @@ function PayrollModule({
       const cutiData = calcPotonganCuti(emp.username, bulan);
       const bpjsTk = (emp.gajiPokok || 0) * ((emp.bpjsTkPct ?? 2) / 100);
       const bpjsKes = (emp.gajiPokok || 0) * ((emp.bpjsKesPct ?? 1) / 100);
-      const totalGaji = (emp.gajiPokok || 0) + (emp.tunjangan || 0) + lembur + komisiData.total - potonganManual - cutiData.potongan - bpjsTk - bpjsKes;
+      // Uang Makan Harian: riilHari (from Absensi > Rekap Mesin, matched by name) x employee's
+      // uangHarianRate — sourced automatically each Generate Payroll run, no manual input needed.
+      const uangMakanData = calcUangMakan(emp.nama, bulan);
+      const uangMakan = uangMakanData.uangMakan;
+      const totalGaji = (emp.gajiPokok || 0) + (emp.tunjangan || 0) + lembur + komisiData.total + uangMakan - potonganManual - cutiData.potongan - bpjsTk - bpjsKes;
       return {
         username: emp.username,
         nama: emp.nama,
@@ -18882,6 +19105,8 @@ function PayrollModule({
         lembur,
         komisi: komisiData.total,
         komisiDetail: komisiData.detail,
+        uangMakan,
+        uangMakanHari: uangMakanData.totalRiil,
         potongan: potonganManual,
         potonganCuti: cutiData.potongan,
         cutiKelebihan: cutiData.cutiKelebihan,
@@ -18906,6 +19131,8 @@ function PayrollModule({
     gajiPokok: r.gajiPokok,
     tunjangan: r.tunjangan,
     lembur: r.lembur,
+    uangMakan: r.uangMakan || 0,
+    uangMakanHari: r.uangMakanHari || 0,
     komisi: r.komisi,
     potonganManual: r.potongan,
     potonganCuti: r.potonganCuti,
@@ -18922,7 +19149,7 @@ function PayrollModule({
     partyName: r.nama,
     partyExtra: ROLE_DEFS[r.role]?.label,
     itemHeaders: ["Komponen", "Nominal"],
-    items: [["Gaji Pokok", fmt(r.gajiPokok)], ["Tunjangan", fmt(r.tunjangan)], ["Lembur", fmt(r.lembur)], ["Komisi", fmt(r.komisi)], ["Potongan Manual", `-${fmt(r.potongan)}`], ["Potongan Cuti Berlebih", `-${fmt(r.potonganCuti)}`], ["BPJS Tenaga Kerja", `-${fmt(r.bpjsTk)}`], ["BPJS Kesehatan", `-${fmt(r.bpjsKes)}`]],
+    items: [["Gaji Pokok", fmt(r.gajiPokok)], ["Tunjangan", fmt(r.tunjangan)], ["Lembur", fmt(r.lembur)], [`Uang Makan Harian (${r.uangMakanHari || 0} hari)`, fmt(r.uangMakan || 0)], ["Komisi", fmt(r.komisi)], ["Potongan Manual", `-${fmt(r.potongan)}`], ["Potongan Cuti Berlebih", `-${fmt(r.potonganCuti)}`], ["BPJS Tenaga Kerja", `-${fmt(r.bpjsTk)}`], ["BPJS Kesehatan", `-${fmt(r.bpjsKes)}`]],
     showPrice: false,
     total: r.totalGaji,
     subtotal: r.totalGaji,
@@ -19051,7 +19278,9 @@ function PayrollModule({
         kk: emp.kk || "",
         alamat: emp.alamat || "",
         noTelp: emp.noTelp || "",
-        keluarga: emp.keluarga || []
+        keluarga: emp.keluarga || [],
+        uangHarianRate: emp.uangHarianRate ?? 50000,
+        hariKerjaSeminggu: emp.hariKerjaSeminggu ?? 5
       });
     }
   })), tab === "karyawan" && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
@@ -19125,7 +19354,9 @@ function PayrollModule({
         kk: emp.kk || "",
         alamat: emp.alamat || "",
         noTelp: emp.noTelp || "",
-        keluarga: emp.keluarga || []
+        keluarga: emp.keluarga || [],
+        uangHarianRate: emp.uangHarianRate ?? 50000,
+        hariKerjaSeminggu: emp.hariKerjaSeminggu ?? 5
       });
     }
   })), tab === "run" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
@@ -19134,13 +19365,39 @@ function PayrollModule({
       color: theme.text,
       fontSize: 15
     }
-  }, "Input Lembur & Potongan — ", bulan), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Nama", "Role", "Gaji Pokok", "Tunjangan", "Lembur (Rp)", "Potongan (Rp)", "Cuti Berlebih", "Estimasi Komisi"],
+  }, "Input Lembur & Potongan — ", bulan), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      margin: "0 0 12px"
+    }
+  }, "ℹ️ \"Estimasi Legal\" dihitung otomatis dari jam lembur Rekap Mesin bulan ini sesuai PP No. 35/2021 (1 jam pertama 1.5x, jam berikutnya 2x upah sejam = upah sebulan / 173). Klik \"Isi\" untuk memakai nilai ini sebagai Lembur (Rp), atau isi manual bila berbeda. Uang Makan Harian dihitung otomatis saat Generate Payroll (tidak perlu input manual)."), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Nama", "Role", "Gaji Pokok", "Tunjangan", "Estimasi Legal (PP35/2021)", "Lembur (Rp)", "Uang Makan (Preview)", "Potongan (Rp)", "Cuti Berlebih", "Estimasi Komisi"],
     rows: employees.map(e => {
       const cutiData = calcPotonganCuti(e.username, bulan);
+      const legalEst = calcLemburLegalBulan(e, bulan);
+      const uangMakanPreview = calcUangMakan(e.nama, bulan);
       return [e.nama, /*#__PURE__*/React.createElement(Badge, {
         color: ROLE_DEFS[e.role]?.color
-      }, ROLE_DEFS[e.role]?.label), fmt(e.gajiPokok), fmt(e.tunjangan), /*#__PURE__*/React.createElement("input", {
+      }, ROLE_DEFS[e.role]?.label), fmt(e.gajiPokok), fmt(e.tunjangan), /*#__PURE__*/React.createElement("div", {
+        style: {
+          display: "flex",
+          alignItems: "center",
+          gap: 6
+        }
+      }, /*#__PURE__*/React.createElement("span", {
+        style: {
+          fontSize: 12,
+          color: legalEst.melebihiBatasMingguan ? theme.red : theme.muted
+        }
+      }, fmt(legalEst.totalPay), " (", legalEst.totalLemburJam, "j)", legalEst.melebihiBatasMingguan ? " ⚠" : ""), legalEst.totalPay > 0 && /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "ghost",
+        onClick: () => setLemburInput({
+          ...lemburInput,
+          [e.username]: Math.round(legalEst.totalPay)
+        })
+      }, "Isi")), /*#__PURE__*/React.createElement("input", {
         type: "number",
         value: lemburInput[e.username] || "",
         onChange: ev => setLemburInput({
@@ -19157,7 +19414,17 @@ function PayrollModule({
           width: 100,
           fontFamily: "inherit"
         }
-      }), /*#__PURE__*/React.createElement("input", {
+      }), /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: theme.green,
+          fontSize: 13
+        }
+      }, fmt(uangMakanPreview.uangMakan), /*#__PURE__*/React.createElement("div", {
+        style: {
+          fontSize: 11,
+          color: theme.muted
+        }
+      }, uangMakanPreview.totalRiil, " hari riil")), /*#__PURE__*/React.createElement("input", {
         type: "number",
         value: potonganInput[e.username] || "",
         onChange: ev => setPotonganInput({
@@ -19213,7 +19480,7 @@ function PayrollModule({
     onClick: doExportSlip,
     label: "📊 Export Semua"
   })), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Nama", "Role", "Gaji Pokok", "Tunjangan", "Lembur", "Komisi", "BPJS TK", "BPJS Kes", "Potongan", "Total Gaji", ""],
+    headers: ["Nama", "Role", "Gaji Pokok", "Tunjangan", "Lembur", "Uang Makan", "Komisi", "BPJS TK", "BPJS Kes", "Potongan", "Total Gaji", ""],
     rows: currentRun.runs.map(r => [/*#__PURE__*/React.createElement("span", {
       style: {
         color: theme.accentLight,
@@ -19223,7 +19490,7 @@ function PayrollModule({
       onClick: () => setDetailSlip(r)
     }, r.nama), /*#__PURE__*/React.createElement(Badge, {
       color: ROLE_DEFS[r.role]?.color
-    }, ROLE_DEFS[r.role]?.label), fmt(r.gajiPokok), fmt(r.tunjangan), fmt(r.lembur), fmt(r.komisi), /*#__PURE__*/React.createElement("span", {
+    }, ROLE_DEFS[r.role]?.label), fmt(r.gajiPokok), fmt(r.tunjangan), fmt(r.lembur), fmt(r.uangMakan || 0), fmt(r.komisi), /*#__PURE__*/React.createElement("span", {
       style: {
         color: theme.red
       }
@@ -19324,6 +19591,34 @@ function PayrollModule({
       bpjsKesPct: v
     }),
     type: "number"
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Uang Harian (Rp/hari hadir)",
+    value: empForm.uangHarianRate,
+    onChange: v => setEmpForm({
+      ...empForm,
+      uangHarianRate: v
+    }),
+    type: "number"
+  }), /*#__PURE__*/React.createElement(Select, {
+    label: "Sistem Hari Kerja/Minggu",
+    value: String(empForm.hariKerjaSeminggu),
+    onChange: v => setEmpForm({
+      ...empForm,
+      hariKerjaSeminggu: v
+    }),
+    options: [{
+      value: "5",
+      label: "5 Hari Kerja"
+    }, {
+      value: "6",
+      label: "6 Hari Kerja"
+    }]
   })), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
@@ -22235,8 +22530,13 @@ function AttendanceModule({
     employees
   } = store;
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "hrd_payroll";
+  // "Rekap Mesin" (weekly fingerprint-machine XLS upload + holiday/dinas-luar correction) is
+  // HRD/GM/Owner-only — regular employees only ever see their own daily "Harian" records, so the
+  // tab bar itself is hidden for them and absTab can never leave "harian" in that case.
+  const [absTab, setAbsTab] = useState("dashboard");
   const [modal, setModal] = useState(false);
-  const [form, setForm] = useState({
+  const [editingId, setEditingId] = useState(null);
+  const blankAttForm = () => ({
     tanggal: today(),
     username: session.username,
     jamMasuk: "08:00",
@@ -22245,22 +22545,56 @@ function AttendanceModule({
     uangHarian: 50000,
     status: "Hadir"
   });
+  const [form, setForm] = useState(blankAttForm());
   const ATTENDANCE_TEMPLATE_HEADERS = ["tanggal", "username", "jamMasuk", "jamKeluar", "lembur", "uangHarian", "status"];
   const myAttendance = isOwnerLike ? attendance : attendance.filter(a => a.username === session.username);
-  const save = () => {
-    setAttendance([...attendance, {
-      id: "ABS-" + uid(),
-      ...form
-    }]);
-    setModal(false);
+  const openEditAttendance = a => {
+    setEditingId(a.id);
     setForm({
-      tanggal: today(),
-      username: session.username,
-      jamMasuk: "08:00",
-      jamKeluar: "17:00",
-      lembur: 0,
-      uangHarian: 50000,
-      status: "Hadir"
+      tanggal: a.tanggal,
+      username: a.username,
+      jamMasuk: a.jamMasuk || "08:00",
+      jamKeluar: a.jamKeluar || "17:00",
+      lembur: a.lembur || 0,
+      uangHarian: a.uangHarian || 0,
+      status: a.status || "Hadir"
+    });
+    setModal(true);
+  };
+  const closeAttModal = () => {
+    setModal(false);
+    setEditingId(null);
+    setForm(blankAttForm());
+  };
+  const save = () => {
+    if (editingId) {
+      setAttendance(attendance.map(a => a.id === editingId ? {
+        ...a,
+        ...form
+      } : a));
+      logAudit(store, session, {
+        module: "Absensi",
+        docNomor: editingId,
+        action: "Revisi",
+        detail: `${form.tanggal} — ${form.status}`
+      });
+    } else {
+      setAttendance([...attendance, {
+        id: "ABS-" + uid(),
+        ...form
+      }]);
+    }
+    closeAttModal();
+  };
+  const deleteAttendance = a => {
+    if (!isOwnerLike) return alert("Hanya Owner/GM/HRD Payroll yang dapat menghapus data absensi.");
+    if (!confirm(`Hapus data absensi ${a.tanggal} (${(employees.find(e => e.username === a.username) || {}).nama || a.username})?`)) return;
+    setAttendance(attendance.filter(x => x.id !== a.id));
+    logAudit(store, session, {
+      module: "Absensi",
+      docNomor: a.id,
+      action: "Hapus",
+      detail: `${a.tanggal} — ${a.status}`
     });
   };
   const doExport = () => exportToExcel(myAttendance.map(a => ({
@@ -22300,7 +22634,7 @@ function AttendanceModule({
     Alpha: theme.red,
     Cuti: theme.purple
   };
-  return /*#__PURE__*/React.createElement("div", {
+  const harianContent = /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       flexDirection: "column",
@@ -22340,7 +22674,11 @@ function AttendanceModule({
     size: "sm",
     onClick: () => downloadTemplate(ATTENDANCE_TEMPLATE_HEADERS, "Template_Absensi.xlsx")
   }, "📄 Template"), /*#__PURE__*/React.createElement(Btn, {
-    onClick: () => setModal(true)
+    onClick: () => {
+      setEditingId(null);
+      setForm(blankAttForm());
+      setModal(true);
+    }
   }, "+ Catat Absensi"))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
@@ -22387,11 +22725,13 @@ function AttendanceModule({
         color: statusColor[a.status]
       }, a.status)];
     }),
+    onEdit: isOwnerLike ? i => openEditAttendance(myAttendanceFiltered[i]) : undefined,
+    onDelete: isOwnerLike ? i => deleteAttendance(myAttendanceFiltered[i]) : undefined,
     emptyMsg: "Belum ada data absensi"
   })), /*#__PURE__*/React.createElement(Modal, {
     open: modal,
-    title: "Catat Absensi",
-    onClose: () => setModal(false)
+    title: editingId ? "Revisi Absensi" : "Catat Absensi",
+    onClose: closeAttModal
   }, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -22480,10 +22820,695 @@ function AttendanceModule({
     }
   }, /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
-    onClick: () => setModal(false)
+    onClick: closeAttModal
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     onClick: save
-  }, "Simpan")))));
+  }, editingId ? "Simpan Perubahan" : "Simpan")))));
+  // Regular employees never see the tab bar — Rekap Mesin is an HRD/GM/Owner tool, so their view
+  // stays exactly as it was before this feature existed.
+  if (!isOwnerLike) return harianContent;
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 4,
+      borderBottom: `1px solid ${theme.border}`
+    }
+  }, [{
+    key: "dashboard",
+    label: "📈 Dashboard"
+  }, {
+    key: "harian",
+    label: "🗓️ Harian"
+  }, {
+    key: "rekap",
+    label: "📊 Rekap Mesin"
+  }].map(t => /*#__PURE__*/React.createElement("button", {
+    key: t.key,
+    onClick: () => setAbsTab(t.key),
+    style: {
+      padding: "10px 18px",
+      border: "none",
+      borderBottom: absTab === t.key ? `2px solid ${theme.accent}` : "2px solid transparent",
+      background: "none",
+      color: absTab === t.key ? theme.accent : theme.muted,
+      cursor: "pointer",
+      fontWeight: absTab === t.key ? 700 : 400,
+      fontSize: 14,
+      fontFamily: "inherit"
+    }
+  }, t.label))), absTab === "harian" ? harianContent : absTab === "rekap" ? /*#__PURE__*/React.createElement(RekapMesinPanel, {
+    store: store,
+    session: session
+  }) : /*#__PURE__*/React.createElement(DashboardAbsensiPanel, {
+    store: store,
+    session: session
+  }));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ABSENSI DASHBOARD — front-page performance summary for HRD: aggregates every saved Rekap Mesin
+// periode per staff (hadir/absen/terlambat/lembur/sisa lembur/uang makan) so HRD can see each
+// employee's attendance performance at a glance without opening individual periode rows.
+// ════════════════════════════════════════════════════════════════════════════
+function DashboardAbsensiPanel({
+  store,
+  session
+}) {
+  const {
+    rekapAbsensi,
+    employees
+  } = store;
+  const [bulanFilter, setBulanFilter] = useState(today().slice(0, 7));
+  const rows = (rekapAbsensi || []).filter(r => !bulanFilter || (r.periodeMulai || "").slice(0, 7) === bulanFilter);
+  const perStaff = {};
+  rows.forEach(r => {
+    const key = r.namaKaryawan;
+    if (!perStaff[key]) perStaff[key] = {
+      nama: key,
+      normal: 0,
+      riil: 0,
+      absen: 0,
+      terlambat: 0,
+      lembur: 0,
+      cuti: 0,
+      ijin: 0,
+      sakit: 0,
+      uangMakan: 0,
+      periodeCount: 0
+    };
+    const s = perStaff[key];
+    s.normal += Number(r.normalHari) || 0;
+    s.riil += Number(r.riilHari) || 0;
+    s.absen += Number(r.absenHari) || 0;
+    s.terlambat += Number(r.terlambatJam) || 0;
+    s.lembur += Number(r.lemburJam) || 0;
+    s.cuti += Number(r.cutiHari) || 0;
+    s.ijin += Number(r.ijinHari) || 0;
+    s.sakit += Number(r.sakitHari) || 0;
+    s.uangMakan += Number(r.uangMakan) || (Number(r.riilHari) || 0) * ((employees.find(e => e.nama === r.namaKaryawan) || {}).uangHarianRate || 0);
+    s.periodeCount += 1;
+  });
+  // Sisa Lembur is a running balance across ALL saved periods (not just the filtered month) minus
+  // whatever HRD has recorded as already paid out — same convention as Payroll's calcSisaLembur.
+  const sisaLemburFor = nama => {
+    const totalLembur = (rekapAbsensi || []).filter(r => r.namaKaryawan === nama).reduce((s, r) => s + (Number(r.lemburJam) || 0), 0);
+    const emp = employees.find(e => e.nama === nama) || {};
+    return Math.max(0, totalLembur - (emp.lemburDibayarJam || 0));
+  };
+  const staffList = Object.values(perStaff).sort((a, b) => a.nama.localeCompare(b.nama));
+  const totalAbsenSemua = staffList.reduce((s, x) => s + x.absen, 0);
+  const totalLemburSemua = staffList.reduce((s, x) => s + x.lembur, 0);
+  const totalUangMakanSemua = staffList.reduce((s, x) => s + x.uangMakan, 0);
+  const performaColor = s => {
+    const rasio = s.normal > 0 ? s.riil / s.normal : 1;
+    if (rasio >= 0.95) return theme.green;
+    if (rasio >= 0.85) return theme.yellow;
+    return theme.red;
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      flexWrap: "wrap",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("h2", {
+    style: {
+      margin: 0,
+      color: theme.text
+    }
+  }, "Dashboard Performa Absensi"), /*#__PURE__*/React.createElement(Input, {
+    type: "month",
+    value: bulanFilter,
+    onChange: setBulanFilter,
+    style: {
+      width: 180
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fill,minmax(200px,1fr))",
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "Jumlah Staff (ada rekap)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 20,
+      fontWeight: 700,
+      color: theme.text,
+      marginTop: 6
+    }
+  }, staffList.length)), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "Total Hari Absen"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 20,
+      fontWeight: 700,
+      color: theme.red,
+      marginTop: 6
+    }
+  }, totalAbsenSemua)), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "Total Jam Lembur"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 20,
+      fontWeight: 700,
+      color: theme.yellow,
+      marginTop: 6
+    }
+  }, totalLemburSemua, " jam")), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "Total Uang Makan"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 20,
+      fontWeight: 700,
+      color: theme.green,
+      marginTop: 6
+    }
+  }, fmt(totalUangMakanSemua)))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.text,
+      fontSize: 15
+    }
+  }, "Performa per Staff", bulanFilter ? ` — ${bulanFilter}` : ""), /*#__PURE__*/React.createElement("div", {
+    style: {
+      overflowX: "auto"
+    }
+  }, /*#__PURE__*/React.createElement(Table, {
+    headers: ["Nama", "Normal", "Riil", "Absen", "Terlambat(j)", "Lembur(j)", "Sisa Lembur(j)", "Cuti", "Ijin", "Sakit", "Uang Makan", "Performa"],
+    rows: staffList.map(s => [s.nama, s.normal, s.riil, s.absen, s.terlambat.toFixed(1), s.lembur.toFixed(1), sisaLemburFor(s.nama).toFixed(1), s.cuti, s.ijin, s.sakit, fmt(s.uangMakan), /*#__PURE__*/React.createElement(Badge, {
+      color: performaColor(s)
+    }, s.normal > 0 ? `${Math.round(s.riil / s.normal * 100)}%` : "-")]),
+    emptyMsg: bulanFilter ? "Belum ada rekap absensi tersimpan untuk bulan ini" : "Belum ada rekap absensi tersimpan"
+  }))));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ABSENSI "REKAP MESIN" — HRD uploads the raw weekly fingerprint-machine XLS export, corrects
+// for national holidays and dinas-luar (off-site duty) that the machine can't detect on its own,
+// previews the computed result, then saves it into the shared `rekapAbsensi` collection. Payroll
+// can read `rekapAbsensi` the same way it reads any other store collection.
+// ════════════════════════════════════════════════════════════════════════════
+function RekapMesinPanel({
+  store,
+  session
+}) {
+  const {
+    rekapAbsensi,
+    setRekapAbsensi,
+    employees,
+    setEmployees,
+    setAttendance
+  } = store;
+  const fileInputRef = useRef(null);
+  const [rawParsed, setRawParsed] = useState(null); // { periode: {mulai, selesai}, karyawan: [...] }
+  const [parsing, setParsing] = useState(false);
+  const [parseError, setParseError] = useState("");
+  const [periodeEdit, setPeriodeEdit] = useState({
+    mulai: "",
+    selesai: ""
+  });
+  const [hariLibur, setHariLibur] = useState(0);
+  const [penyesuaian, setPenyesuaian] = useState([]); // [{nama, dLuar, normalOverride, ijin, cuti, sakit, absenManual}]
+  const [preview, setPreview] = useState(null); // computed rows from hitungKoreksiAbsensi
+  const blankPenyesuaian = () => ({
+    nama: "",
+    dLuar: "",
+    normalOverride: "",
+    ijin: "",
+    cuti: "",
+    sakit: "",
+    absenManual: "",
+    lemburLibur: ""
+  });
+  // Uang Makan preview for a computed/saved row: riilHari x employee's uangHarianRate,
+  // matched by name (same convention as Payroll's calcUangMakan).
+  const uangMakanRow = (nama, riilHari) => {
+    const rate = (employees.find(e => e.nama === nama) || {}).uangHarianRate || 0;
+    return (Number(riilHari) || 0) * rate;
+  };
+  const resetUpload = () => {
+    setRawParsed(null);
+    setPreview(null);
+    setPenyesuaian([]);
+    setHariLibur(0);
+    setParseError("");
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+  const handleFile = async e => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      setParseError("File terlalu besar (maks 5MB).");
+      return;
+    }
+    setParsing(true);
+    setParseError("");
+    try {
+      const result = await parseMesinAbsensiXLS(file);
+      if (!result.karyawan || result.karyawan.length === 0) {
+        setParseError("Tidak ada data karyawan yang terbaca dari file ini. Pastikan ini file \"LAP REKAPITULASI\" asli dari mesin absensi fingerprint (.xls).");
+        setParsing(false);
+        return;
+      }
+      setRawParsed(result);
+      setPeriodeEdit(result.periode || {
+        mulai: "",
+        selesai: ""
+      });
+      setHariLibur(0);
+      setPenyesuaian([]);
+      setPreview(null);
+    } catch (err) {
+      setParseError("Gagal membaca file: " + err.message);
+    }
+    setParsing(false);
+  };
+  const addPenyesuaianRow = () => setPenyesuaian([...penyesuaian, blankPenyesuaian()]);
+  const updatePenyesuaianRow = (i, field, val) => {
+    const arr = [...penyesuaian];
+    arr[i] = {
+      ...arr[i],
+      [field]: val
+    };
+    setPenyesuaian(arr);
+  };
+  const removePenyesuaianRow = i => setPenyesuaian(penyesuaian.filter((_, idx) => idx !== i));
+  const doHitung = () => {
+    if (!rawParsed) return;
+    if (!periodeEdit.mulai || !periodeEdit.selesai) {
+      alert("Periode mulai/selesai wajib diisi (cek juga apakah terdeteksi otomatis dari file).");
+      return;
+    }
+    setPreview(hitungKoreksiAbsensi(rawParsed.karyawan, hariLibur, penyesuaian));
+  };
+  const doSimpan = () => {
+    if (!preview) return;
+    const now = new Date().toISOString();
+    const rows = preview.map(k => ({
+      id: "REKAP-" + uid(),
+      periodeMulai: periodeEdit.mulai,
+      periodeSelesai: periodeEdit.selesai,
+      namaKaryawan: k.nama,
+      karyawanId: k.karyawanId,
+      normalHari: k.normalEdit,
+      riilHari: k.riilEdit,
+      absenHari: k.absenEdit,
+      terlambatJam: k.terlambat,
+      plgCptJam: k.plgCpt,
+      lemburJam: k.lembur,
+      lemburLiburJam: k.lemburLiburEdit || 0,
+      jmlIjinHari: k.jmlIjinEdit,
+      dLuarHari: k.dLuarEdit,
+      sakitHari: k.sakitEdit,
+      cutiHari: k.cutiEdit,
+      ijinHari: k.ijinEdit,
+      scanKali: k.scan,
+      jamKerja: k.jamKerja,
+      uangMakan: uangMakanRow(k.nama, k.riilEdit),
+      dibuatOleh: session.nama,
+      createdAt: now
+    }));
+    // Replace-on-save: drop any existing rows already saved for this exact periode before
+    // inserting the freshly computed batch, so re-uploading/re-correcting the same week (e.g.
+    // HRD realizes a dinas-luar entry was missed) doesn't leave stale duplicate rows behind.
+    setRekapAbsensi(prev => {
+      const kept = (prev || []).filter(r => !(r.periodeMulai === periodeEdit.mulai && r.periodeSelesai === periodeEdit.selesai));
+      return [...kept, ...rows];
+    });
+    // Auto-potong cuti: 1 hari kerja = 8 jam. Akumulasikan (absenEdit hari x 8) + terlambat (jam)
+    // per karyawan ke saldo berjalan Employee.absenTerlambatJamSisa; setiap kali saldo genap
+    // melewati kelipatan 8 jam, otomatis catat 1 hari "Cuti" baru di Absensi (mengurangi kuota
+    // cuti tahunan lewat mekanisme yang sudah ada) dan sisakan remainder-nya untuk periode berikut.
+    const potonganLog = [];
+    (preview || []).forEach(k => {
+      const jamBaru = (Number(k.absenEdit) || 0) * 8 + (Number(k.terlambat) || 0);
+      if (jamBaru <= 0) return;
+      const emp = (employees || []).find(e => e.nama === k.nama);
+      if (!emp) return;
+      const totalJam = (emp.absenTerlambatJamSisa || 0) + jamBaru;
+      const hariCuti = Math.floor(totalJam / 8);
+      const remainder = totalJam % 8;
+      setEmployees(prev => (prev || []).map(e => e.username === emp.username ? {
+        ...e,
+        absenTerlambatJamSisa: remainder
+      } : e));
+      if (hariCuti > 0) {
+        const cutiRows = Array.from({
+          length: hariCuti
+        }, (_, idx) => ({
+          id: "ATT-" + uid(),
+          username: emp.username,
+          tanggal: periodeEdit.selesai,
+          jamMasuk: "",
+          jamKeluar: "",
+          lembur: 0,
+          uangHarian: 0,
+          status: "Cuti",
+          catatan: `Auto-potong cuti dari akumulasi absen/terlambat (Rekap Mesin ${periodeEdit.mulai} s/d ${periodeEdit.selesai})`
+        }));
+        setAttendance(prev => [...(prev || []), ...cutiRows]);
+        logAudit(store, session, {
+          module: "Absensi - Rekap Mesin",
+          docNomor: `${periodeEdit.mulai} s/d ${periodeEdit.selesai}`,
+          action: "Auto-potong Cuti",
+          detail: `${emp.nama}: akumulasi ${jamBaru.toFixed(1)} jam (absen+terlambat), saldo jadi ${totalJam.toFixed(1)} jam → potong ${hariCuti} hari cuti, sisa saldo ${remainder.toFixed(1)} jam`
+        });
+        potonganLog.push(`${emp.nama}: -${hariCuti} hari cuti`);
+      }
+    });
+    logAudit(store, session, {
+      module: "Absensi - Rekap Mesin",
+      docNomor: `${periodeEdit.mulai} s/d ${periodeEdit.selesai}`,
+      action: "Simpan Rekap Absensi Mesin",
+      detail: `${rows.length} karyawan, hari libur nasional: ${hariLibur}`
+    });
+    alert(`Rekap absensi periode ${periodeEdit.mulai} s/d ${periodeEdit.selesai} berhasil disimpan (${rows.length} karyawan).` + (potonganLog.length ? `\n\n⚠ Auto-potong cuti (akumulasi absen+terlambat ≥ 8 jam):\n${potonganLog.join("\n")}` : ""));
+    resetUpload();
+  };
+  const [rekapFilter, setRekapFilter] = useState("");
+  const rekapFiltered = (rekapFilter.trim() ? (rekapAbsensi || []).filter(r => [r.periodeMulai, r.periodeSelesai, r.namaKaryawan].filter(Boolean).some(x => String(x).toLowerCase().includes(rekapFilter.trim().toLowerCase()))) : rekapAbsensi || []).slice().sort((a, b) => (b.periodeMulai || "").localeCompare(a.periodeMulai || "") || String(a.namaKaryawan || "").localeCompare(String(b.namaKaryawan || "")));
+  const exportRekap = () => exportToExcel(rekapFiltered.map(r => ({
+    Periode: `${r.periodeMulai} s/d ${r.periodeSelesai}`,
+    Nama: r.namaKaryawan,
+    "ID Karyawan": r.karyawanId,
+    Normal: r.normalHari,
+    Riil: r.riilHari,
+    Absen: r.absenHari,
+    "D.Luar": r.dLuarHari,
+    "Terlambat (jam)": r.terlambatJam,
+    "Plg. Cpt (jam)": r.plgCptJam,
+    "Lembur (jam)": r.lemburJam,
+    "Jml. Ijin": r.jmlIjinHari,
+    Sakit: r.sakitHari,
+    Cuti: r.cutiHari,
+    Ijin: r.ijinHari,
+    Scan: r.scanKali,
+    "Jam Kerja": r.jamKerja
+  })), "Rekap_Absensi_Mesin.xlsx", "Rekap Absensi");
+  const printLaporanMingguan = (mulai, selesai) => {
+    const rows = (rekapAbsensi || []).filter(r => r.periodeMulai === mulai && r.periodeSelesai === selesai).slice().sort((a, b) => String(a.namaKaryawan || "").localeCompare(String(b.namaKaryawan || "")));
+    if (rows.length === 0) return;
+    const totalUangMakan = rows.reduce((s, r) => s + (r.uangMakan || uangMakanRow(r.namaKaryawan, r.riilHari)), 0);
+    printDocument({
+      docType: "laporan",
+      docTitle: "Laporan Mingguan Absensi",
+      nomor: `${mulai} s/d ${selesai}`,
+      tanggal: today(),
+      tanggalLabel: "Dicetak Tanggal",
+      partyLabel: "Periode",
+      partyName: `${mulai} s/d ${selesai}`,
+      itemHeaders: ["Nama", "Normal", "Riil", "Absen", "D.Luar", "Trlmbt(j)", "Lembur(j)", "Cuti", "Ijin", "Sakit", "Jam Kerja", "Uang Makan"],
+      items: rows.map(r => [r.namaKaryawan, r.normalHari, r.riilHari, r.absenHari, r.dLuarHari, r.terlambatJam, r.lemburJam, r.cutiHari, r.ijinHari, r.sakitHari, r.jamKerja, fmt(r.uangMakan || uangMakanRow(r.namaKaryawan, r.riilHari))]),
+      subtotal: totalUangMakan,
+      total: totalUangMakan,
+      extraInfoRows: [["Jumlah Karyawan", rows.length], ["Total Uang Makan Periode", fmt(totalUangMakan)]],
+      dibuatOleh: {
+        nama: session.nama,
+        jabatan: session.jabatan || ""
+      },
+      hideCreatedBy: false,
+      disetujuiLabel: "Mengetahui HRD"
+    });
+  };
+  const deletePeriode = (mulai, selesai) => {
+    if (!confirm(`Hapus semua rekap tersimpan untuk periode ${mulai} s/d ${selesai}?`)) return;
+    setRekapAbsensi(prev => (prev || []).filter(r => !(r.periodeMulai === mulai && r.periodeSelesai === selesai)));
+    logAudit(store, session, {
+      module: "Absensi - Rekap Mesin",
+      docNomor: `${mulai} s/d ${selesai}`,
+      action: "Hapus Periode Rekap",
+      detail: ""
+    });
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 20
+    }
+  }, /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 10px",
+      color: theme.text,
+      fontSize: 15
+    }
+  }, "Step 1 — Upload File XLS dari Mesin Absensi"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 12px",
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Upload file mentah dari mesin fingerprint (format .xls, contoh nama file \"LAP REKAPITULASI - 09-06-2026 - 15-06-2026.xls\"). Maksimal 5MB."), /*#__PURE__*/React.createElement("input", {
+    ref: fileInputRef,
+    type: "file",
+    accept: ".xls",
+    onChange: handleFile,
+    style: {
+      color: theme.text,
+      fontSize: 13
+    }
+  }), parsing && /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: theme.muted,
+      fontSize: 12,
+      marginTop: 8
+    }
+  }, "Membaca file..."), parseError && /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: theme.red,
+      fontSize: 12,
+      marginTop: 8
+    }
+  }, parseError), rawParsed && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13,
+      color: theme.green,
+      margin: "0 0 8px"
+    }
+  }, `✓ ${rawParsed.karyawan.length} karyawan terbaca. Periode terdeteksi: ${rawParsed.periode.mulai || "?"} s/d ${rawParsed.periode.selesai || "?"}`), /*#__PURE__*/React.createElement("div", {
+    style: {
+      overflowX: "auto"
+    }
+  }, /*#__PURE__*/React.createElement(Table, {
+    headers: ["Nama", "ID", "Normal", "Riil", "Absen", "Trlmbt(j)", "Plg.Cpt(j)", "Lembur(j)", "Jml.Ijin", "D.Luar", "Sakit", "Cuti", "Ijin", "Scan", "Jam Kerja"],
+    rows: rawParsed.karyawan.map(k => [k.nama, k.karyawanId, k.normal, k.riil, k.absen, k.terlambat, k.plgCpt, k.lembur, k.jmlIjin, k.dLuar, k.sakit, k.cuti, k.ijin, k.scan, k.jamKerja]),
+    emptyMsg: "-"
+  })))), rawParsed && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 10px",
+      color: theme.text,
+      fontSize: 15
+    }
+  }, "Step 2 — Input Penyesuaian"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr 1fr",
+      gap: 14,
+      marginBottom: 16
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Periode Mulai",
+    type: "date",
+    value: periodeEdit.mulai,
+    onChange: v => setPeriodeEdit({
+      ...periodeEdit,
+      mulai: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Periode Selesai",
+    type: "date",
+    value: periodeEdit.selesai,
+    onChange: v => setPeriodeEdit({
+      ...periodeEdit,
+      selesai: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Hari Libur Nasional dalam Periode Ini",
+    type: "number",
+    value: hariLibur,
+    onChange: setHariLibur
+  })), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      margin: "0 0 10px"
+    }
+  }, "Tabel penyesuaian per karyawan — isi hanya untuk karyawan yang perlu dikoreksi (dinas luar, atau ijin/cuti/sakit tambahan yang belum tercatat mesin). Kosongkan field yang tidak perlu diubah; \"Normal Override\" hanya perlu diisi manual untuk kasus khusus di luar dinas-luar penuh (itu sudah otomatis)."), penyesuaian.length === 0 && /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      margin: "0 0 10px"
+    }
+  }, "Belum ada baris penyesuaian."), penyesuaian.map((p, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      display: "grid",
+      gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr 1fr 1fr auto",
+      gap: 8,
+      alignItems: "end",
+      marginBottom: 8,
+      padding: 10,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    label: "Nama",
+    value: p.nama,
+    onChange: v => updatePenyesuaianRow(i, "nama", v),
+    options: rawParsed.karyawan.map(k => ({
+      value: k.nama,
+      label: k.nama
+    }))
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "D.Luar (hari)",
+    type: "number",
+    value: p.dLuar,
+    onChange: v => updatePenyesuaianRow(i, "dLuar", v)
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Normal Override",
+    type: "number",
+    value: p.normalOverride,
+    onChange: v => updatePenyesuaianRow(i, "normalOverride", v)
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Ijin (hari)",
+    type: "number",
+    value: p.ijin,
+    onChange: v => updatePenyesuaianRow(i, "ijin", v)
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Cuti (hari)",
+    type: "number",
+    value: p.cuti,
+    onChange: v => updatePenyesuaianRow(i, "cuti", v)
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Sakit (hari)",
+    type: "number",
+    value: p.sakit,
+    onChange: v => updatePenyesuaianRow(i, "sakit", v)
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Lembur Libur (jam)",
+    type: "number",
+    value: p.lemburLibur,
+    onChange: v => updatePenyesuaianRow(i, "lemburLibur", v)
+  }), /*#__PURE__*/React.createElement(Btn, {
+    variant: "danger",
+    size: "sm",
+    onClick: () => removePenyesuaianRow(i)
+  }, "🗑️"))), /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    size: "sm",
+    onClick: addPenyesuaianRow
+  }, "+ Tambah Baris"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      marginTop: 16
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    onClick: doHitung
+  }, "🧮 Hitung & Preview"))), preview && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 10px",
+      color: theme.text,
+      fontSize: 15
+    }
+  }, "Step 3 — Preview & Simpan"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      overflowX: "auto"
+    }
+  }, /*#__PURE__*/React.createElement(Table, {
+    headers: ["Nama", "Normal", "Riil", "Absen", "D.Luar", "Trlmbt(j)", "Plg.Cpt(j)", "Lembur(j)", "Lmbr.Libur(j)", "Jml.Ijin", "Ijin", "Cuti", "Sakit", "Jam Kerja", "Uang Makan"],
+    rows: preview.map(k => [k.nama, k.normalEdit, k.riilEdit, k.absenEdit, k.dLuarEdit, k.terlambat, k.plgCpt, k.lembur, k.lemburLiburEdit || 0, k.jmlIjinEdit, k.ijinEdit, k.cutiEdit, k.sakitEdit, k.jamKerja, fmt(uangMakanRow(k.nama, k.riilEdit))]),
+    emptyMsg: "-"
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      gap: 10,
+      marginTop: 16
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: resetUpload
+  }, "❌ Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: doSimpan
+  }, "✅ Simpan ke Database"))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      flexWrap: "wrap",
+      gap: 10,
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: 0,
+      color: theme.text,
+      fontSize: 15
+    }
+  }, "Data Rekap Absensi Tersimpan"), /*#__PURE__*/React.createElement(ExportExcelBtn, {
+    onClick: exportRekap
+  })), /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari periode / nama...",
+    value: rekapFilter,
+    onChange: setRekapFilter,
+    style: {
+      marginBottom: 12
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      overflowX: "auto"
+    }
+  }, /*#__PURE__*/React.createElement(Table, {
+    headers: ["Periode", "Nama", "Normal", "Riil", "Absen", "D.Luar", "Trlmbt(j)", "Lembur(j)", "Cuti", "Ijin", "Sakit", "Jam Kerja", "Uang Makan", "Aksi"],
+    rows: rekapFiltered.map(r => [`${r.periodeMulai} s/d ${r.periodeSelesai}`, r.namaKaryawan, r.normalHari, r.riilHari, r.absenHari, r.dLuarHari, r.terlambatJam, r.lemburJam, r.cutiHari, r.ijinHari, r.sakitHari, r.jamKerja, fmt(r.uangMakan || uangMakanRow(r.namaKaryawan, r.riilHari)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => printLaporanMingguan(r.periodeMulai, r.periodeSelesai)
+    }, "🖨️"), /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "danger",
+      onClick: () => deletePeriode(r.periodeMulai, r.periodeSelesai)
+    }, "🗑️"))]),
+    emptyMsg: "Belum ada rekap absensi tersimpan"
+  }))));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
