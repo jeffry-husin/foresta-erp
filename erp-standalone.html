@@ -175,6 +175,31 @@ const genDocNumber = (arr, typeCode, numberField = "nomor") => {
   }, 0);
   return `${prefix}${String(maxSeq + 1).padStart(3, "0")}${suffix}`;
 };
+// Same numbering scheme as genDocNumber, but anchored to an explicit date instead of "now" and
+// fed by a shared running-counter object instead of scanning an array — used only by the
+// one-time legacy-number migration (see buildDocNumberMigrationPlan below) so a document that
+// actually happened in the past keeps a number reflecting that period, not the migration date.
+const genDocNumberForDate = (dateStr, typeCode, seqCounters) => {
+  const d = dateStr ? new Date(dateStr + "T00:00:00") : new Date();
+  const valid = !isNaN(d.getTime());
+  const month = valid ? d.getMonth() : new Date().getMonth();
+  const year = valid ? d.getFullYear() : new Date().getFullYear();
+  const prefix = typeCode + "-";
+  const suffix = `-FRT-${DOC_ROMAN_MONTHS[month]}-${year}`;
+  const key = prefix + suffix;
+  const next = (seqCounters[key] || 0) + 1;
+  seqCounters[key] = next;
+  return `${prefix}${String(next).padStart(3, "0")}${suffix}`;
+};
+// True if a nomor/id already matches the unified TYPE-000-FRT-ROMAN-YEAR format (optionally with
+// a "-R#" revision suffix) — used by the legacy-number migration to find what still needs
+// migrating. Only checks shape, not whether the year looks plausible (see anomaly check in
+// CompanySettingsModule's migration preview for that).
+const isUnifiedDocNumber = (val, typeCode) => {
+  if (!val) return true; // nothing to migrate
+  const re = new RegExp(`^${typeCode}-\\d{3}-FRT-(I|II|III|IV|V|VI|VII|VIII|IX|X|XI|XII)-\\d{4}(-R\\d+)?$`);
+  return re.test(val);
+};
 // Whole-day difference between a stored date string and today, for stale/follow-up checks.
 const daysSince = dateStr => {
   if (!dateStr) return 0;
@@ -1562,6 +1587,227 @@ function logAudit(store, session, {
     actorRole: session.role
   };
   store.setAuditLog([...store.auditLog, entry]);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// LEGACY DOCUMENT NUMBER MIGRATION — one-time, admin-triggered migration of any document
+// numbers still in an old/pre-unification format into the unified TYPE-000-FRT-ROMAN-YEAR
+// scheme (see genDocNumber above). Invoice numbers are deliberately EXCLUDED — per explicit
+// business decision, already-issued Invoice numbers have real tax/bookkeeping implications for
+// clients in Indonesia and must never be renamed by software. Triggered from the "Migrasi
+// Penomoran Dokumen Lama" card in CompanySettingsModule (Owner/GM only): first a read-only
+// preview (buildDocNumberMigrationPlan), reviewed by the user, then applied on confirmation
+// (applyDocNumberMigrationPlan). Every cross-reference to a renamed number — SO's sourceNomor,
+// IR/DO/Invoice/PartsUse/Visit's soNomor, PO's irNomors, GR's poNomor, Internal DO's grNomor,
+// Ticket's soNomors, Quotation's revisiDari chain (including "-R#" revision children), and the
+// Audit Trail's docNomor — is rewritten in the same pass so no link breaks.
+// ════════════════════════════════════════════════════════════════════════════
+const MIGRATION_TARGETS = [{
+  key: "quotationsUnit",
+  type: "UQ",
+  field: "nomor"
+}, {
+  key: "quotationsPS",
+  type: "SQ",
+  field: "nomor"
+}, {
+  key: "salesOrders",
+  type: "SO",
+  field: "nomor"
+}, {
+  key: "itemRequisitions",
+  type: "IR",
+  field: "nomor"
+}, {
+  key: "poLocal",
+  type: "PL",
+  field: "nomor"
+}, {
+  key: "poOverseas",
+  type: "PO",
+  field: "nomor"
+}, {
+  key: "goodsReceipts",
+  type: "GR",
+  field: "nomor"
+}, {
+  key: "deliveryOrders",
+  type: "DO",
+  field: "nomor"
+}, {
+  key: "tickets",
+  type: "TK",
+  field: "nomor"
+}, {
+  key: "leaveRequests",
+  type: "CT",
+  field: "id"
+}, {
+  key: "suratTugas",
+  type: "ST",
+  field: "nomor"
+}, {
+  key: "basts",
+  type: "BAPP",
+  field: "id"
+}, {
+  key: "inspectionReports",
+  type: "IN",
+  field: "id"
+}];
+const MIGRATION_MODULE_LABELS = {
+  quotationsUnit: "Unit Quotation",
+  quotationsPS: "Parts & Service Quotation",
+  salesOrders: "Sales Order",
+  itemRequisitions: "Item Requisition",
+  poLocal: "PO Lokal",
+  poOverseas: "PO Overseas",
+  goodsReceipts: "Goods Receipt",
+  deliveryOrders: "Delivery Order",
+  tickets: "Ticketing",
+  leaveRequests: "Form Cuti",
+  suratTugas: "Surat Tugas",
+  basts: "BAPP",
+  inspectionReports: "Inspection Report"
+};
+// Pure/read-only: scans every migration-eligible collection for numbers not yet in unified
+// format, and assigns each a new number using its OWN date (not today's), per-type-per-month,
+// continuing on from the highest sequence already used by genuinely-unified numbers of that
+// same type+month+year so migrated numbers never collide with numbers genDocNumber already
+// issued normally.
+function buildDocNumberMigrationPlan(store) {
+  const seqCounters = {};
+  MIGRATION_TARGETS.forEach(({
+    key,
+    type,
+    field
+  }) => {
+    (store[key] || []).forEach(rec => {
+      const val = rec && rec[field];
+      if (val && isUnifiedDocNumber(val, type) && !/-R\d+$/.test(val)) {
+        const m = val.match(new RegExp(`^${type}-(\\d{3})-FRT-(.+)-(\\d{4})$`));
+        if (m) {
+          const seqKey = `${type}--FRT-${m[2]}-${m[3]}`;
+          const n = parseInt(m[1], 10);
+          if (!isNaN(n) && n > (seqCounters[seqKey] || 0)) seqCounters[seqKey] = n;
+        }
+      }
+    });
+  });
+  const flatRenameMap = {}; // old nomor (any type) -> new nomor; used to rewrite cross-references generically
+  const plan = [];
+  MIGRATION_TARGETS.forEach(({
+    key,
+    type,
+    field
+  }) => {
+    const arr = store[key] || [];
+    const oldRecords = arr.map((rec, idx) => ({
+      rec,
+      idx
+    })).filter(({
+      rec
+    }) => {
+      const val = rec && rec[field];
+      return val && !isUnifiedDocNumber(val, type);
+    }).sort((a, b) => (a.rec.tanggal || "").localeCompare(b.rec.tanggal || "") || a.idx - b.idx);
+    oldRecords.forEach(({
+      rec
+    }) => {
+      const oldVal = rec[field];
+      const newVal = genDocNumberForDate(rec.tanggal, type, seqCounters);
+      flatRenameMap[oldVal] = newVal;
+      plan.push({
+        module: key,
+        field,
+        oldNomor: oldVal,
+        newNomor: newVal,
+        tanggal: rec.tanggal || "-"
+      });
+    });
+  });
+  return {
+    plan,
+    flatRenameMap
+  };
+}
+// Rewrites any string field (or array-of-strings field) on a record that exactly matches an old
+// nomor being migrated — or that old nomor plus a "-R#" revision suffix — with its new nomor.
+// Covers both a record's own number field and every cross-reference field across the app without
+// needing to hand-list every field name.
+function rewriteRecordNomors(rec, flatRenameMap) {
+  let changed = false;
+  const next = {
+    ...rec
+  };
+  const rewriteStr = v => {
+    if (flatRenameMap[v]) return flatRenameMap[v];
+    const m = v.match(/^(.+)(-R\d+)$/);
+    if (m && flatRenameMap[m[1]]) return flatRenameMap[m[1]] + m[2];
+    return v;
+  };
+  Object.keys(next).forEach(k => {
+    const v = next[k];
+    if (typeof v === "string" && v) {
+      const rv = rewriteStr(v);
+      if (rv !== v) {
+        next[k] = rv;
+        changed = true;
+      }
+    } else if (Array.isArray(v) && v.length && v.every(x => typeof x === "string")) {
+      const rv = v.map(rewriteStr);
+      if (rv.some((x, i) => x !== v[i])) {
+        next[k] = rv;
+        changed = true;
+      }
+    }
+  });
+  return changed ? next : rec;
+}
+// Applies a previously-built migration plan: rewrites every migrated record's own nomor/id plus
+// every cross-reference to it, across ALL collections — including Invoice, whose own `nomor` is
+// never touched (it's excluded from MIGRATION_TARGETS so it never appears as a flatRenameMap
+// key) but whose `soNomor` cross-reference IS updated if the Sales Order it points to was
+// renamed. Each collection is written with the functional-update form (re-fetches latest server
+// data first) per the usePersisted concurrency-safety convention.
+function applyDocNumberMigrationPlan(store, session, {
+  plan,
+  flatRenameMap
+}) {
+  if (!plan || plan.length === 0) return 0;
+  const setterFor = {
+    quotationsUnit: store.setQuotationsUnit,
+    quotationsPS: store.setQuotationsPS,
+    salesOrders: store.setSalesOrders,
+    itemRequisitions: store.setItemRequisitions,
+    poLocal: store.setPoLocal,
+    poOverseas: store.setPoOverseas,
+    goodsReceipts: store.setGoodsReceipts,
+    deliveryOrders: store.setDeliveryOrders,
+    tickets: store.setTickets,
+    leaveRequests: store.setLeaveRequests,
+    suratTugas: store.setSuratTugas,
+    basts: store.setBasts,
+    inspectionReports: store.setInspectionReports,
+    invoices: store.setInvoices,
+    internalDOs: store.setInternalDOs,
+    partsUse: store.setPartsUse,
+    visits: store.setVisits,
+    auditLog: store.setAuditLog,
+    editRequests: store.setEditRequests
+  };
+  Object.keys(setterFor).forEach(key => {
+    const setter = setterFor[key];
+    if (!setter) return;
+    setter(prev => (prev || []).map(rec => rewriteRecordNomors(rec, flatRenameMap)));
+  });
+  logAudit(store, session, {
+    module: "Sistem",
+    docNomor: "-",
+    action: "Migrasi Penomoran Dokumen",
+    detail: `${plan.length} nomor dokumen lama dimigrasi ke format unified TYPE-000-FRT-ROMAN-YEAR (Invoice dikecualikan)`
+  });
+  return plan.length;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -23553,6 +23799,49 @@ function CompanySettingsModule({
   } = store;
   const [form, setForm] = useState(companySettings);
   const [saved, setSaved] = useState(false);
+  const isOwnerLike = ["owner", "gm", "finance_director"].includes(session.role);
+  const [migrationPreview, setMigrationPreview] = useState(null);
+  const [migrationResult, setMigrationResult] = useState(null);
+  const checkLegacyNumbers = () => {
+    const result = buildDocNumberMigrationPlan(store);
+    // Flag already-unified-format numbers whose year looks implausible (typo/corrupt data) so
+    // the user can review them by hand — migration intentionally does not auto-touch these,
+    // since they already structurally match the expected format.
+    const anomalies = [];
+    MIGRATION_TARGETS.forEach(({
+      key,
+      type,
+      field
+    }) => {
+      (store[key] || []).forEach(rec => {
+        const val = rec && rec[field];
+        if (val && isUnifiedDocNumber(val, type)) {
+          const m = val.match(/-(\d{4})(?:-R\d+)?$/);
+          if (m) {
+            const yr = parseInt(m[1], 10);
+            const nowYr = new Date().getFullYear();
+            if (yr < nowYr - 2 || yr > nowYr + 1) anomalies.push({
+              module: key,
+              nomor: val,
+              tanggal: rec.tanggal || "-"
+            });
+          }
+        }
+      });
+    });
+    setMigrationPreview({
+      ...result,
+      anomalies
+    });
+    setMigrationResult(null);
+  };
+  const runMigration = () => {
+    if (!migrationPreview || migrationPreview.plan.length === 0) return;
+    if (!window.confirm(`Migrasi ${migrationPreview.plan.length} nomor dokumen lama ke format baru?\n\nNomor Invoice yang sudah terbit TIDAK akan diubah. Semua referensi silang (SO, IR, PO, GR, DO, dll) akan ikut diperbarui otomatis.\n\nLanjutkan?`)) return;
+    const count = applyDocNumberMigrationPlan(store, session, migrationPreview);
+    setMigrationResult(count);
+    setMigrationPreview(null);
+  };
   // companySettings loads asynchronously from Supabase after mount (and updates again right
   // after save()); re-sync the form whenever the underlying saved value changes so edits are
   // never made against a stale placeholder. Safe because this only changes on load/save, not
@@ -23578,6 +23867,90 @@ function CompanySettingsModule({
     setSaved(true);
     setTimeout(() => setSaved(false), 3000);
   };
+  // Built as separate variables (rather than one giant inline nested expression) so the
+  // migration card's JSX stays easy to read and its parens easy to verify.
+  const migrationTable = /*#__PURE__*/React.createElement("div", {
+    style: {
+      maxHeight: 320,
+      overflow: "auto",
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8
+    }
+  }, /*#__PURE__*/React.createElement(Table, {
+    headers: ["Modul", "Tanggal", "No. Lama", "No. Baru"],
+    rows: migrationPreview ? migrationPreview.plan.map(p => [MIGRATION_MODULE_LABELS[p.module] || p.module, p.tanggal, p.oldNomor, p.newNomor]) : []
+  }));
+  const migrationButtonsRow = /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    onClick: runMigration
+  }, "Jalankan Migrasi"), /*#__PURE__*/React.createElement(Btn, {
+    variant: "secondary",
+    onClick: () => setMigrationPreview(null)
+  }, "Batal"));
+  const migrationAnomalyBox = migrationPreview && migrationPreview.anomalies.length > 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.yellow || "#b45309",
+      background: "#fef3c7",
+      padding: "10px 14px",
+      borderRadius: 8,
+      lineHeight: 1.6
+    }
+  }, /*#__PURE__*/React.createElement("strong", null, "⚠ ", migrationPreview.anomalies.length, " nomor sudah berformat unified tapi tahunnya janggal (kemungkinan typo/data lama)"), " — tidak ikut diubah otomatis, tolong periksa manual: ", migrationPreview.anomalies.map(a => `${a.nomor} (${MIGRATION_MODULE_LABELS[a.module] || a.module})`).join(", ")) : null;
+  const migrationPreviewHeader = migrationPreview && migrationPreview.plan.length === 0 ? /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13,
+      color: theme.muted
+    }
+  }, "Tidak ada nomor dokumen lama yang perlu dimigrasi. Semua sudah dalam format unified.") : migrationPreview ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13,
+      color: theme.text,
+      fontWeight: 600,
+      margin: 0
+    }
+  }, migrationPreview.plan.length, " nomor dokumen lama ditemukan. Preview perubahan:"), migrationTable, migrationButtonsRow) : null;
+  const migrationPreviewBody = migrationPreview ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 12
+    }
+  }, migrationPreviewHeader, migrationAnomalyBox) : null;
+  const migrationCard = isOwnerLike ? /*#__PURE__*/React.createElement(Card, {
+    style: {
+      maxWidth: 760
+    }
+  }, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 8px",
+      color: theme.text
+    }
+  }, "Migrasi Penomoran Dokumen Lama"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13,
+      color: theme.muted,
+      margin: "0 0 14px",
+      lineHeight: 1.6
+    }
+  }, "Mengubah nomor dokumen lama (sebelum penomoran unified TYPE-000-FRT-ROMAN-TAHUN diterapkan) ke format baru — Unit Quotation, Parts & Service Quotation, Sales Order, Item Requisition, PO Lokal/Overseas, Goods Receipt, Delivery Order, Ticketing, Form Cuti, Surat Tugas, BAPP, dan Inspection Report. ", /*#__PURE__*/React.createElement("strong", null, "Nomor Invoice yang sudah terbit TIDAK ikut dimigrasi"), " (implikasi pajak/pembukuan client). Semua referensi silang antar dokumen ikut diperbarui otomatis agar tidak ada link yang putus."), migrationResult !== null && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: theme.green,
+      background: theme.green + "11",
+      padding: "8px 14px",
+      borderRadius: 8,
+      border: `1px solid ${theme.green}44`,
+      marginBottom: 14
+    }
+  }, "✓ ", migrationResult, " nomor dokumen berhasil dimigrasi."), !migrationPreview && /*#__PURE__*/React.createElement(Btn, {
+    variant: "secondary",
+    onClick: checkLegacyNumbers
+  }, "Cek Dokumen Lama"), migrationPreviewBody) : null;
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -23684,7 +24057,7 @@ function CompanySettingsModule({
     }
   }, /*#__PURE__*/React.createElement(Btn, {
     onClick: save
-  }, "Simpan Pengaturan")))));
+  }, "Simpan Pengaturan")))), migrationCard);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
