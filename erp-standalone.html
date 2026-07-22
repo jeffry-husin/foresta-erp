@@ -5444,9 +5444,12 @@ function CustomerDB({
       ...form,
       salesManager: v
     }),
-    options: SALES_MANAGERS.slice(0, 3).map(s => ({
-      value: s,
-      label: s
+    // Pull the real roster of registered Sales Manager users (Manajemen User) instead of the old
+    // hardcoded SALES_MANAGERS placeholder list (which was capped at 3 names and never updated as
+    // new sales managers like David were added).
+    options: (authUsers || []).filter(u => u.role === "sales_manager").map(u => ({
+      value: u.nama,
+      label: u.nama
     }))
   }), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -15653,7 +15656,10 @@ function GoodsReceiptModule({
   });
   const [namaManual, setNamaManual] = useState(false);
   const [confirmItems, setConfirmItems] = useState([]);
-  const mekanikList = employees.filter(e => e.role === "mekanik").map(e => e.nama);
+  // Receiver name list: mechanics (who receive directly at Workshop) PLUS Purchasing staff (who
+  // are the ones actually receiving goods at the Head Office when diterimaOleh === "Head Office" —
+  // previously only mechanics were selectable here, which didn't match how goods actually arrive.
+  const mekanikList = employees.filter(e => ["mekanik", "purchasing", "purchasing_overseas"].includes(e.role)).map(e => e.nama);
   const remainingQty = (po, partNumber, qty) => qty - (po.receivedMap?.[partNumber] || 0);
   const approvedPOs = [...poLocal.filter(p => (p.status === "Disetujui GM - Kirim ke Supplier" || p.status === "Diterima Sebagian") && p.items.some(it => remainingQty(p, it.partNumber, it.qty) > 0)).map(p => ({
     ...p,
@@ -16419,7 +16425,7 @@ function GoodsReceiptModule({
       label: "Workshop (Final/Langsung)"
     }]
   }), !namaManual ? /*#__PURE__*/React.createElement(Select, {
-    label: "Nama Mekanik Penerima",
+    label: "Nama Penerima (Mekanik/Purchasing)",
     value: form.mekanikNama,
     onChange: v => setForm({
       ...form,
@@ -16430,7 +16436,7 @@ function GoodsReceiptModule({
       label: n
     }))
   }) : /*#__PURE__*/React.createElement(Input, {
-    label: "Nama Mekanik Penerima (Manual)",
+    label: "Nama Penerima (Manual)",
     value: form.mekanikNama,
     onChange: v => setForm({
       ...form,
@@ -20084,7 +20090,8 @@ function TicketingModule({
   }));
   const save = () => {
     if (!form.dari || !form.ke || !form.harga || form.mekanikNamaList.length === 0) return alert("Dari, Ke, Harga, dan minimal 1 nama peserta wajib diisi");
-    if (form.soNomors.length === 0) return alert("Pilih minimal 1 project (Sales Order)");
+    // Sales Order project is optional — not every trip is tied to a specific SO (e.g. general
+    // survey, internal errand, or a project not yet formalized into an SO).
     const hargaSatuan = parseFloat(form.harga) || 0;
     const jumlahOrang = form.mekanikNamaList.length;
     const baseItem = {
@@ -20329,10 +20336,15 @@ function TicketingModule({
       flexWrap: "wrap",
       gap: 6
     }
-  }, detail.soNomors.map(n => /*#__PURE__*/React.createElement(Badge, {
+  }, (detail.soNomors || []).length > 0 ? detail.soNomors.map(n => /*#__PURE__*/React.createElement(Badge, {
     key: n,
     color: theme.purple
-  }, n))), detail.catatan && /*#__PURE__*/React.createElement("div", {
+  }, n)) : /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "- (tidak terkait project tertentu)")), detail.catatan && /*#__PURE__*/React.createElement("div", {
     style: {
       whiteSpace: "pre-wrap",
       wordBreak: "break-word"
@@ -20487,11 +20499,7 @@ function TicketingModule({
       display: "block",
       marginBottom: 8
     }
-  }, "Project (Sales Order) — bisa pilih lebih dari satu ", /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: theme.red
-    }
-  }, "*")), /*#__PURE__*/React.createElement("div", {
+  }, "Project (Sales Order) — opsional, bisa pilih lebih dari satu"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       flexWrap: "wrap",
@@ -24169,10 +24177,16 @@ function KPISalesModule({
     salesActivities,
     quotationsUnit,
     salesOrders,
-    invoices
+    invoices,
+    employees
   } = store;
   const isSalesManager = session.role === "sales_manager";
-  const salesManagerNames = [...new Set([...quotationsUnit.map(q => q.salesManagerNama), ...salesOrders.map(so => so.salesManagerNama)].filter(Boolean))];
+  // Base the roster on every registered user with role sales_manager (Master User), not just names
+  // that happen to already appear on a quotation/SO — otherwise a sales manager with zero
+  // transactions so far (e.g. newly added, like David) silently never shows up in KPI Sales at
+  // all. Still merge in any stray salesManagerNama values found on old records as a fallback, in
+  // case of legacy data recorded under a name not present in Master User.
+  const salesManagerNames = [...new Set([...(employees || []).filter(e => e.role === "sales_manager").map(e => e.nama), ...quotationsUnit.map(q => q.salesManagerNama), ...salesOrders.map(so => so.salesManagerNama)].filter(Boolean))];
   const targetNames = isSalesManager ? [session.nama] : salesManagerNames;
   const stats = targetNames.map(nama => {
     const contacts = salesActivities.filter(a => a.salesNama === nama).length;
