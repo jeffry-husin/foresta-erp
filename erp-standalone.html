@@ -12023,6 +12023,7 @@ function SalesOrderModule({
   const openEditSO = so => {
     setEditSO(so);
     setEditForm({
+      tanggal: so.tanggal || "",
       noPoClient: so.noPoClient || "",
       tanggalPO: so.tanggalPO || "",
       tanggalDelivery: so.tanggalDelivery || "",
@@ -12038,6 +12039,7 @@ function SalesOrderModule({
     if (!editSO || !editForm) return;
     setSalesOrders(salesOrders.map(so => so.nomor === editSO.nomor ? {
       ...so,
+      tanggal: editForm.tanggal || so.tanggal,
       noPoClient: editForm.noPoClient,
       tanggalPO: editForm.tanggalPO,
       tanggalDelivery: editForm.tanggalDelivery,
@@ -12052,7 +12054,7 @@ function SalesOrderModule({
       module: "Sales Order",
       docNomor: editSO.nomor,
       action: "Revisi",
-      detail: "Update data SO (No. PO/tanggal/catatan/pengiriman)"
+      detail: `Update data SO (tanggal SO: ${editForm.tanggal || "-"}, No. PO/tanggal PO/catatan/pengiriman)`
     });
     setEditSO(null);
     setEditForm(null);
@@ -12817,6 +12819,14 @@ function SalesOrderModule({
       color: theme.muted
     }
   }, "Item dan harga SO tidak dapat diubah di sini — hanya data pendukung (No. PO, tanggal, catatan, info pengiriman)."), /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal SO",
+    type: "date",
+    value: editForm.tanggal,
+    onChange: v => setEditForm({
+      ...editForm,
+      tanggal: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
     label: "No. Purchase Order Client",
     value: editForm.noPoClient,
     onChange: v => setEditForm({
@@ -13015,7 +13025,7 @@ function ItemRequisitionModule({
   const canManage = isPipin || isOwnerLike || isSepti;
   const activeSO = salesOrders.filter(so => so.status === "Aktif");
   const [irSearch, setIrSearch] = useState("");
-  const itemRequisitionsFiltered = (irSearch.trim() ? itemRequisitions.filter(r => [r.nomor, r.soNomor].filter(Boolean).some(x => String(x).toLowerCase().includes(irSearch.trim().toLowerCase()))) : itemRequisitions).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  const itemRequisitionsFiltered = (irSearch.trim() ? itemRequisitions.filter(r => [r.nomor, r.soNomor, r.soCustomerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(irSearch.trim().toLowerCase()))) : itemRequisitions).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState(null);
   const [manualModal, setManualModal] = useState(false);
@@ -13025,6 +13035,7 @@ function ItemRequisitionModule({
   // explicitly click "Terapkan Perubahan Ini", which is logged to Audit Trail.
   const [recheckModal, setRecheckModal] = useState(null); // { ir, diff }
   const blankManualForm = {
+    tanggal: today(),
     soNomor: "",
     partNumber: "",
     partName: "",
@@ -13034,6 +13045,7 @@ function ItemRequisitionModule({
   };
   const [manualForm, setManualForm] = useState(blankManualForm);
   const [form, setForm] = useState({
+    tanggal: today(),
     soNomor: "",
     items: []
   });
@@ -13048,6 +13060,7 @@ function ItemRequisitionModule({
     setModal(false);
     setEditingNomor(null);
     setForm({
+      tanggal: today(),
       soNomor: "",
       items: []
     });
@@ -13068,6 +13081,7 @@ function ItemRequisitionModule({
     if (editingNomor) {
       setItemRequisitions(itemRequisitions.map(r => r.nomor === editingNomor ? {
         ...r,
+        tanggal: manualForm.tanggal || r.tanggal,
         soNomor: manualForm.soNomor || "",
         soCustomerNama: so?.customerNama || "",
         bomCandidate: true,
@@ -13082,7 +13096,7 @@ function ItemRequisitionModule({
     } else {
       setItemRequisitions(prev => [...prev, {
         nomor: newNomor(prev),
-        tanggal: today(),
+        tanggal: manualForm.tanggal || today(),
         soNomor: manualForm.soNomor || "",
         soCustomerNama: so?.customerNama || "",
         bomCandidate: true,
@@ -13216,6 +13230,7 @@ function ItemRequisitionModule({
     }
     setEditingNomor(null);
     setForm({
+      tanggal: today(),
       soNomor,
       items: shortItems
     });
@@ -13251,6 +13266,7 @@ function ItemRequisitionModule({
     if (r.bomCandidate) {
       const it = r.items[0] || {};
       setManualForm({
+        tanggal: r.tanggal || today(),
         soNomor: r.soNomor || "",
         partNumber: it.partNumber || "",
         partName: it.partName || "",
@@ -13261,6 +13277,7 @@ function ItemRequisitionModule({
       setManualModal(true);
     } else {
       setForm({
+        tanggal: r.tanggal || today(),
         soNomor: r.soNomor,
         items: r.items.map(it => ({
           ...it
@@ -13275,6 +13292,7 @@ function ItemRequisitionModule({
     if (editingNomor) {
       setItemRequisitions(itemRequisitions.map(r => r.nomor === editingNomor ? {
         ...r,
+        tanggal: form.tanggal || r.tanggal,
         soNomor: form.soNomor,
         items: form.items
       } : r));
@@ -13299,7 +13317,7 @@ function ItemRequisitionModule({
       });
       setItemRequisitions(prev => [...prev, {
         nomor: newNomor(prev),
-        tanggal: today(),
+        tanggal: form.tanggal || today(),
         soNomor: form.soNomor,
         soCustomerNama: so?.customerNama || "",
         items: form.items,
@@ -13445,7 +13463,7 @@ function ItemRequisitionModule({
       border: `1px dashed ${theme.border}`
     }
   }, "ℹ️ Item Requisition hanya dibuat jika ", React.createElement("strong", null, "stock kurang"), " dari Sales Order, atau permintaan part baru di luar SO (kandidat update BOM, SO opsional). Harga tidak ditampilkan di sini."), React.createElement(Card, null, React.createElement(Input, {
-    placeholder: "Cari no. requisition / no. SO...",
+    placeholder: "Cari no. requisition / no. SO / nama client...",
     value: irSearch,
     onChange: setIrSearch,
     style: {
@@ -13710,7 +13728,15 @@ function ItemRequisitionModule({
     style: {
       color: theme.text
     }
-  }, form.soNomor)), form.items.map((it, i) => React.createElement("div", {
+  }, form.soNomor)), React.createElement(Input, {
+    label: "Tanggal IR",
+    type: "date",
+    value: form.tanggal,
+    onChange: v => setForm({
+      ...form,
+      tanggal: v
+    })
+  }), form.items.map((it, i) => React.createElement("div", {
     key: i,
     style: {
       border: `1px solid ${theme.border}`,
@@ -13790,7 +13816,15 @@ function ItemRequisitionModule({
       fontSize: 12,
       color: theme.muted
     }
-  }, "Untuk part yang tidak ada di item list Sales Order. Sales Order bersifat opsional — dapat dikaitkan dengan project yang berjalan, atau dibiarkan kosong sebagai kandidat update BOM umum."), React.createElement(Select, {
+  }, "Untuk part yang tidak ada di item list Sales Order. Sales Order bersifat opsional — dapat dikaitkan dengan project yang berjalan, atau dibiarkan kosong sebagai kandidat update BOM umum."), React.createElement(Input, {
+    label: "Tanggal",
+    type: "date",
+    value: manualForm.tanggal,
+    onChange: v => setManualForm({
+      ...manualForm,
+      tanggal: v
+    })
+  }), React.createElement(Select, {
     label: "Sales Order Terkait (opsional)",
     value: manualForm.soNomor,
     onChange: v => setManualForm({
