@@ -91,19 +91,19 @@ function markAuthReady() {
 // THEME
 // ════════════════════════════════════════════════════════════════════════════
 const theme = {
-  bg: "#0d1117",
-  surface: "#151b23",
-  card: "#1c2530",
-  border: "#2d3848",
-  accent: "#3b82f6",
-  accentLight: "#60a5fa",
-  green: "#22c55e",
-  red: "#ef4444",
-  yellow: "#f59e0b",
-  purple: "#a855f7",
-  cyan: "#06b6d4",
-  text: "#e6edf3",
-  muted: "#7d8896"
+  bg: "#f4f6f9",
+  surface: "#eef1f5",
+  card: "#ffffff",
+  border: "#dbe1e8",
+  accent: "#2563eb",
+  accentLight: "#3b82f6",
+  green: "#16a34a",
+  red: "#dc2626",
+  yellow: "#b45309",
+  purple: "#9333ea",
+  cyan: "#0891b2",
+  text: "#1e293b",
+  muted: "#64748b"
 };
 const fmt = n => new Intl.NumberFormat("id-ID", {
   style: "currency",
@@ -950,6 +950,18 @@ function getAllowedModules(role, customModules) {
 // Payroll hard rule: only owner/gm regardless of role list
 function hasPayrollAccess(role) {
   return role === "owner" || role === "gm" || role === "hrd_payroll";
+}
+// FULL/ADMIN ACCESS PER MODULE — many modules distinguish between "can see this module at all"
+// (customModules / role default list) and "can see everyone's data + do admin actions within it"
+// (historically hardcoded to specific roles like owner/gm/hrd_payroll). That meant granting a
+// module via User Management → Akses Modul didn't always give the intended full functionality.
+// This lets an Owner/GM explicitly grant full/admin-level access to a specific module for a
+// specific user, stored as a "<moduleId>:admin" pseudo-entry alongside the normal module id in
+// the same custom_modules array (no schema change needed; bogus ids are already safely ignored
+// everywhere ALL_MODULES.find/includes is used for menu building).
+function hasAdminModule(session, moduleId) {
+  if (!session) return false;
+  return Array.isArray(session.customModules) && session.customModules.includes(`${moduleId}:admin`);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -12144,8 +12156,14 @@ function SalesOrderModule({
       detail: `${so.customerNama} — ${fmt(so.total)}${so.sourceNomor ? ` — Quotation ${so.sourceNomor} dibuka kembali untuk SO baru` : ""}`
     });
   };
-  const approvedUnit = quotationsUnit.filter(q => q.status === "Disetujui GM");
-  const approvedPS = quotationsPS.filter(q => q.status === "Disetujui GM");
+  // Defensive double-check on top of the status filter: a quotation is only eligible to pull into
+  // a new SO if its status is "Disetujui GM" AND no live Sales Order already references it as its
+  // source — this guards against the status field ever getting out of sync (e.g. a bug or manual
+  // data fix) and a quotation that's already been pulled reappearing in the picker.
+  const quotAlreadyHasSO = nomor => salesOrders.some(so => so.sourceNomor === nomor);
+  const [pullSearch, setPullSearch] = useState("");
+  const approvedUnit = quotationsUnit.filter(q => q.status === "Disetujui GM" && !quotAlreadyHasSO(q.nomor)).filter(q => !pullSearch.trim() || [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(pullSearch.trim().toLowerCase())));
+  const approvedPS = quotationsPS.filter(q => q.status === "Disetujui GM" && !quotAlreadyHasSO(q.nomor)).filter(q => !pullSearch.trim() || [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(pullSearch.trim().toLowerCase())));
   const [soSearch, setSoSearch] = useState("");
   const salesOrdersFiltered = (soSearch.trim() ? salesOrders.filter(so => [so.nomor, so.customerNama, so.salesManagerNama, so.sourceNomor].filter(Boolean).some(x => String(x).toLowerCase().includes(soSearch.trim().toLowerCase()))) : salesOrders).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   // Compute the next number from the max existing sequence in the given (ideally freshly-fetched)
@@ -12390,7 +12408,10 @@ function SalesOrderModule({
   })), /*#__PURE__*/React.createElement(Modal, {
     open: pullModal,
     title: "Pilih Quotation yang Sudah Disetujui GM",
-    onClose: () => setPullModal(false),
+    onClose: () => {
+      setPullModal(false);
+      setPullSearch("");
+    },
     width: 680
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -12398,7 +12419,11 @@ function SalesOrderModule({
       flexDirection: "column",
       gap: 16
     }
-  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
+  }, /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari no. quotation / nama client...",
+    value: pullSearch,
+    onChange: setPullSearch
+  }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
     style: {
       margin: "0 0 8px",
       color: theme.muted,
@@ -13011,7 +13036,6 @@ function ItemRequisitionModule({
   });
   const [soPickerOpen, setSoPickerOpen] = useState(false);
   const [soPickerSearch, setSoPickerSearch] = useState("");
-  const soPickerList = soPickerSearch.trim() ? activeSO.filter(so => [so.nomor, so.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(soPickerSearch.trim().toLowerCase()))) : activeSO;
   const closeManualModal = () => {
     setManualModal(false);
     setEditingNomor(null);
@@ -13150,6 +13174,13 @@ function ItemRequisitionModule({
       };
     }).filter(x => x.qtyKurang > 0); // only short items
   };
+  // "+ Buat IR dari SO" picker: an active SO should stop appearing here once it's already been
+  // fully turned into Item Requisition(s) — i.e. current stock now covers every item on the SO
+  // (checkStockForSO returns no shortfall). If the SO still has items not yet covered by an IR
+  // (partially converted, or never requisitioned at all), it keeps showing so HRD/Purchasing can
+  // still pull the remaining items.
+  const soPickerEligible = activeSO.filter(so => checkStockForSO(so.nomor).length > 0);
+  const soPickerList = soPickerSearch.trim() ? soPickerEligible.filter(so => [so.nomor, so.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(soPickerSearch.trim().toLowerCase()))) : soPickerEligible;
   // Traces IR -> PO (Lokal/Overseas, matched via po.irNomors) -> per-part received qty
   // (summed from po.receivedMap, which Goods Receipt maintains as items get received at
   // Office/Workshop). Lets the IR view show which requested parts have actually arrived.
@@ -22529,7 +22560,7 @@ function AttendanceModule({
     setAttendance,
     employees
   } = store;
-  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "hrd_payroll";
+  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "hrd_payroll" || hasAdminModule(session, "attendance");
   // "Rekap Mesin" (weekly fingerprint-machine XLS upload + holiday/dinas-luar correction) is
   // HRD/GM/Owner-only — regular employees only ever see their own daily "Harian" records, so the
   // tab bar itself is hidden for them and absTab can never leave "harian" in that case.
@@ -25793,7 +25824,8 @@ function UserManagement({
     setAccessModal(u);
     setAccessList(u.customModules && Array.isArray(u.customModules) ? [...u.customModules] : getAllowedModules(u.role, null));
   };
-  const toggleAccessModule = id => setAccessList(list => list.includes(id) ? list.filter(x => x !== id) : [...list, id]);
+  const toggleAccessModule = id => setAccessList(list => list.includes(id) ? list.filter(x => x !== id && x !== `${id}:admin`) : [...list, id]);
+  const toggleAdminModule = id => setAccessList(list => list.includes(`${id}:admin`) ? list.filter(x => x !== `${id}:admin`) : [...list, `${id}:admin`]);
   const saveAccess = async () => {
     const {
       error
@@ -25924,30 +25956,53 @@ function UserManagement({
       fontSize: 12,
       color: theme.muted
     }
-  }, "Centang modul yang boleh diakses oleh ", accessModal.nama, " (", ROLE_DEFS[accessModal.role]?.label, "). Perubahan berlaku langsung setelah disimpan."), /*#__PURE__*/React.createElement("div", {
+  }, "Centang modul yang boleh diakses oleh ", accessModal.nama, " (", ROLE_DEFS[accessModal.role]?.label, "). Centang \"Full Access\" agar user ini mendapat akses penuh (lihat semua data + fungsi admin) di modul tersebut, bukan hanya akses terbatas versi bawaan role-nya. Perubahan berlaku langsung setelah disimpan."), /*#__PURE__*/React.createElement("div", {
     style: {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr",
-      gap: 8,
-      maxHeight: 360,
+      display: "flex",
+      flexDirection: "column",
+      gap: 4,
+      maxHeight: 400,
       overflowY: "auto"
     }
-  }, ALL_MODULES.map(m => /*#__PURE__*/React.createElement("label", {
+  }, ALL_MODULES.map(m => /*#__PURE__*/React.createElement("div", {
     key: m.id,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 8,
+      padding: "4px 0",
+      borderBottom: `1px solid ${theme.border}`
+    }
+  }, /*#__PURE__*/React.createElement("label", {
     style: {
       display: "flex",
       alignItems: "center",
       gap: 8,
       fontSize: 13,
       color: theme.text,
-      cursor: "pointer",
-      padding: "4px 0"
+      cursor: "pointer"
     }
   }, /*#__PURE__*/React.createElement("input", {
     type: "checkbox",
     checked: accessList.includes(m.id),
     onChange: () => toggleAccessModule(m.id)
-  }), m.icon, " ", m.label))), /*#__PURE__*/React.createElement("div", {
+  }), m.icon, " ", m.label), /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      fontSize: 12,
+      color: accessList.includes(m.id) ? theme.yellow : theme.muted,
+      cursor: accessList.includes(m.id) ? "pointer" : "not-allowed",
+      opacity: accessList.includes(m.id) ? 1 : 0.4
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    disabled: !accessList.includes(m.id),
+    checked: accessList.includes(`${m.id}:admin`),
+    onChange: () => toggleAdminModule(m.id)
+  }), "🔑 Full Access")))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
