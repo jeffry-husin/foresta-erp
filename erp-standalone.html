@@ -4242,6 +4242,12 @@ function MasterUnit({
       if (idx >= 0) arr[idx] = item;else arr.push(item);
       return arr;
     });
+    logAudit(store, session, {
+      module: "Master Unit (BOM)",
+      docNomor: unitCode,
+      action: isEdit ? "Edit" : "Tambah",
+      detail: `${item.unitName} — ${item.bom.length} part${bomChanged ? " (BOM diubah)" : ""}`
+    });
     setModal(false);
     setForm({
       unitCode: "",
@@ -4265,6 +4271,12 @@ function MasterUnit({
     if (!target) return;
     if (confirm("Hapus unit ini?")) {
       setUnits(prev => prev.filter(u => u.unitCode !== target.unitCode));
+      logAudit(store, session, {
+        module: "Master Unit (BOM)",
+        docNomor: target.unitCode,
+        action: "Hapus",
+        detail: `${target.unitName} — ${target.bom.length} part`
+      });
     }
   };
 
@@ -4317,13 +4329,21 @@ function MasterUnit({
     });
     // Functional form — merges brand-new units (no conflict) against fresh server data by
     // unitCode, instead of pushing into a locally-cached copy of `units` that may be stale.
-    if (addedItems.length > 0) setUnits(prev => {
-      const arr = [...prev];
-      addedItems.forEach(item => {
-        if (!arr.find(u => u.unitCode === item.unitCode)) arr.push(item);
+    if (addedItems.length > 0) {
+      setUnits(prev => {
+        const arr = [...prev];
+        addedItems.forEach(item => {
+          if (!arr.find(u => u.unitCode === item.unitCode)) arr.push(item);
+        });
+        return arr;
       });
-      return arr;
-    });
+      logAudit(store, session, {
+        module: "Master Unit (BOM)",
+        docNomor: "-",
+        action: "Import Excel",
+        detail: `${addedItems.length} unit baru ditambahkan (${addedItems.map(i => i.unitCode).join(", ")})`
+      });
+    }
     if (conflictRows.length > 0) setConflicts({
       rows: conflictRows,
       idx: 0,
@@ -4374,12 +4394,20 @@ function MasterUnit({
     // Functional form + match-by-unitCode — each conflict is resolved against fresh server data
     // at the moment the user clicks, instead of an accumulated local "working" copy that could
     // drift from (and then overwrite) whatever another user saved in between steps.
-    if (action === "replace") setUnits(prev => {
-      const arr = [...prev];
-      const i = arr.findIndex(u => u.unitCode === item.unitCode);
-      if (i >= 0) arr[i] = item;else arr.push(item);
-      return arr;
-    });
+    if (action === "replace") {
+      setUnits(prev => {
+        const arr = [...prev];
+        const i = arr.findIndex(u => u.unitCode === item.unitCode);
+        if (i >= 0) arr[i] = item;else arr.push(item);
+        return arr;
+      });
+      logAudit(store, session, {
+        module: "Master Unit (BOM)",
+        docNomor: item.unitCode,
+        action: "Import Excel (Replace)",
+        detail: `${item.unitName} — ${item.bom.length} part (menimpa data existing via import)`
+      });
+    }
     const next = idx + 1;
     if (next < rows.length) setConflicts({
       ...conflicts,
