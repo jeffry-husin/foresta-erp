@@ -4218,26 +4218,30 @@ function MasterUnit({
   const save = () => {
     if (!form.unitName) return alert("Unit Name wajib diisi");
     if (form.bom.length === 0) return alert("BOM minimal 1 part");
-    const unitCode = editIdx !== null ? form.unitCode : form.unitCode.trim() || genUnitCode();
+    const isEdit = editIdx !== null;
+    const unitCode = isEdit ? form.unitCode : form.unitCode.trim() || genUnitCode();
     // bomUpdatedAt is stamped only when the BOM parts list itself actually changes (not on every
     // edit, e.g. price-only edits shouldn't trip the "BOM sudah direvisi" warning on SO/IR that
     // already used this unit). Sales Order and Item Requisition snapshot this value at creation
     // time so they can later detect "the BOM I was built from has since been revised".
-    const bomChanged = editIdx === null || JSON.stringify(units[editIdx].bom) !== JSON.stringify(form.bom);
+    const bomChanged = !isEdit || JSON.stringify(units[editIdx].bom) !== JSON.stringify(form.bom);
+    const prevBomUpdatedAt = isEdit ? units[editIdx]?.bomUpdatedAt : null;
     const item = {
       ...form,
       unitCode,
       hargaJual: parseFloat(form.hargaJual) || 0,
-      bomUpdatedAt: bomChanged ? new Date().toISOString() : units[editIdx]?.bomUpdatedAt || null
+      bomUpdatedAt: bomChanged ? new Date().toISOString() : prevBomUpdatedAt || null
     };
-    if (editIdx !== null) {
-      const a = [...units];
-      a[editIdx] = item;
-      setUnits(a);
-    } else {
-      if (units.find(u => u.unitCode === item.unitCode)) return alert("Unit Code sudah ada");
-      setUnits([...units, item]);
-    }
+    if (!isEdit && units.find(u => u.unitCode === item.unitCode)) return alert("Unit Code sudah ada");
+    // Functional form — re-fetches the latest server units list right before applying this save
+    // and merges by unitCode (not array index), so saving one unit's BOM can't silently clobber
+    // another edit (e.g. by another user) that landed on the server in the meantime.
+    setUnits(prev => {
+      const arr = [...prev];
+      const idx = arr.findIndex(u => u.unitCode === unitCode);
+      if (idx >= 0) arr[idx] = item;else arr.push(item);
+      return arr;
+    });
     setModal(false);
     setForm({
       unitCode: "",
@@ -4257,11 +4261,10 @@ function MasterUnit({
     setModal(true);
   };
   const onDelete = i => {
+    const target = filtered[i];
+    if (!target) return;
     if (confirm("Hapus unit ini?")) {
-      const realIdx = units.indexOf(filtered[i]);
-      const a = [...units];
-      a.splice(realIdx, 1);
-      setUnits(a);
+      setUnits(prev => prev.filter(u => u.unitCode !== target.unitCode));
     }
   };
 
@@ -4304,27 +4307,29 @@ function MasterUnit({
         });
       }
     });
-    const newUnits = [...units];
     const conflictRows = [];
-    let added = 0;
+    const addedItems = [];
     Object.values(grouped).forEach(item => {
-      const existingIdx = newUnits.findIndex(u => u.unitCode === item.unitCode);
-      if (existingIdx >= 0) conflictRows.push({
-        existingIdx,
+      const exists = units.find(u => u.unitCode === item.unitCode);
+      if (exists) conflictRows.push({
         item
-      });else {
-        newUnits.push(item);
-        added++;
-      }
+      });else addedItems.push(item);
     });
-    setUnits(newUnits);
+    // Functional form — merges brand-new units (no conflict) against fresh server data by
+    // unitCode, instead of pushing into a locally-cached copy of `units` that may be stale.
+    if (addedItems.length > 0) setUnits(prev => {
+      const arr = [...prev];
+      addedItems.forEach(item => {
+        if (!arr.find(u => u.unitCode === item.unitCode)) arr.push(item);
+      });
+      return arr;
+    });
     if (conflictRows.length > 0) setConflicts({
       rows: conflictRows,
       idx: 0,
-      baseAdded: added,
-      working: newUnits
+      baseAdded: addedItems.length
     });else setImportSummary({
-      added
+      added: addedItems.length
     });
   };
   // Export a single unit's BOM (same flattened row shape as the bulk export, just
@@ -4361,21 +4366,24 @@ function MasterUnit({
   const resolveConflict = action => {
     const {
       rows,
-      idx,
-      working
+      idx
     } = conflicts;
     const {
-      existingIdx,
       item
     } = rows[idx];
-    let updated = [...working];
-    if (action === "replace") updated[existingIdx] = item;
+    // Functional form + match-by-unitCode — each conflict is resolved against fresh server data
+    // at the moment the user clicks, instead of an accumulated local "working" copy that could
+    // drift from (and then overwrite) whatever another user saved in between steps.
+    if (action === "replace") setUnits(prev => {
+      const arr = [...prev];
+      const i = arr.findIndex(u => u.unitCode === item.unitCode);
+      if (i >= 0) arr[i] = item;else arr.push(item);
+      return arr;
+    });
     const next = idx + 1;
-    setUnits(updated);
     if (next < rows.length) setConflicts({
       ...conflicts,
-      idx: next,
-      working: updated
+      idx: next
     });else {
       setConflicts(null);
       setImportSummary({
@@ -21841,7 +21849,7 @@ function AuditTrailModule({
   const [filterModule, setFilterModule] = useState("Semua");
   const [search, setSearch] = useState("");
   const modules = ["Semua", ...new Set(auditLog.map(l => l.module))];
-  const filtered = [...auditLog].reverse().filter(l => (filterModule === "Semua" || l.module === filterModule) && (search === "" || l.docNomor.toLowerCase().includes(search.toLowerCase()) || l.actorNama.toLowerCase().includes(search.toLowerCase())));
+  const filtered = [...auditLog].reverse().filter(l => (filterModule === "Semua" || l.module === filterModule) && (search === "" || String(l.docNomor || "").toLowerCase().includes(search.toLowerCase()) || String(l.actorNama || "").toLowerCase().includes(search.toLowerCase())));
   const actionColor = {
     Approve: theme.green,
     Reject: theme.red,
