@@ -448,13 +448,14 @@ function parseMesinAbsensiXLS(file) {
 // employee who needs it, a `penyesuaian` row (dinas luar days, and/or overrides for ijin/cuti/
 // sakit/normal/absen that the machine didn't capture correctly).
 //
-// Key subtlety validated against real HRD-corrected weekly data: days spent on dinas luar
-// (off-site duty) are NOT a "leave" category that reduces attendance — the employee was working,
-// the machine just has no scan for them. So dLuar is added back into Riil (present) rather than
-// subtracted from Normal like Cuti/Ijin/Sakit are. And when an employee is on dinas luar for the
-// *entire* period (dLuar >= raw Normal), Normal itself isn't reduced by hariLibur either, since
-// off-site work isn't affected by an office holiday. A manual "Normal Override" input still wins
-// over both of these if HRD explicitly sets one.
+// Dinas Luar (off-site duty) is its OWN tracked category — separate from Riil (physically present/
+// scanned at the office) and separate from Absen. Earlier logic folded dLuar into riilEdit (added
+// it back into "Riil"), which silently double-counted those days: they'd show up inflating Riil
+// AND again in the D.Luar column, and any day HRD forgot/failed to mark as dinas luar fell through
+// entirely into Absen instead of its own bucket. Fixed per confirmed real cases (Ruswanto Feb 2026:
+// riil showed 19 instead of riil=1 + dinasLuar=18; Ruswanto Mar 2026: 15 dinas-luar days showed as
+// Absen). Riil now reflects ONLY actual on-site presence; dLuar is subtracted from the pool that
+// determines Absen, same as Cuti/Ijin/Sakit, but reported separately rather than merged into either.
 function hitungKoreksiAbsensi(karyawan, hariLibur, penyesuaian) {
   const liburNum = Number(hariLibur) || 0;
   const numOrNull = v => v !== "" && v !== null && v !== undefined && !Number.isNaN(Number(v)) ? Number(v) : null;
@@ -469,10 +470,10 @@ function hitungKoreksiAbsensi(karyawan, hariLibur, penyesuaian) {
     const normalOverride = numOrNull(p.normalOverride);
     const fullDinasLuar = dLuar > 0 && dLuar >= k.normal;
     const normalEdit = normalOverride !== null ? normalOverride : fullDinasLuar ? k.normal : Math.max(0, k.normal - liburNum);
-    const riilCapped = Math.min(k.riil, Math.max(0, normalEdit - dLuar - otherLeave));
-    const riilEdit = riilCapped + dLuar;
+    // Riil = actual on-site presence only (dinas luar no longer merged in).
+    const riilEdit = Math.min(k.riil, Math.max(0, normalEdit - dLuar - otherLeave));
     const absenManual = numOrNull(p.absenManual);
-    const absenEdit = absenManual !== null ? absenManual : Math.max(0, normalEdit - riilEdit - otherLeave);
+    const absenEdit = absenManual !== null ? absenManual : Math.max(0, normalEdit - riilEdit - dLuar - otherLeave);
     // Portion of this employee's total lemburJam (from the machine, weekly aggregate — no
     // day-by-day breakdown available) that HRD says happened on a hari libur/istirahat mingguan,
     // for the legal overtime-pay multiplier table (see hitungLemburLegal). Defaults to 0 (all
@@ -1694,6 +1695,14 @@ function useStore() {
   const [mills, setMills] = usePersisted("erp_mills", []); // Master Mill: mill/site location database (Mill Name, Company, Alamat, Provinsi, Kabupaten)
   const [inspectionReports, setInspectionReports] = usePersisted("erp_inspection_reports", []); // Inspection Report entries, per visit (component checklist)
   const [leaveRequests, setLeaveRequests] = usePersisted("erp_leave_requests", []); // Form Cuti: leave requests, approved by HRD, deducts from 12-day/year quota via Absensi "Cuti" entries
+  const [mingguanMekanikRoster, setMingguanMekanikRoster] = usePersisted("erp_mingguan_mekanik_roster", []); // Laporan Mingguan: manageable list of mekanik names to include (addable/removable, independent of role)
+  const [kpiSalesRoster, setKpiSalesRoster] = usePersisted("erp_kpi_sales_roster", {
+    extra: [],
+    excluded: []
+  }); // KPI Sales roster override: "extra" = existing users manually added to the KPI Sales list even
+  // though their Master User role isn't sales_manager; "excluded" = names hidden from the KPI Sales
+  // list. This ONLY affects who is evaluated on the KPI Sales screen — it never changes anyone's
+  // actual login role/access in Manajemen User (confirmed business rule).
   const [companySettings, setCompanySettings] = usePersisted("erp_company_settings", {
     nama: "PT Heavy Equipment Solutions",
     alamat: "Jl. Industri Raya No. 88, Jakarta",
@@ -1799,6 +1808,10 @@ function useStore() {
     setInspectionReports,
     leaveRequests,
     setLeaveRequests,
+    kpiSalesRoster,
+    setKpiSalesRoster,
+    mingguanMekanikRoster,
+    setMingguanMekanikRoster,
     companySettings,
     setCompanySettings,
     authUsers,
@@ -12516,13 +12529,13 @@ function SalesOrderModule({
     placeholder: "Cari no. quotation / nama client...",
     value: pullSearch,
     onChange: setPullSearch
-  }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
-    style: {
-      margin: "0 0 8px",
-      color: theme.muted,
-      fontSize: 13
-    }
-  }, "UNIT QUOTATION"), approvedUnit.length === 0 ? /*#__PURE__*/React.createElement("p", {
+  }), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "UNIT QUOTATION",
+    count: approvedUnit.length,
+    badgeColor: theme.purple,
+    storageKey: "so_sq_ongoing_unit",
+    defaultOpen: true
+  }, approvedUnit.length === 0 ? /*#__PURE__*/React.createElement("p", {
     style: {
       color: theme.muted,
       fontSize: 12
@@ -12545,13 +12558,13 @@ function SalesOrderModule({
   }, q.nomor, " — ", q.customerNama, " — ", fmt(q.total)), (isEpy || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     onClick: () => openPickItems(q, "Unit")
-  }, "Buat SO")))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
-    style: {
-      margin: "0 0 8px",
-      color: theme.muted,
-      fontSize: 13
-    }
-  }, "PARTS & SERVICE QUOTATION"), approvedPS.length === 0 ? /*#__PURE__*/React.createElement("p", {
+  }, "Buat SO")))), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "PARTS & SERVICE QUOTATION",
+    count: approvedPS.length,
+    badgeColor: theme.cyan,
+    storageKey: "so_sq_ongoing_ps",
+    defaultOpen: true
+  }, approvedPS.length === 0 ? /*#__PURE__*/React.createElement("p", {
     style: {
       color: theme.muted,
       fontSize: 12
@@ -13246,7 +13259,7 @@ function ItemRequisitionModule({
       catatan: manualForm.catatan
     };
     if (editingNomor) {
-      setItemRequisitions(itemRequisitions.map(r => r.nomor === editingNomor ? {
+      setItemRequisitions(prev => prev.map(r => r.nomor === editingNomor ? {
         ...r,
         tanggal: manualForm.tanggal || r.tanggal,
         soNomor: manualForm.soNomor || "",
@@ -13285,7 +13298,7 @@ function ItemRequisitionModule({
     if (!canManage) return alert("Hanya Purchasing/Workshop Manager/Owner/GM/Finance Director yang dapat menghapus Item Requisition.");
     if (r.status === "Sudah di-PO" && !confirm(`Item Requisition ${r.nomor} sudah menjadi Purchase Order. Purchase Order terkait TIDAK akan otomatis terhapus/berubah — perlu dicek manual bila perlu. Lanjutkan hapus?`)) return;
     if (!confirm(`Hapus Item Requisition ${r.nomor}?`)) return;
-    setItemRequisitions(itemRequisitions.filter(x => x !== r));
+    setItemRequisitions(prev => prev.filter(x => x.nomor !== r.nomor));
     logAudit(store, session, {
       module: "Item Requisition",
       docNomor: r.nomor,
@@ -13467,7 +13480,7 @@ function ItemRequisitionModule({
     if (!form.soNomor) return alert("Pilih Sales Order");
     if (form.items.length === 0) return alert("Tidak ada item pada requisition ini");
     if (editingNomor) {
-      setItemRequisitions(itemRequisitions.map(r => r.nomor === editingNomor ? {
+      setItemRequisitions(prev => prev.map(r => r.nomor === editingNomor ? {
         ...r,
         tanggal: form.tanggal || r.tanggal,
         soNomor: form.soNomor,
@@ -13581,7 +13594,7 @@ function ItemRequisitionModule({
         catatan: ""
       });
     });
-    setItemRequisitions(itemRequisitions.map(r => r.nomor === ir.nomor ? {
+    setItemRequisitions(prev => prev.map(r => r.nomor === ir.nomor ? {
       ...r,
       items: nextItems
     } : r));
@@ -13805,7 +13818,7 @@ function ItemRequisitionModule({
     size: "sm",
     variant: "ghost",
     onClick: () => {
-      setItemRequisitions(itemRequisitions.map(r => r.nomor === detail.nomor ? {
+      setItemRequisitions(prev => prev.map(r => r.nomor === detail.nomor ? {
         ...r,
         cascadeAlert: null
       } : r));
@@ -14147,7 +14160,12 @@ function PurchaseOrderModule({
   const [poSearch, setPoSearch] = useState("");
   const [irOngoingSearch, setIrOngoingSearch] = useState("");
   const irOngoingListAll = itemRequisitions.filter(ir => ir.status === "Menunggu Purchasing" && (ir.items || []).some(it => !it.sudahDiPO));
-  const irOngoingList = irOngoingSearch.trim() ? irOngoingListAll.filter(ir => [ir.nomor, ir.soNomor, ir.soCustomerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(irOngoingSearch.trim().toLowerCase()))) : irOngoingListAll;
+  const irOngoingList = irOngoingSearch.trim() ? irOngoingListAll.filter(ir => {
+    const q = irOngoingSearch.trim().toLowerCase();
+    const headerMatch = [ir.nomor, ir.soNomor, ir.soCustomerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(q));
+    const itemMatch = (ir.items || []).some(it => [it.partNumber, it.partName, it.description].filter(Boolean).some(x => String(x).toLowerCase().includes(q)));
+    return headerMatch || itemMatch;
+  }) : irOngoingListAll;
   const poFiltered = (poSearch.trim() ? po.filter(p => {
     const q = poSearch.trim().toLowerCase();
     if ([p.nomor, p.supplierNama].filter(Boolean).some(x => String(x).toLowerCase().includes(q))) return true;
@@ -14155,6 +14173,7 @@ function PurchaseOrderModule({
   }) : po).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState(null);
+  const [irDetail, setIrDetail] = useState(null); // IR clicked from IR Ongoing list — shows its item list
   const [importCostModal, setImportCostModal] = useState(null);
   const [importCostForm, setImportCostForm] = useState({
     beaMasuk: "",
@@ -14376,8 +14395,10 @@ function PurchaseOrderModule({
     }]);
     // Mark only the specific items that were pulled into this PO as consumed — an IR only flips
     // to "Sudah di-PO" once every one of its items has been allocated to some PO; items left over
-    // (e.g. because they go to a different supplier) stay available for a future PO.
-    const updatedIRs = store.itemRequisitions.map(ir => {
+    // (e.g. because they go to a different supplier) stay available for a future PO. Functional
+    // form — re-fetches the latest server IR list right before applying, so this can't silently
+    // revert another IR's sudahDiPO flags that were set moments earlier by another user/tab.
+    store.setItemRequisitions(prev => prev.map(ir => {
       if (!form.irNomors.includes(ir.nomor)) return ir;
       const consumedIdx = form.items.filter(it => it.fromIR === ir.nomor).map(it => it.fromIRIdx);
       const newItems = ir.items.map((it, i) => consumedIdx.includes(i) ? {
@@ -14389,8 +14410,7 @@ function PurchaseOrderModule({
         items: newItems,
         status: newItems.every(it => it.sudahDiPO) ? "Sudah di-PO" : "Menunggu Purchasing"
       };
-    });
-    store.setItemRequisitions(updatedIRs);
+    }));
     setModal(false);
     setForm({
       irNomors: [],
@@ -14526,7 +14546,9 @@ function PurchaseOrderModule({
     const addedKeys = [...newKeys].filter(k => !oldKeys.has(k));
     if (releasedKeys.length || addedKeys.length) {
       const touchedIRs = new Set([...releasedKeys, ...addedKeys].map(k => k.split("#")[0]));
-      const updatedIRs = store.itemRequisitions.map(ir => {
+      // Functional form — see note above; avoids clobbering another IR's sudahDiPO flags with a
+      // stale local snapshot.
+      store.setItemRequisitions(prev => prev.map(ir => {
         if (!touchedIRs.has(ir.nomor)) return ir;
         const newItems = ir.items.map((it, i) => {
           const key = `${ir.nomor}#${i}`;
@@ -14545,8 +14567,7 @@ function PurchaseOrderModule({
           items: newItems,
           status: newItems.every(it => it.sudahDiPO) ? "Sudah di-PO" : "Menunggu Purchasing"
         };
-      });
-      store.setItemRequisitions(updatedIRs);
+      }));
     }
     logAudit(store, session, {
       module: `Purchase Order ${isLocal ? "Lokal" : "Overseas"}`,
@@ -14661,7 +14682,7 @@ function PurchaseOrderModule({
       gap: 12
     }
   }, /*#__PURE__*/React.createElement(Input, {
-    placeholder: "Cari no. IR / no. SO / nama client...",
+    placeholder: "Cari no. IR / no. SO / nama client / part number / nama part / deskripsi...",
     value: irOngoingSearch,
     onChange: setIrOngoingSearch
   }), /*#__PURE__*/React.createElement("div", {
@@ -14692,18 +14713,31 @@ function PurchaseOrderModule({
   }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
     style: {
       fontWeight: 600,
-      color: theme.text,
-      fontSize: 14
-    }
+      color: theme.accent,
+      fontSize: 14,
+      cursor: "pointer",
+      textDecoration: "underline"
+    },
+    onClick: () => setIrDetail(ir),
+    title: "Klik untuk lihat daftar barang"
   }, ir.nomor, ir.soNomor ? ` — SO ${ir.soNomor}` : ""), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
       color: theme.muted
     }
-  }, ir.soCustomerNama || "-", " · ", ir.tanggal)), /*#__PURE__*/React.createElement(Btn, {
+  }, ir.soCustomerNama || "-", " · ", ir.tanggal)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => setIrDetail(ir)
+  }, "👁 Detail"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     onClick: () => startPOFromIR(ir.nomor)
-  }, "Buat PO")))))), isOwnerLike && /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, "Buat PO"))))))), isOwnerLike && /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "Approval GM — Menunggu Keputusan",
     count: po.filter(p => p.status === "Menunggu Approval GM").length,
     badgeColor: theme.yellow,
@@ -14879,7 +14913,9 @@ function PurchaseOrderModule({
           if (it.fromIR == null || it.fromIRIdx == null) return;
           (consumedByIR[it.fromIR] = consumedByIR[it.fromIR] || []).push(it.fromIRIdx);
         });
-        const updatedIRs = store.itemRequisitions.map(ir => {
+        // Functional form — re-fetches latest IR data before releasing items, so this can't
+        // silently revert sudahDiPO flags set by another PO/user in the meantime.
+        store.setItemRequisitions(prev => prev.map(ir => {
           const idxList = consumedByIR[ir.nomor];
           if (!idxList) return ir;
           const newItems = ir.items.map((it, i2) => idxList.includes(i2) ? {
@@ -14891,8 +14927,7 @@ function PurchaseOrderModule({
             items: newItems,
             status: "Menunggu Purchasing"
           };
-        });
-        store.setItemRequisitions(updatedIRs);
+        }));
       }
       logAudit(store, session, {
         module: isLocal ? "Purchase Order Lokal" : "Purchase Order Overseas",
@@ -14921,6 +14956,41 @@ function PurchaseOrderModule({
     }, p.importCost ? "Edit" : "+ Input") : "-"]),
     emptyMsg: "Belum ada PO Overseas"
   })), /*#__PURE__*/React.createElement(Modal, {
+    open: !!irDetail,
+    title: `Detail ${irDetail?.nomor}`,
+    onClose: () => setIrDetail(null),
+    width: 620
+  }, irDetail && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: theme.muted
+    }
+  }, irDetail.soNomor ? `SO ${irDetail.soNomor} — ` : "", irDetail.soCustomerNama || "-", " · ", irDetail.tanggal), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Part Number", "Nama Part", "Qty", "Satuan", "Status"],
+    rows: (irDetail.items || []).map(it => [it.partNumber || "-", it.partName || "-", it.qty, it.satuan || "-", it.sudahDiPO ? /*#__PURE__*/React.createElement(Badge, {
+      color: theme.green
+    }, "Sudah di-PO") : /*#__PURE__*/React.createElement(Badge, {
+      color: theme.yellow
+    }, "Belum di-PO")]),
+    emptyMsg: "Tidak ada item"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    onClick: () => {
+      setIrDetail(null);
+      startPOFromIR(irDetail.nomor);
+    }
+  }, "Buat PO")))), /*#__PURE__*/React.createElement(Modal, {
     open: !!detail,
     title: `Detail ${detail?.nomor}`,
     onClose: () => setDetail(null),
@@ -15909,6 +15979,7 @@ function GoodsReceiptModule({
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   const isWorkshopApprover = session.role === "workshop_manager" || isOwnerLike; // WORKSHOP1/WORKSHOP2, plus HO1/HO2/HO3 as company-wide override
   const [grSearch, setGrSearch] = useState("");
+  const [poReceiveSearch, setPoReceiveSearch] = useState("");
   const goodsReceiptsFiltered = (grSearch.trim() ? goodsReceipts.filter(g => [g.nomor, g.poNomor, g.mekanikNama].filter(Boolean).some(x => String(x).toLowerCase().includes(grSearch.trim().toLowerCase()))) : goodsReceipts).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const pendingGREdits = editRequests.filter(r => r.module === "Penerimaan Barang" && r.action === "Edit" && r.status === "Menunggu Approval Workshop");
   const [editGR, setEditGR] = useState(null); // the goodsReceipts record currently being edited (opens edit modal)
@@ -16062,6 +16133,12 @@ function GoodsReceiptModule({
     ...p,
     jenis: "Overseas"
   }))];
+  const approvedPOsFiltered = poReceiveSearch.trim() ? approvedPOs.filter(p => {
+    const q = poReceiveSearch.trim().toLowerCase();
+    const headerMatch = [p.nomor, p.supplierNama].filter(Boolean).some(x => String(x).toLowerCase().includes(q));
+    const itemMatch = (p.items || []).some(it => [it.partNumber, it.partName].filter(Boolean).some(x => String(x).toLowerCase().includes(q)));
+    return headerMatch || itemMatch;
+  }) : approvedPOs;
   const loadFromPO = poNomor => {
     const p = approvedPOs.find(x => x.nomor === poNomor);
     if (!p) return;
@@ -16264,23 +16341,70 @@ function GoodsReceiptModule({
       margin: 0,
       color: theme.text
     }
-  }, "Penerimaan Barang"), (isJhon || isOwnerLike) && /*#__PURE__*/React.createElement(Select, {
-    value: "",
-    onChange: loadFromPO,
-    options: approvedPOs.map(p => ({
-      value: p.nomor,
-      label: `${p.nomor} (${p.jenis}) — ${p.supplierNama}`
-    })),
-    style: {
-      width: 300
-    }
-  })), /*#__PURE__*/React.createElement("p", {
+  }, "Penerimaan Barang")), /*#__PURE__*/React.createElement("p", {
     style: {
       margin: 0,
       fontSize: 12,
       color: theme.muted
     }
-  }, "Penerimaan FINAL hanya berlaku saat barang diterima di Workshop. Penerimaan di Head Office bersifat sementara dan memerlukan konfirmasi via Internal Delivery Order."), isWorkshopApprover && pendingGREdits.length > 0 && /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, "Penerimaan FINAL hanya berlaku saat barang diterima di Workshop. Penerimaan di Head Office bersifat sementara dan memerlukan konfirmasi via Internal Delivery Order."), (isJhon || isOwnerLike) && /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "PO SIAP DITERIMA (Lokal & Overseas)",
+    count: approvedPOsFiltered.length,
+    badgeColor: theme.purple,
+    storageKey: "gr_po_ready",
+    defaultOpen: true
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari no. PO / supplier / part number / nama part...",
+    value: poReceiveSearch,
+    onChange: setPoReceiveSearch
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+      maxHeight: 420,
+      overflowY: "auto"
+    }
+  }, approvedPOsFiltered.length === 0 && /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: theme.muted,
+      fontSize: 13,
+      margin: 0
+    }
+  }, "Tidak ada PO yang siap diterima."), approvedPOsFiltered.map(p => /*#__PURE__*/React.createElement("div", {
+    key: p.nomor,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8,
+      padding: "10px 14px",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 600,
+      color: theme.text,
+      fontSize: 14
+    }
+  }, p.nomor, " ", /*#__PURE__*/React.createElement(Badge, {
+    color: p.jenis === "Lokal" ? theme.cyan : theme.purple
+  }, p.jenis)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, p.supplierNama || "-", " · ", p.status)), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    onClick: () => loadFromPO(p.nomor)
+  }, "📦 Barang Diterima")))))), isWorkshopApprover && pendingGREdits.length > 0 && /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "Menunggu Approval Edit (Workshop)",
     count: pendingGREdits.length,
     badgeColor: theme.yellow,
@@ -16963,18 +17087,22 @@ function PartsUseModule({
     partsUse,
     setPartsUse,
     salesOrders,
+    units,
     parts,
     setParts
   } = store;
   const isStefanus = session.role === "logistic";
   const isMekanik = session.role === "mekanik";
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
+  const canRelease = isStefanus || isOwnerLike;
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState(null);
   const [puSearch, setPuSearch] = useState("");
+  const [soReleaseSearch, setSoReleaseSearch] = useState("");
   const partsUseFiltered = (puSearch.trim() ? partsUse.filter(pu => [pu.nomor, pu.soNomor, pu.mekanikNama].filter(Boolean).some(x => String(x).toLowerCase().includes(puSearch.trim().toLowerCase()))) : partsUse).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const [form, setForm] = useState({
     soNomor: "",
+    soCustomerNama: "",
     mekanikNama: "",
     items: []
   });
@@ -16993,42 +17121,186 @@ function PartsUseModule({
     }, 0);
     return prefix + String(maxSeq + 1).padStart(4, "0");
   };
-  const eligibleSO = salesOrders.filter(so => so.status === "Aktif");
-  const loadFromSO = soNomor => {
-    const so = salesOrders.find(s => s.nomor === soNomor);
-    if (!so) return;
-    setForm({
-      soNomor,
-      mekanikNama: "",
-      items: so.items.map(it => ({
+  // BOM explosion, mirrored from Item Requisition's explodeSOItems: an SO item sourced from a
+  // Master Unit (sumber === "Master Unit") is expanded into its full BOM part list (qty per part
+  // x qty of units ordered) instead of being released as a single pseudo-part. Parts ordered
+  // directly pass through unchanged. This is what lets Parts Use show the BOM item list for a
+  // Unit-based SO so individual components can be selected for release.
+  const explodeSOItems = so => {
+    const exploded = [];
+    (so.items || []).forEach(it => {
+      const isUnitSourced = it.sumber === "Master Unit" || !!(!it.partNumber && it.unitCode && (units || []).find(u => u.unitCode === it.unitCode));
+      if (isUnitSourced) {
+        const unit = (units || []).find(u => u.unitCode === it.unitCode);
+        if (unit && Array.isArray(unit.bom) && unit.bom.length > 0) {
+          unit.bom.forEach(b => {
+            exploded.push({
+              partNumber: b.partNumber,
+              partName: b.partName,
+              qty: (Number(b.qty) || 0) * (Number(it.qty) || 0)
+            });
+          });
+          return;
+        }
+      }
+      exploded.push({
         partNumber: it.partNumber || it.unitCode,
         partName: it.partName || it.unitName,
-        qty: it.qty,
-        qtyReturn: 0
-      }))
+        qty: Number(it.qty) || 0
+      });
+    });
+    const merged = {};
+    exploded.forEach(e => {
+      if (!e.partNumber) return;
+      if (!merged[e.partNumber]) merged[e.partNumber] = {
+        partNumber: e.partNumber,
+        partName: e.partName,
+        qty: 0
+      };
+      merged[e.partNumber].qty += e.qty;
+    });
+    return Object.values(merged);
+  };
+  // One Parts Use document per SO: items[] tracks qtyButuh (total required, from BOM/SO) vs
+  // qtyReleased (cumulative released so far across possibly multiple partial releases) vs
+  // qtyReturned (cumulative confirmed return). Status flips to "Selesai" once every item's
+  // qtyReleased reaches qtyButuh, and flips back to "ON GOING" the moment any retur is submitted
+  // — even a partial one — per confirmed business rule (a retur means the job wasn't fully closed).
+  const isFullyReleased = pu => (pu.items || []).every(it => (it.qtyReleased || 0) >= (it.qtyButuh || 0));
+  const eligibleSO = salesOrders.filter(so => so.status === "Aktif");
+  // SO list eligible for release: either no Parts Use doc exists yet for that SO, or one exists
+  // but isn't fully released yet (status "ON GOING").
+  const soReleaseList = eligibleSO.map(so => {
+    const existing = partsUse.find(pu => pu.soNomor === so.nomor);
+    return {
+      so,
+      existing
+    };
+  }).filter(({
+    existing
+  }) => !existing || existing.status !== "Selesai");
+  const soReleaseListFiltered = soReleaseSearch.trim() ? soReleaseList.filter(({
+    so
+  }) => {
+    const q = soReleaseSearch.trim().toLowerCase();
+    const headerMatch = [so.nomor, so.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(q));
+    const itemMatch = explodeSOItems(so).some(it => [it.partNumber, it.partName].filter(Boolean).some(x => String(x).toLowerCase().includes(q)));
+    return headerMatch || itemMatch;
+  }) : soReleaseList;
+  const openReleaseForSO = soNomor => {
+    const so = salesOrders.find(s => s.nomor === soNomor);
+    if (!so) return;
+    const existing = partsUse.find(pu => pu.soNomor === soNomor);
+    const baseline = existing ? existing.items : explodeSOItems(so).map(it => ({
+      partNumber: it.partNumber,
+      partName: it.partName,
+      qtyButuh: it.qty,
+      qtyReleased: 0,
+      qtyReturned: 0
+    }));
+    setForm({
+      soNomor,
+      soCustomerNama: so.customerNama,
+      mekanikNama: existing?.mekanikNama || "",
+      items: baseline.map(it => {
+        const remaining = Math.max(0, (it.qtyButuh || 0) - (it.qtyReleased || 0));
+        return {
+          ...it,
+          included: remaining > 0,
+          qtyToRelease: remaining
+        };
+      })
     });
     setModal(true);
   };
+  const updateReleaseQty = (i, val) => {
+    const items = [...form.items];
+    items[i] = {
+      ...items[i],
+      qtyToRelease: parseInt(val) || 0
+    };
+    setForm({
+      ...form,
+      items
+    });
+  };
+  const toggleReleaseIncluded = i => {
+    const items = [...form.items];
+    items[i] = {
+      ...items[i],
+      included: !items[i].included
+    };
+    setForm({
+      ...form,
+      items
+    });
+  };
   const save = () => {
     if (!form.mekanikNama) return alert("Isi nama mekanik penerima");
-    setPartsUse(prev => [...prev, {
-      nomor: newNomor(prev),
-      tanggal: today(),
-      soNomor: form.soNomor,
-      mekanikNama: form.mekanikNama,
-      items: form.items,
-      releasedBy: session.nama,
-      status: "Direlease"
-    }]);
+    const picked = form.items.filter(it => it.included && it.qtyToRelease > 0);
+    if (picked.length === 0) return alert("Pilih minimal 1 part untuk direlease");
+    // Functional form — re-fetches the latest server Parts Use list right before applying, so a
+    // concurrent release from another tab/user against the same SO can't be silently overwritten
+    // (see usePersisted concurrency note used throughout this app).
+    setPartsUse(prev => {
+      const existingIdx = prev.findIndex(pu => pu.soNomor === form.soNomor);
+      const newItems = form.items.map(it => {
+        const pickedIt = picked.find(p => p.partNumber === it.partNumber);
+        const addQty = pickedIt ? pickedIt.qtyToRelease : 0;
+        return {
+          partNumber: it.partNumber,
+          partName: it.partName,
+          qtyButuh: it.qtyButuh,
+          qtyReleased: (it.qtyReleased || 0) + addQty,
+          qtyReturned: it.qtyReturned || 0
+        };
+      });
+      const status = newItems.every(it => (it.qtyReleased || 0) >= (it.qtyButuh || 0)) ? "Selesai" : "ON GOING";
+      const releaseLogEntry = {
+        tanggal: today(),
+        mekanikNama: form.mekanikNama,
+        items: picked.map(it => ({
+          partNumber: it.partNumber,
+          partName: it.partName,
+          qty: it.qtyToRelease
+        })),
+        by: session.nama
+      };
+      if (existingIdx >= 0) {
+        const arr = [...prev];
+        arr[existingIdx] = {
+          ...arr[existingIdx],
+          mekanikNama: form.mekanikNama,
+          items: newItems,
+          status,
+          releaseLog: [...(arr[existingIdx].releaseLog || []), releaseLogEntry]
+        };
+        return arr;
+      }
+      return [...prev, {
+        nomor: newNomor(prev),
+        tanggal: today(),
+        soNomor: form.soNomor,
+        soCustomerNama: form.soCustomerNama,
+        mekanikNama: form.mekanikNama,
+        items: newItems,
+        status,
+        releaseLog: [releaseLogEntry],
+        releasedBy: session.nama
+      }];
+    });
     setModal(false);
     setForm({
       soNomor: "",
+      soCustomerNama: "",
       mekanikNama: "",
       items: []
     });
   };
 
-  // Mekanik initiates return; Stefanus confirms
+  // Mekanik initiates return; Stefanus confirms. Submitting a return request — even for a partial
+  // qty — immediately flips the document back to "ON GOING" per confirmed business rule, since a
+  // retur means the release wasn't fully consumed as originally issued.
   const requestReturn = pu => {
     setReturnModal(pu);
     const init = {};
@@ -17037,31 +17309,39 @@ function PartsUseModule({
     setReturnReason("Tidak Terpakai Semua");
   };
   const submitReturnRequest = () => {
-    const arr = [...partsUse];
-    const idx = partsUse.indexOf(returnModal);
     const returnItems = returnModal.items.map(it => ({
       ...it,
       qtyReturnDiajukan: returnQty[it.partNumber] || 0
     })).filter(it => it.qtyReturnDiajukan > 0);
     if (returnItems.length === 0) return alert("Isi minimal 1 qty return");
-    arr[idx] = {
-      ...arr[idx],
+    const targetNomor = returnModal.nomor;
+    // Functional form — see concurrency note in save() above.
+    setPartsUse(prev => prev.map(pu => pu.nomor === targetNomor ? {
+      ...pu,
       returnRequest: returnItems,
       returnReason,
       status: "Menunggu Konfirmasi Return"
-    };
-    setPartsUse(arr);
+    } : pu));
     setReturnModal(null);
   };
   const confirmReturn = pu => {
-    const arr = [...partsUse];
-    const idx = partsUse.indexOf(pu);
-    arr[idx] = {
-      ...arr[idx],
-      status: "Return Dikonfirmasi",
-      returnConfirmedBy: session.nama
-    };
-    setPartsUse(arr);
+    // Functional form — see concurrency note in save() above.
+    setPartsUse(prev => prev.map(x => {
+      if (x.nomor !== pu.nomor) return x;
+      const newItems = x.items.map(it => {
+        const ret = (x.returnRequest || []).find(r => r.partNumber === it.partNumber);
+        return ret ? {
+          ...it,
+          qtyReturned: (it.qtyReturned || 0) + ret.qtyReturnDiajukan
+        } : it;
+      });
+      return {
+        ...x,
+        items: newItems,
+        status: "ON GOING",
+        returnConfirmedBy: session.nama
+      };
+    }));
     // Functional form — see concurrency note on the other stock-update sites in Goods Receipt.
     setParts(prev => {
       const newParts = [...prev];
@@ -17076,10 +17356,12 @@ function PartsUseModule({
     });
   };
   const statusColor = {
-    "Direlease": theme.accent,
+    "ON GOING": theme.accent,
     "Menunggu Konfirmasi Return": theme.yellow,
-    "Return Dikonfirmasi": theme.green
+    "Selesai": theme.green
   };
+  const partsUseOngoing = partsUseFiltered.filter(pu => pu.status !== "Selesai");
+  const partsUseDone = partsUseFiltered.filter(pu => pu.status === "Selesai");
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -17099,13 +17381,7 @@ function PartsUseModule({
       margin: 0,
       color: theme.text
     }
-  }, "Parts Use (Release ke Mekanik)"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 10,
-      flexWrap: "wrap"
-    }
-  }, /*#__PURE__*/React.createElement(ExportExcelBtn, {
+  }, "Parts Use (Release ke Mekanik)"), /*#__PURE__*/React.createElement(ExportExcelBtn, {
     onClick: () => exportToExcel(partsUse.map(pu => ({
       nomor: pu.nomor,
       tanggal: pu.tanggal,
@@ -17115,17 +17391,71 @@ function PartsUseModule({
       status: pu.status,
       alasanReturn: pu.returnReason || "-"
     })), "Parts_Use.xlsx", "Parts Use")
-  }), (isStefanus || isOwnerLike) && /*#__PURE__*/React.createElement(Select, {
-    value: "",
-    onChange: loadFromSO,
-    options: eligibleSO.map(so => ({
-      value: so.nomor,
-      label: `${so.nomor} — ${so.customerNama}`
-    })),
+  })), canRelease && /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "SO SIAP DIRELEASE (Ada Sisa Part Belum Direlease)",
+    count: soReleaseListFiltered.length,
+    badgeColor: theme.purple,
+    storageKey: "pu_so_ready",
+    defaultOpen: true
+  }, /*#__PURE__*/React.createElement("div", {
     style: {
-      width: 280
+      display: "flex",
+      flexDirection: "column",
+      gap: 12
     }
-  }))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
+  }, /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari no. SO / nama client / part number / nama part...",
+    value: soReleaseSearch,
+    onChange: setSoReleaseSearch
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+      maxHeight: 420,
+      overflowY: "auto"
+    }
+  }, soReleaseListFiltered.length === 0 && /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: theme.muted,
+      fontSize: 13,
+      margin: 0
+    }
+  }, "Tidak ada SO dengan sisa part yang belum direlease."), soReleaseListFiltered.map(({
+    so,
+    existing
+  }) => /*#__PURE__*/React.createElement("div", {
+    key: so.nomor,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8,
+      padding: "10px 14px",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 600,
+      color: theme.text,
+      fontSize: 14
+    }
+  }, so.nomor, existing ? " — sudah ada release sebagian" : ""), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, so.customerNama || "-")), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    onClick: () => openReleaseForSO(so.nomor)
+  }, existing ? "Lanjut Release" : "Release Parts")))))), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "PARTS USE ON GOING",
+    count: partsUseOngoing.length,
+    badgeColor: theme.accent,
+    storageKey: "pu_ongoing",
+    defaultOpen: true
+  }, /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari no. parts use / no. SO / mekanik...",
     value: puSearch,
     onChange: setPuSearch,
@@ -17134,7 +17464,7 @@ function PartsUseModule({
     }
   }), /*#__PURE__*/React.createElement(Table, {
     headers: ["No. Parts Use", "Tanggal", "No. SO", "Mekanik", "Jumlah Item", "Status"],
-    rows: partsUseFiltered.map(pu => [/*#__PURE__*/React.createElement("span", {
+    rows: partsUseOngoing.map(pu => [/*#__PURE__*/React.createElement("span", {
       style: {
         color: theme.accentLight,
         fontWeight: 600,
@@ -17147,9 +17477,9 @@ function PartsUseModule({
       color: statusColor[pu.status]
     }, pu.status)]),
     onDelete: isOwnerLike ? i => {
-      const pu = partsUseFiltered[i];
+      const pu = partsUseOngoing[i];
       if (!confirm(`Hapus data Parts Use ${pu.nomor}? Catatan: stock yang sudah terpakai TIDAK otomatis dikembalikan — sesuaikan stock secara manual bila perlu.`)) return;
-      setPartsUse(partsUse.filter(x => x !== pu));
+      setPartsUse(prev => prev.filter(x => x.nomor !== pu.nomor));
       logAudit(store, session, {
         module: "Parts Use",
         docNomor: pu.nomor,
@@ -17157,7 +17487,38 @@ function PartsUseModule({
         detail: pu.soNomor
       });
     } : undefined,
-    emptyMsg: "Belum ada Parts Use"
+    emptyMsg: "Belum ada Parts Use ON GOING"
+  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "PARTS USE DONE",
+    count: partsUseDone.length,
+    badgeColor: theme.green,
+    storageKey: "pu_done"
+  }, /*#__PURE__*/React.createElement(Table, {
+    headers: ["No. Parts Use", "Tanggal", "No. SO", "Mekanik", "Jumlah Item", "Status"],
+    rows: partsUseDone.map(pu => [/*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.accentLight,
+        fontWeight: 600,
+        cursor: "pointer"
+      },
+      onClick: () => setDetail(pu)
+    }, pu.nomor), pu.tanggal, pu.soNomor, pu.mekanikNama, /*#__PURE__*/React.createElement(Badge, {
+      color: theme.purple
+    }, pu.items.length, " part"), /*#__PURE__*/React.createElement(Badge, {
+      color: statusColor[pu.status]
+    }, pu.status)]),
+    onDelete: isOwnerLike ? i => {
+      const pu = partsUseDone[i];
+      if (!confirm(`Hapus data Parts Use ${pu.nomor}? Catatan: stock yang sudah terpakai TIDAK otomatis dikembalikan — sesuaikan stock secara manual bila perlu.`)) return;
+      setPartsUse(prev => prev.filter(x => x.nomor !== pu.nomor));
+      logAudit(store, session, {
+        module: "Parts Use",
+        docNomor: pu.nomor,
+        action: "Hapus",
+        detail: pu.soNomor
+      });
+    } : undefined,
+    emptyMsg: "Belum ada Parts Use DONE"
   })), /*#__PURE__*/React.createElement(Modal, {
     open: !!detail,
     title: `Detail ${detail?.nomor}`,
@@ -17170,9 +17531,28 @@ function PartsUseModule({
       gap: 14
     }
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["Part Number", "Part Name", "Qty Direlease"],
-    rows: detail.items.map(it => [it.partNumber, it.partName, fmtNum(it.qty)])
-  }), detail.returnRequest && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
+    headers: ["Part Number", "Part Name", "Qty Butuh", "Qty Direlease", "Qty Return"],
+    rows: detail.items.map(it => [it.partNumber, it.partName, fmtNum(it.qtyButuh), fmtNum(it.qtyReleased || 0), fmtNum(it.qtyReturned || 0)])
+  }), detail.releaseLog && detail.releaseLog.length > 0 && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
+    style: {
+      margin: "10px 0 8px",
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "RIWAYAT RELEASE"), detail.releaseLog.map((log, i) => /*#__PURE__*/React.createElement("p", {
+    key: i,
+    style: {
+      margin: "0 0 6px",
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, log.tanggal, " — ", log.mekanikNama, " · ", log.items.map(it => `${it.partNumber} (${it.qty})`).join(", "), " — oleh ", log.by)), (isMekanik || isOwnerLike) && detail.status !== "Selesai" && !isFullyReleased(detail) && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "4px 0 0",
+      fontSize: 12,
+      color: theme.accentLight
+    }
+  }, "Masih ada sisa part yang belum direlease — gunakan tombol \"Lanjut Release\" pada daftar SO Siap Direlease di atas.")), detail.returnRequest && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
     style: {
       margin: "10px 0 8px",
       color: theme.muted,
@@ -17195,7 +17575,7 @@ function PartsUseModule({
       gap: 10,
       justifyContent: "flex-end"
     }
-  }, (isMekanik || isOwnerLike) && detail.status === "Direlease" && /*#__PURE__*/React.createElement(Btn, {
+  }, (isMekanik || isOwnerLike) && detail.status !== "Menunggu Konfirmasi Return" && (detail.items || []).some(it => (it.qtyReleased || 0) - (it.qtyReturned || 0) > 0) && /*#__PURE__*/React.createElement(Btn, {
     variant: "warning",
     size: "sm",
     onClick: () => {
@@ -17234,7 +17614,7 @@ function PartsUseModule({
       fontSize: 13,
       color: theme.muted
     }
-  }, "Isi qty sisa part yang tidak terpakai dan akan dikembalikan:"), returnModal.items.map(it => /*#__PURE__*/React.createElement("div", {
+  }, "Isi qty sisa part yang tidak terpakai dan akan dikembalikan:"), returnModal.items.filter(it => (it.qtyReleased || 0) - (it.qtyReturned || 0) > 0).map(it => /*#__PURE__*/React.createElement("div", {
     key: it.partNumber,
     style: {
       display: "flex",
@@ -17250,10 +17630,10 @@ function PartsUseModule({
     style: {
       color: theme.muted
     }
-  }, "(direlease: ", it.qty, ")")), /*#__PURE__*/React.createElement("input", {
+  }, "(sisa direlease: ", (it.qtyReleased || 0) - (it.qtyReturned || 0), ")")), /*#__PURE__*/React.createElement("input", {
     type: "number",
     min: "0",
-    max: it.qty,
+    max: (it.qtyReleased || 0) - (it.qtyReturned || 0),
     value: returnQty[it.partNumber] || 0,
     onChange: e => setReturnQty({
       ...returnQty,
@@ -17301,7 +17681,7 @@ function PartsUseModule({
     style: {
       color: theme.text
     }
-  }, form.soNomor)), /*#__PURE__*/React.createElement(Input, {
+  }, form.soNomor), " — ", form.soCustomerNama), /*#__PURE__*/React.createElement(Input, {
     label: "Nama Mekanik Penerima",
     value: form.mekanikNama,
     onChange: v => setForm({
@@ -17309,9 +17689,39 @@ function PartsUseModule({
       mekanikNama: v
     }),
     required: true
-  }), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Part Number", "Part Name", "Qty"],
-    rows: form.items.map(it => [it.partNumber, it.partName, fmtNum(it.qty)])
+  }), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Pilih part yang benar-benar dikeluarkan sekarang. Part yang sudah lengkap direlease sebelumnya (Sisa 0) otomatis tidak bisa dicentang; sisanya bisa direlease bertahap di kesempatan lain."), /*#__PURE__*/React.createElement(Table, {
+    headers: ["✓", "Part Number", "Part Name", "Butuh", "Sudah Direlease", "Sisa", "Qty Direlease Sekarang"],
+    rows: form.items.map((it, i) => {
+      const remaining = Math.max(0, (it.qtyButuh || 0) - (it.qtyReleased || 0));
+      return [/*#__PURE__*/React.createElement("input", {
+        type: "checkbox",
+        checked: it.included,
+        disabled: remaining === 0,
+        onChange: () => toggleReleaseIncluded(i)
+      }), it.partNumber, it.partName, fmtNum(it.qtyButuh), fmtNum(it.qtyReleased || 0), fmtNum(remaining), /*#__PURE__*/React.createElement("input", {
+        type: "number",
+        min: "0",
+        max: remaining,
+        value: it.qtyToRelease,
+        disabled: !it.included,
+        onChange: e => updateReleaseQty(i, e.target.value),
+        style: {
+          background: theme.surface,
+          border: `1px solid ${theme.border}`,
+          borderRadius: 6,
+          padding: "5px 8px",
+          color: theme.text,
+          width: 90,
+          fontFamily: "inherit"
+        }
+      })];
+    })
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -17349,6 +17759,7 @@ function DeliveryOrderModule({
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   const isWorkshopApprover = session.role === "workshop_manager" || isOwnerLike; // WORKSHOP1/WORKSHOP2, plus HO1/HO2/HO3 as company-wide override
   const [doSearch, setDoSearch] = useState("");
+  const [soDOSearch, setSoDOSearch] = useState("");
   const deliveryOrdersFiltered = (doSearch.trim() ? deliveryOrders.filter(d => [d.nomor, d.soNomor, d.customerNama, d.driver, d.ekspedisi].filter(Boolean).some(x => String(x).toLowerCase().includes(doSearch.trim().toLowerCase()))) : deliveryOrders).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const [editDO, setEditDO] = useState(null);
   const [editDOForm, setEditDOForm] = useState({
@@ -17438,6 +17849,29 @@ function DeliveryOrderModule({
       ...it,
       shipQty: qty
     } : it));
+  };
+  const soReadyForDO = salesOrders.filter(so => soItemsRemaining(so).some(it => it.sisa > 0));
+  const soReadyForDOFiltered = soDOSearch.trim() ? soReadyForDO.filter(so => {
+    const q = soDOSearch.trim().toLowerCase();
+    const headerMatch = [so.nomor, so.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(q));
+    const itemMatch = soItemsRemaining(so).some(it => [it.partNumber, it.nama].filter(Boolean).some(x => String(x).toLowerCase().includes(q)));
+    return headerMatch || itemMatch;
+  }) : soReadyForDO;
+  const openDOForSO = soNomor => {
+    const so = salesOrders.find(s => s.nomor === soNomor);
+    if (!so) return;
+    setForm({
+      soNomor,
+      tanggal: today(),
+      ekspedisi: "",
+      noResi: "",
+      driver: "",
+      noKendaraan: "",
+      noTelp: "",
+      catatan: ""
+    });
+    setShipItems(soItemsRemaining(so));
+    setModal(true);
   };
   const save = () => {
     if (!form.soNomor) return alert("Pilih Sales Order");
@@ -17531,9 +17965,7 @@ function DeliveryOrderModule({
       noTelp: d.noTelp || "-",
       status: d.status
     })), "Delivery_Order.xlsx", "DO")
-  }), (isStefanus || isEpy || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
-    onClick: () => setModal(true)
-  }, "+ Buat Delivery Order"))), /*#__PURE__*/React.createElement("div", {
+  }))), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
       color: theme.muted,
@@ -17542,7 +17974,64 @@ function DeliveryOrderModule({
       borderRadius: 8,
       border: `1px dashed ${theme.border}`
     }
-  }, "🔒 Description part bersifat internal — tidak ditampilkan di Delivery Order yang diserahkan ke client."), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
+  }, "🔒 Description part bersifat internal — tidak ditampilkan di Delivery Order yang diserahkan ke client."), (isStefanus || isEpy || isOwnerLike) && /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "SO SIAP DIKIRIM (Ada Sisa Barang Belum Dikirim)",
+    count: soReadyForDOFiltered.length,
+    badgeColor: theme.purple,
+    storageKey: "do_so_ready",
+    defaultOpen: true
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari no. SO / nama client / part number / nama part...",
+    value: soDOSearch,
+    onChange: setSoDOSearch
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+      maxHeight: 420,
+      overflowY: "auto"
+    }
+  }, soReadyForDOFiltered.length === 0 && /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: theme.muted,
+      fontSize: 13,
+      margin: 0
+    }
+  }, "Tidak ada SO dengan sisa barang yang belum dikirim."), soReadyForDOFiltered.map(so => /*#__PURE__*/React.createElement("div", {
+    key: so.nomor,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8,
+      padding: "10px 14px",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 600,
+      color: theme.text,
+      fontSize: 14
+    }
+  }, so.nomor, " ", /*#__PURE__*/React.createElement(Badge, {
+    color: theme.cyan
+  }, so.tipe)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, so.customerNama || "-")), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    onClick: () => openDOForSO(so.nomor)
+  }, "Buat DO")))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari no. DO / no. SO / client / driver / ekspedisi...",
     value: doSearch,
     onChange: setDoSearch,
@@ -17736,23 +18225,17 @@ function DeliveryOrderModule({
       flexDirection: "column",
       gap: 14
     }
-  }, /*#__PURE__*/React.createElement(Select, {
-    label: "Sales Order",
-    value: form.soNomor,
-    onChange: v => {
-      const so = salesOrders.find(s => s.nomor === v);
-      setForm({
-        ...form,
-        soNomor: v
-      });
-      setShipItems(soItemsRemaining(so));
-    },
-    options: salesOrders.filter(so => soItemsRemaining(so).some(it => it.sisa > 0)).map(so => ({
-      value: so.nomor,
-      label: `${so.nomor} — ${so.customerNama} (${so.tipe})`
-    })),
-    required: true
-  }), /*#__PURE__*/React.createElement(Input, {
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 13,
+      color: theme.muted
+    }
+  }, "SO: ", /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, form.soNomor), " — ", salesOrders.find(s => s.nomor === form.soNomor)?.customerNama || "-"), /*#__PURE__*/React.createElement(Input, {
     label: "Tanggal",
     value: form.tanggal,
     onChange: v => setForm({
@@ -19373,6 +19856,48 @@ function PayrollModule({
   const [tab, setTab] = useState("run");
   const [bulan, setBulan] = useState(new Date().toISOString().slice(0, 7));
   const [editEmp, setEditEmp] = useState(null);
+  // Inline-edit for the "Master Gaji & BPJS" list — lets Gaji Pokok / Tunjangan / BPJS % /
+  // Uang Kerajinan be typed directly in the table instead of opening the full Edit modal each
+  // time. Draft values are kept locally per-employee/field and only committed to the shared
+  // `employees` store (via the concurrency-safe functional-update form) on blur.
+  const [inlineDraft, setInlineDraft] = useState({});
+  const inlineVal = (emp, field) => {
+    const d = inlineDraft[emp.username];
+    return d && d[field] !== undefined ? d[field] : emp[field] ?? "";
+  };
+  const setInlineDraftVal = (username, field, value) => setInlineDraft(prev => ({
+    ...prev,
+    [username]: {
+      ...(prev[username] || {}),
+      [field]: value
+    }
+  }));
+  const commitInline = (emp, field) => {
+    const d = inlineDraft[emp.username];
+    if (!d || d[field] === undefined) return;
+    const numVal = parseFloat(d[field]);
+    setEmployees(prev => (prev || []).map(e => e.username === emp.username ? {
+      ...e,
+      [field]: isNaN(numVal) ? 0 : numVal
+    } : e));
+  };
+  const inlineCellStyle = {
+    width: 90,
+    background: theme.surface,
+    border: `1px solid ${theme.border}`,
+    borderRadius: 6,
+    padding: "5px 7px",
+    color: theme.text,
+    fontSize: 12
+  };
+  const inlineNumCell = (emp, field) => /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    value: inlineVal(emp, field),
+    onChange: ev => setInlineDraftVal(emp.username, field, ev.target.value),
+    onBlur: () => commitInline(emp, field),
+    onClick: ev => ev.stopPropagation(),
+    style: inlineCellStyle
+  });
   const [empForm, setEmpForm] = useState({
     nama: "",
     jabatan: "",
@@ -19386,7 +19911,10 @@ function PayrollModule({
     noTelp: "",
     keluarga: [],
     uangHarianRate: 50000,
-    hariKerjaSeminggu: 5
+    hariKerjaSeminggu: 5,
+    statusKaryawan: "Tetap",
+    uangKerajinanRate: 0,
+    uangHarianKerjaRate: 0
   });
   // Uang Makan Harian for a given month: sums riilHari x uangHarianRate across every saved Rekap
   // Mesin periode whose periodeMulai falls in that month, matched by employee name (rekapAbsensi
@@ -19573,7 +20101,10 @@ function PayrollModule({
       noTelp: empForm.noTelp,
       keluarga: empForm.keluarga,
       uangHarianRate: parseFloat(empForm.uangHarianRate) || 0,
-      hariKerjaSeminggu: parseFloat(empForm.hariKerjaSeminggu) || 5
+      hariKerjaSeminggu: parseFloat(empForm.hariKerjaSeminggu) || 5,
+      statusKaryawan: empForm.statusKaryawan || "Tetap",
+      uangKerajinanRate: parseFloat(empForm.uangKerajinanRate) || 0,
+      uangHarianKerjaRate: parseFloat(empForm.uangHarianKerjaRate) || 0
     } : e);
     setEmployees(arr);
     setEditEmp(null);
@@ -19778,11 +20309,17 @@ function PayrollModule({
     style: {
       marginBottom: 12
     }
-  }), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Nama", "Jabatan", "Role", "Gaji Pokok", "Tunjangan", "BPJS TK %", "BPJS Kes %"],
+  }), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 11,
+      color: theme.muted,
+      margin: "0 0 10px"
+    }
+  }, "Gaji Pokok, Tunjangan, BPJS %, dan Uang Kerajinan bisa langsung diedit di tabel (klik sel, ubah, klik di luar untuk simpan). Untuk data lengkap (KTP/KK/Keluarga/dll) gunakan tombol Edit."), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Nama", "Jabatan", "Role", "Gaji Pokok", "Tunjangan", "BPJS TK %", "BPJS Kes %", "Uang Kerajinan (Rp/mgg)"],
     rows: empFiltered.map(e => [e.nama, e.jabatan || "-", /*#__PURE__*/React.createElement(Badge, {
       color: ROLE_DEFS[e.role]?.color
-    }, ROLE_DEFS[e.role]?.label), fmt(e.gajiPokok), fmt(e.tunjangan), `${e.bpjsTkPct ?? 2}%`, `${e.bpjsKesPct ?? 1}%`]),
+    }, ROLE_DEFS[e.role]?.label), inlineNumCell(e, "gajiPokok"), inlineNumCell(e, "tunjangan"), inlineNumCell(e, "bpjsTkPct"), inlineNumCell(e, "bpjsKesPct"), inlineNumCell(e, "uangKerajinanRate")]),
     onEdit: i => {
       const emp = empFiltered[i];
       setEditEmp(emp);
@@ -19799,7 +20336,10 @@ function PayrollModule({
         noTelp: emp.noTelp || "",
         keluarga: emp.keluarga || [],
         uangHarianRate: emp.uangHarianRate ?? 50000,
-        hariKerjaSeminggu: emp.hariKerjaSeminggu ?? 5
+        hariKerjaSeminggu: emp.hariKerjaSeminggu ?? 5,
+        statusKaryawan: emp.statusKaryawan || "Tetap",
+        uangKerajinanRate: emp.uangKerajinanRate ?? 0,
+        uangHarianKerjaRate: emp.uangHarianKerjaRate ?? 0
       });
     }
   })), tab === "karyawan" && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
@@ -20138,6 +20678,42 @@ function PayrollModule({
       value: "6",
       label: "6 Hari Kerja"
     }]
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr 1fr",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    label: "Status Karyawan",
+    value: empForm.statusKaryawan,
+    onChange: v => setEmpForm({
+      ...empForm,
+      statusKaryawan: v
+    }),
+    options: [{
+      value: "Tetap",
+      label: "Karyawan Tetap"
+    }, {
+      value: "Harian",
+      label: "Belum Tetap (Uang Harian)"
+    }]
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Uang Kerajinan (Rp/minggu)",
+    value: empForm.uangKerajinanRate,
+    onChange: v => setEmpForm({
+      ...empForm,
+      uangKerajinanRate: v
+    }),
+    type: "number"
+  }), empForm.statusKaryawan === "Harian" && /*#__PURE__*/React.createElement(Input, {
+    label: "Uang Harian Kerja (Rp/hari masuk)",
+    value: empForm.uangHarianKerjaRate,
+    onChange: v => setEmpForm({
+      ...empForm,
+      uangHarianKerjaRate: v
+    }),
+    type: "number"
   })), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
@@ -23153,7 +23729,8 @@ function AttendanceModule({
     Sakit: theme.yellow,
     Izin: theme.cyan,
     Alpha: theme.red,
-    Cuti: theme.purple
+    Cuti: theme.purple,
+    "Dinas Luar": theme.accent
   };
   const harianContent = /*#__PURE__*/React.createElement("div", {
     style: {
@@ -23285,7 +23862,7 @@ function AttendanceModule({
       ...form,
       status: v
     }),
-    options: ["Hadir", "Sakit", "Izin", "Alpha", "Cuti"].map(s => ({
+    options: ["Hadir", "Sakit", "Izin", "Alpha", "Cuti", "Dinas Luar"].map(s => ({
       value: s,
       label: s
     }))
@@ -23403,8 +23980,19 @@ function DashboardAbsensiPanel({
 }) {
   const {
     rekapAbsensi,
-    employees
+    employees,
+    attendance
   } = store;
+  // Sisa Cuti: annual quota is 12 hari, resetting each calendar year (baseline confirmed: 12 hari
+  // per 1 Jan 2026) — same convention already used by Form Cuti's own sisaCuti() calculation, just
+  // surfaced here too so HRD/management can see it without opening Form Cuti.
+  const currentYear = today().slice(0, 4);
+  const cutiTerpakaiFor = username => (attendance || []).filter(a => a.username === username && a.status === "Cuti" && (a.tanggal || "").startsWith(currentYear)).length;
+  const sisaCutiForNama = nama => {
+    const emp = (employees || []).find(e => e.nama === nama);
+    if (!emp) return null;
+    return Math.max(0, 12 - cutiTerpakaiFor(emp.username));
+  };
   const [bulanFilter, setBulanFilter] = useState(today().slice(0, 7));
   const rows = (rekapAbsensi || []).filter(r => !bulanFilter || (r.periodeMulai || "").slice(0, 7) === bulanFilter);
   const perStaff = {};
@@ -23415,6 +24003,7 @@ function DashboardAbsensiPanel({
       normal: 0,
       riil: 0,
       absen: 0,
+      dinasLuar: 0,
       terlambat: 0,
       lembur: 0,
       cuti: 0,
@@ -23427,6 +24016,7 @@ function DashboardAbsensiPanel({
     s.normal += Number(r.normalHari) || 0;
     s.riil += Number(r.riilHari) || 0;
     s.absen += Number(r.absenHari) || 0;
+    s.dinasLuar += Number(r.dLuarHari) || 0;
     s.terlambat += Number(r.terlambatJam) || 0;
     s.lembur += Number(r.lemburJam) || 0;
     s.cuti += Number(r.cutiHari) || 0;
@@ -23444,10 +24034,15 @@ function DashboardAbsensiPanel({
   };
   const staffList = Object.values(perStaff).sort((a, b) => a.nama.localeCompare(b.nama));
   const totalAbsenSemua = staffList.reduce((s, x) => s + x.absen, 0);
+  const totalDinasLuarSemua = staffList.reduce((s, x) => s + x.dinasLuar, 0);
   const totalLemburSemua = staffList.reduce((s, x) => s + x.lembur, 0);
   const totalUangMakanSemua = staffList.reduce((s, x) => s + x.uangMakan, 0);
+  // Performa ratio counts dinas luar (off-site duty) as productive time alongside Riil — an
+  // employee fully out on dinas luar was still working, just not scanned at the office, so it
+  // shouldn't drag their performance score down the way real Absen does.
+  const performaRasio = s => s.normal > 0 ? Math.min(1, (s.riil + s.dinasLuar) / s.normal) : 1;
   const performaColor = s => {
-    const rasio = s.normal > 0 ? s.riil / s.normal : 1;
+    const rasio = performaRasio(s);
     if (rasio >= 0.95) return theme.green;
     if (rasio >= 0.85) return theme.yellow;
     return theme.red;
@@ -23513,6 +24108,18 @@ function DashboardAbsensiPanel({
       color: theme.muted,
       fontSize: 13
     }
+  }, "Total Hari Dinas Luar"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 20,
+      fontWeight: 700,
+      color: theme.cyan,
+      marginTop: 6
+    }
+  }, totalDinasLuarSemua)), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted,
+      fontSize: 13
+    }
   }, "Total Jam Lembur"), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 20,
@@ -23543,10 +24150,15 @@ function DashboardAbsensiPanel({
       overflowX: "auto"
     }
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["Nama", "Normal", "Riil", "Absen", "Terlambat(j)", "Lembur(j)", "Sisa Lembur(j)", "Cuti", "Ijin", "Sakit", "Uang Makan", "Performa"],
-    rows: staffList.map(s => [s.nama, s.normal, s.riil, s.absen, s.terlambat.toFixed(1), s.lembur.toFixed(1), sisaLemburFor(s.nama).toFixed(1), s.cuti, s.ijin, s.sakit, fmt(s.uangMakan), /*#__PURE__*/React.createElement(Badge, {
-      color: performaColor(s)
-    }, s.normal > 0 ? `${Math.round(s.riil / s.normal * 100)}%` : "-")]),
+    headers: ["Nama", "Normal", "Riil", "Dinas Luar", "Absen", "Terlambat(j)", "Lembur(j)", "Sisa Lembur(j)", "Cuti", "Sisa Cuti", "Ijin", "Sakit", "Uang Makan", "Performa"],
+    rows: staffList.map(s => {
+      const sisa = sisaCutiForNama(s.nama);
+      return [s.nama, s.normal, s.riil, s.dinasLuar, s.absen, s.terlambat.toFixed(1), s.lembur.toFixed(1), sisaLemburFor(s.nama).toFixed(1), s.cuti, sisa === null ? "-" : /*#__PURE__*/React.createElement(Badge, {
+        color: sisa > 3 ? theme.green : sisa > 0 ? theme.yellow : theme.red
+      }, sisa, " hari"), s.ijin, s.sakit, fmt(s.uangMakan), /*#__PURE__*/React.createElement(Badge, {
+        color: performaColor(s)
+      }, s.normal > 0 ? `${Math.round(performaRasio(s) * 100)}%` : "-")];
+    }),
     emptyMsg: bulanFilter ? "Belum ada rekap absensi tersimpan untuk bulan ini" : "Belum ada rekap absensi tersimpan"
   }))));
 }
@@ -23566,7 +24178,9 @@ function RekapMesinPanel({
     setRekapAbsensi,
     employees,
     setEmployees,
-    setAttendance
+    setAttendance,
+    mingguanMekanikRoster,
+    setMingguanMekanikRoster
   } = store;
   const fileInputRef = useRef(null);
   const [rawParsed, setRawParsed] = useState(null); // { periode: {mulai, selesai}, karyawan: [...] }
@@ -23787,6 +24401,104 @@ function RekapMesinPanel({
       docNomor: `${mulai} s/d ${selesai}`,
       action: "Hapus Periode Rekap",
       detail: ""
+    });
+  };
+  // ════════════════════════════════════════════════════════════════════════
+  // LAPORAN MINGGUAN MEKANIK (Kamis–Rabu) — replaces the old per-day "Harian"
+  // report. Roster of mekanik is manageable (addable/removable) independent of
+  // login role, since some mekanik are non-permanent staff without an app account.
+  // RIIL/Absen/D.Luar figures are pulled from a saved Rekap Mesin periode (assumed
+  // to already follow the company's Kamis–Rabu weekly cutoff, per how HRD uploads).
+  //
+  // APPROXIMATION NOTE: `rekapAbsensi` stores only WEEKLY AGGREGATE totals per
+  // karyawan (no per-day breakdown), so the rule "hadir penuh pada 5 hari kerja
+  // (Kamis, Jumat, Senin, Selasa, Rabu) untuk dapat Uang Kerajinan" is approximated
+  // as "tidak ada hari Absen dalam periode tersimpan itu" (absenHari === 0), which
+  // is equivalent to riilHari + dLuarHari >= normalHari when "Normal" for that
+  // periode already reflects only the 5 workdays (matches the fingerprint machine's
+  // own weekly convention, Sabtu/Minggu dikecualikan). If per-hari granularity is
+  // ever added to Rekap Mesin, this can be tightened to a true per-day check.
+  // ════════════════════════════════════════════════════════════════════════
+  const [mingguanAddName, setMingguanAddName] = useState("");
+  const [mingguanPeriode, setMingguanPeriode] = useState("");
+  const periodeOptions = Array.from(new Set((rekapAbsensi || []).map(r => `${r.periodeMulai}|${r.periodeSelesai}`))).sort().reverse().map(key => {
+    const [mulai, selesai] = key.split("|");
+    return {
+      value: key,
+      label: `${mulai} s/d ${selesai}`
+    };
+  });
+  const addMingguanMekanik = nama => {
+    const n = (nama || "").trim();
+    if (!n) return;
+    setMingguanMekanikRoster(prev => (prev || []).includes(n) ? prev : [...(prev || []), n]);
+    setMingguanAddName("");
+  };
+  const removeMingguanMekanik = nama => setMingguanMekanikRoster(prev => (prev || []).filter(n => n !== nama));
+  const [selMulai, selSelesai] = mingguanPeriode ? mingguanPeriode.split("|") : ["", ""];
+  const laporanMingguanRows = (mingguanMekanikRoster || []).map(nama => {
+    const rekap = (rekapAbsensi || []).find(r => r.namaKaryawan === nama && r.periodeMulai === selMulai && r.periodeSelesai === selSelesai);
+    const emp = (employees || []).find(e => e.nama === nama) || {};
+    const normalHari = rekap ? rekap.normalHari : 0;
+    const riilHari = rekap ? rekap.riilHari : 0;
+    const dLuarHari = rekap ? rekap.dLuarHari : 0;
+    const absenHari = rekap ? rekap.absenHari : 0;
+    const isHarian = emp.statusKaryawan === "Harian";
+    const kerajinanRate = Number(emp.uangKerajinanRate) || 0;
+    const kerajinanEligible = kerajinanRate > 0 && !!rekap && absenHari === 0;
+    const uangKerajinan = kerajinanEligible ? kerajinanRate : 0;
+    const uangHarianKerja = isHarian ? riilHari * (Number(emp.uangHarianKerjaRate) || 0) : 0;
+    return {
+      nama,
+      ada: !!rekap,
+      statusKaryawan: emp.statusKaryawan || "Tetap",
+      normalHari,
+      riilHari,
+      dLuarHari,
+      absenHari,
+      kerajinanRate,
+      kerajinanEligible,
+      uangKerajinan,
+      uangHarianKerja,
+      total: uangKerajinan + uangHarianKerja
+    };
+  });
+  const totalMingguan = laporanMingguanRows.reduce((s, r) => s + r.total, 0);
+  const exportLaporanMingguan = () => exportToExcel(laporanMingguanRows.map(r => ({
+    Nama: r.nama,
+    Status: r.statusKaryawan,
+    Normal: r.normalHari,
+    Riil: r.riilHari,
+    "D.Luar": r.dLuarHari,
+    Absen: r.absenHari,
+    "Uang Kerajinan": r.uangKerajinan,
+    "Uang Harian Kerja": r.uangHarianKerja,
+    Total: r.total
+  })), `Laporan_Mingguan_Mekanik_${selMulai || "periode"}_${selSelesai || ""}.xlsx`, "Laporan Mingguan");
+  const printLaporanMingguanMekanik = () => {
+    if (!selMulai || !selSelesai) {
+      alert("Pilih periode terlebih dahulu.");
+      return;
+    }
+    printDocument({
+      docType: "laporan",
+      docTitle: "Laporan Mingguan Mekanik (Uang Kerajinan & Uang Harian)",
+      nomor: `${selMulai} s/d ${selSelesai}`,
+      tanggal: today(),
+      tanggalLabel: "Dicetak Tanggal",
+      partyLabel: "Periode",
+      partyName: `${selMulai} s/d ${selSelesai}`,
+      itemHeaders: ["Nama", "Status", "Normal", "Riil", "D.Luar", "Absen", "Uang Kerajinan", "Uang Harian Kerja", "Total"],
+      items: laporanMingguanRows.map(r => [r.nama, r.statusKaryawan, r.normalHari, r.riilHari, r.dLuarHari, r.absenHari, fmt(r.uangKerajinan), fmt(r.uangHarianKerja), fmt(r.total)]),
+      subtotal: totalMingguan,
+      total: totalMingguan,
+      extraInfoRows: [["Jumlah Mekanik", laporanMingguanRows.length], ["Total Periode Ini", fmt(totalMingguan)]],
+      dibuatOleh: {
+        nama: session.nama,
+        jabatan: session.jabatan || ""
+      },
+      hideCreatedBy: false,
+      disetujuiLabel: "Mengetahui Finance"
     });
   };
   return /*#__PURE__*/React.createElement("div", {
@@ -24029,7 +24741,87 @@ function RekapMesinPanel({
       onClick: () => deletePeriode(r.periodeMulai, r.periodeSelesai)
     }, "🗑️"))]),
     emptyMsg: "Belum ada rekap absensi tersimpan"
-  }))));
+  }))), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "LAPORAN MINGGUAN MEKANIK (Uang Kerajinan & Uang Harian Kerja)",
+    count: (mingguanMekanikRoster || []).length,
+    badgeColor: theme.cyan,
+    storageKey: "rekap_mingguan_mekanik",
+    defaultOpen: false
+  }, /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 12px",
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Pelaporan mingguan (periode Kamis s/d Rabu minggu depannya) untuk semua mekanik. Daftar mekanik bisa ditambah/dikurangi di bawah — tidak tergantung role login, karena sebagian mekanik belum punya akun sistem. Data Riil/Absen/D.Luar diambil dari periode Rekap Mesin yang sudah tersimpan; Uang Kerajinan & Uang Harian Kerja diambil dari rate yang di-set di Payroll."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      alignItems: "flex-end",
+      flexWrap: "wrap",
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    label: "Tambah Mekanik ke Daftar",
+    value: mingguanAddName,
+    onChange: setMingguanAddName,
+    options: (employees || []).filter(e => !(mingguanMekanikRoster || []).includes(e.nama)).map(e => ({
+      value: e.nama,
+      label: e.nama
+    })),
+    style: {
+      minWidth: 260
+    }
+  }), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    onClick: () => addMingguanMekanik(mingguanAddName)
+  }, "+ Tambah"), /*#__PURE__*/React.createElement(Select, {
+    label: "Periode (dari Rekap Mesin tersimpan)",
+    value: mingguanPeriode,
+    onChange: setMingguanPeriode,
+    options: periodeOptions,
+    style: {
+      minWidth: 260
+    }
+  }), /*#__PURE__*/React.createElement(ExportExcelBtn, {
+    onClick: exportLaporanMingguan
+  }), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: printLaporanMingguanMekanik
+  }, "🖨️ Cetak untuk Finance")), (mingguanMekanikRoster || []).length === 0 && /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Belum ada mekanik di daftar. Tambahkan dari dropdown di atas."), !mingguanPeriode && (mingguanMekanikRoster || []).length > 0 && /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 12,
+      color: theme.orange || theme.accent
+    }
+  }, "Pilih periode untuk menampilkan data."), mingguanPeriode && /*#__PURE__*/React.createElement("div", {
+    style: {
+      overflowX: "auto"
+    }
+  }, /*#__PURE__*/React.createElement(Table, {
+    headers: ["Nama", "Status", "Normal", "Riil", "D.Luar", "Absen", "Uang Kerajinan", "Uang Harian Kerja", "Total", "Aksi"],
+    rows: laporanMingguanRows.map(r => [r.nama, r.statusKaryawan, r.normalHari, r.riilHari, r.dLuarHari, r.absenHari, r.kerajinanRate > 0 ? /*#__PURE__*/React.createElement(Badge, {
+      color: r.kerajinanEligible ? theme.green : theme.muted
+    }, fmt(r.uangKerajinan)) : "-", r.uangHarianKerja > 0 ? fmt(r.uangHarianKerja) : "-", fmt(r.total), /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "danger",
+      onClick: () => removeMingguanMekanik(r.nama)
+    }, "🗑️")]),
+    emptyMsg: "Tidak ada data untuk periode ini"
+  })), mingguanPeriode && laporanMingguanRows.length > 0 && /*#__PURE__*/React.createElement("p", {
+    style: {
+      textAlign: "right",
+      fontSize: 13,
+      fontWeight: 600,
+      color: theme.text,
+      marginTop: 10
+    }
+  }, `Total Periode Ini: ${fmt(totalMingguan)}`))));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -24649,7 +25441,12 @@ function FormCutiModule({
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// KPI SALES — weighted score: Contact 10%, Quotation 20%, SO 40%, On-time Payment 30%
+// KPI SALES — weighted score: Value PO 40%, Bayar Tepat Waktu 25%, Quotation 20%, Meeting 15%.
+// All 4 components are auto-pulled from existing transactional data (PO, Invoice, Quotation,
+// Sales Activity) — nothing here is a manually-entered number a sales manager could pad, which is
+// what makes it hard to manipulate. Each component is normalized relative to the best performer in
+// the current roster (score = value / max value among peers x 100) rather than an arbitrary fixed
+// cap, so the scale always reflects real company performance instead of a guessed ceiling.
 // ════════════════════════════════════════════════════════════════════════════
 function KPISalesModule({
   store,
@@ -24658,22 +25455,45 @@ function KPISalesModule({
   const {
     salesActivities,
     quotationsUnit,
+    quotationsPS,
     salesOrders,
+    itemRequisitions,
+    poLocal,
+    poOverseas,
     invoices,
-    employees
+    employees,
+    kpiSalesRoster,
+    setKpiSalesRoster
   } = store;
   const isSalesManager = session.role === "sales_manager";
+  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   // Base the roster on every registered user with role sales_manager (Master User), not just names
   // that happen to already appear on a quotation/SO — otherwise a sales manager with zero
   // transactions so far (e.g. newly added, like David) silently never shows up in KPI Sales at
   // all. Still merge in any stray salesManagerNama values found on old records as a fallback, in
   // case of legacy data recorded under a name not present in Master User.
-  const salesManagerNames = [...new Set([...(employees || []).filter(e => e.role === "sales_manager").map(e => e.nama), ...quotationsUnit.map(q => q.salesManagerNama), ...salesOrders.map(so => so.salesManagerNama)].filter(Boolean))];
+  const baseRoster = [...new Set([...(employees || []).filter(e => e.role === "sales_manager").map(e => e.nama), ...quotationsUnit.map(q => q.salesManagerNama), ...salesOrders.map(so => so.salesManagerNama)].filter(Boolean))];
+  const rosterExtra = kpiSalesRoster?.extra || [];
+  const rosterExcluded = kpiSalesRoster?.excluded || [];
+  // Final roster shown on the KPI screen: base auto-roster plus any manually-added names, minus
+  // any manually-excluded names. This ONLY changes who is evaluated here — it never touches
+  // anyone's actual login role/access (confirmed business rule: "Hanya daftar KPI, tidak ubah role").
+  const salesManagerNames = [...new Set([...baseRoster, ...rosterExtra])].filter(n => !rosterExcluded.includes(n));
   const targetNames = isSalesManager ? [session.nama] : salesManagerNames;
-  const stats = targetNames.map(nama => {
-    const contacts = salesActivities.filter(a => a.salesNama === nama).length;
-    const quotCount = quotationsUnit.filter(q => q.salesManagerNama === nama).length;
-    const soCount = salesOrders.filter(so => so.salesManagerNama === nama).length;
+  // Value PO: traced through PO -> IR -> SO, since a Purchase Order isn't directly tagged with a
+  // sales manager — it's the SO the underlying Item Requisition came from that carries ownership.
+  const poValueForSalesManager = nama => {
+    const mySONomors = new Set(salesOrders.filter(so => so.salesManagerNama === nama).map(so => so.nomor));
+    const myIRNomors = new Set((itemRequisitions || []).filter(ir => mySONomors.has(ir.soNomor)).map(ir => ir.nomor));
+    const allPO = [...(poLocal || []), ...(poOverseas || [])];
+    return allPO.filter(p => p.status !== "Ditolak GM" && (p.irNomors || []).some(n => myIRNomors.has(n))).reduce((sum, p) => sum + (Number(p.total) || 0), 0);
+  };
+  const rawStats = targetNames.map(nama => {
+    const quotCount = quotationsUnit.filter(q => q.salesManagerNama === nama).length + (quotationsPS || []).filter(q => q.salesManagerNama === nama).length;
+    // "Jumlah Meeting" = client visits logged in Sales Activity (jenisAktivitas "Kunjungan") — the
+    // closest existing tracked activity to a client meeting.
+    const meetingCount = salesActivities.filter(a => a.salesNama === nama && a.jenisAktivitas === "Kunjungan").length;
+    const poValue = poValueForSalesManager(nama);
     const myInvoices = invoices.filter(i => salesOrders.some(so => so.nomor === i.soNomor && so.salesManagerNama === nama));
     const paidOnTime = myInvoices.filter(i => {
       if (i.statusBayar !== "Lunas") return false;
@@ -24682,28 +25502,57 @@ function KPISalesModule({
       return true; // simplified: assumes payment recorded on time if marked Lunas (exact payment date not tracked per-payment)
     }).length;
     const onTimeRate = myInvoices.length ? Math.round(paidOnTime / myInvoices.length * 100) : 0;
-
-    // Normalize each component to 0-100 scale using simple caps, then apply weights
-    const contactScore = Math.min(100, contacts * 5); // 20 contacts = 100
-    const quotScore = Math.min(100, quotCount * 10); // 10 quotations = 100
-    const soScore = Math.min(100, soCount * 10); // 10 SO = 100
-    const paymentScore = onTimeRate;
-    const totalScore = Math.round(contactScore * 0.10 + quotScore * 0.20 + soScore * 0.40 + paymentScore * 0.30);
     return {
       nama,
-      contacts,
-      quotCount,
-      soCount,
+      poValue,
       onTimeRate,
-      contactScore,
-      quotScore,
-      soScore,
+      quotCount,
+      meetingCount
+    };
+  });
+  // Peer-relative normalization: each metric scored against the best performer currently in the
+  // roster (0-100), so nobody can inflate their score just by clearing an arbitrary fixed bar —
+  // the bar moves with real company performance instead.
+  const maxPoValue = Math.max(1, ...rawStats.map(s => s.poValue));
+  const maxQuot = Math.max(1, ...rawStats.map(s => s.quotCount));
+  const maxMeeting = Math.max(1, ...rawStats.map(s => s.meetingCount));
+  const stats = rawStats.map(s => {
+    const poScore = Math.round(s.poValue / maxPoValue * 100);
+    const paymentScore = s.onTimeRate; // already 0-100
+    const quotScore = Math.round(s.quotCount / maxQuot * 100);
+    const meetingScore = Math.round(s.meetingCount / maxMeeting * 100);
+    const totalScore = Math.round(poScore * 0.40 + paymentScore * 0.25 + quotScore * 0.20 + meetingScore * 0.15);
+    return {
+      ...s,
+      poScore,
       paymentScore,
+      quotScore,
+      meetingScore,
       totalScore
     };
   }).sort((a, b) => b.totalScore - a.totalScore);
   const [kpiSalesSearch, setKpiSalesSearch] = useState("");
   const statsFiltered = kpiSalesSearch.trim() ? stats.filter(s => String(s.nama).toLowerCase().includes(kpiSalesSearch.trim().toLowerCase())) : stats;
+  const [addRosterName, setAddRosterName] = useState("");
+  const rosterOptions = (employees || []).filter(e => !salesManagerNames.includes(e.nama)).map(e => ({
+    value: e.nama,
+    label: `${e.nama} (${e.role})`
+  }));
+  const addToKpiRoster = nama => {
+    if (!nama) return;
+    setKpiSalesRoster(prev => ({
+      extra: baseRoster.includes(nama) ? prev?.extra || [] : [...new Set([...(prev?.extra || []), nama])],
+      excluded: (prev?.excluded || []).filter(n => n !== nama)
+    }));
+    setAddRosterName("");
+  };
+  const removeFromKpiRoster = nama => {
+    if (!confirm(`Hapus ${nama} dari daftar KPI Sales? (Role/akses login tidak berubah.)`)) return;
+    setKpiSalesRoster(prev => ({
+      extra: (prev?.extra || []).filter(n => n !== nama),
+      excluded: baseRoster.includes(nama) ? [...new Set([...(prev?.excluded || []), nama])] : prev?.excluded || []
+    }));
+  };
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -24726,10 +25575,10 @@ function KPISalesModule({
   }, "KPI Sales"), /*#__PURE__*/React.createElement(ExportExcelBtn, {
     onClick: () => exportToExcel(stats.map(s => ({
       salesManager: s.nama,
-      contacts: s.contacts,
-      quotations: s.quotCount,
-      salesOrders: s.soCount,
+      valuePO: s.poValue,
       onTimePaymentRate: s.onTimeRate + "%",
+      quotations: s.quotCount,
+      meetings: s.meetingCount,
       totalScore: s.totalScore
     })), "KPI_Sales.xlsx", "KPI Sales")
   })), /*#__PURE__*/React.createElement("div", {
@@ -24741,7 +25590,67 @@ function KPISalesModule({
       borderRadius: 8,
       border: `1px dashed ${theme.border}`
     }
-  }, "ℹ️ Skor KPI = (Contact × 10%) + (Quotation × 20%) + (Sales Order × 40%) + (Bayar Tepat Waktu × 30%)"), /*#__PURE__*/React.createElement(Card, null, !isSalesManager && /*#__PURE__*/React.createElement(Input, {
+  }, "ℹ️ Skor KPI = (Value PO × 40%) + (Bayar Tepat Waktu × 25%) + (Jumlah Quotation × 20%) + (Jumlah Meeting × 15%). Setiap komponen dinilai relatif terhadap performa terbaik di antara sales manager saat ini (bukan angka tetap), dan seluruhnya ditarik otomatis dari data PO/Invoice/Quotation/Sales Activity — tidak ada input manual yang bisa dimanipulasi."), isOwnerLike && /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "KELOLA DAFTAR SALES MANAGER (KPI)",
+    count: salesManagerNames.length,
+    badgeColor: theme.purple,
+    storageKey: "kpi_roster_manage"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Menambah/menghapus di sini hanya mengubah siapa yang muncul di daftar KPI Sales — TIDAK mengubah role atau akses login user di Manajemen User."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      alignItems: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    label: "Tambah user ke daftar KPI",
+    value: addRosterName,
+    onChange: setAddRosterName,
+    options: rosterOptions,
+    style: {
+      flex: 1
+    }
+  }), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    onClick: () => addToKpiRoster(addRosterName)
+  }, "+ Tambah")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6
+    }
+  }, salesManagerNames.map(nama => /*#__PURE__*/React.createElement("div", {
+    key: nama,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      padding: "6px 0",
+      borderBottom: `1px solid ${theme.border}33`
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13,
+      color: theme.text
+    }
+  }, nama, !baseRoster.includes(nama) && /*#__PURE__*/React.createElement(Badge, {
+    color: theme.cyan
+  }, "manual")), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "danger",
+    onClick: () => removeFromKpiRoster(nama)
+  }, "Hapus")))))), /*#__PURE__*/React.createElement(Card, null, !isSalesManager && /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari sales manager...",
     value: kpiSalesSearch,
     onChange: setKpiSalesSearch,
@@ -24749,12 +25658,12 @@ function KPISalesModule({
       marginBottom: 12
     }
   }), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Rank", "Sales Manager", "Contact", "Quotation", "Sales Order", "Bayar Tepat Waktu", "KPI Score"],
+    headers: ["Rank", "Sales Manager", "Value PO", "Bayar Tepat Waktu", "Quotation", "Meeting", "KPI Score"],
     rows: statsFiltered.map((s, i) => [/*#__PURE__*/React.createElement(Badge, {
       color: i === 0 ? theme.yellow : theme.muted
-    }, i === 0 ? "🏆 #1" : `#${i + 1}`), s.nama, s.contacts, s.quotCount, s.soCount, /*#__PURE__*/React.createElement(Badge, {
+    }, i === 0 ? "🏆 #1" : `#${i + 1}`), s.nama, fmtMoney(s.poValue, "IDR"), /*#__PURE__*/React.createElement(Badge, {
       color: s.onTimeRate >= 80 ? theme.green : s.onTimeRate >= 50 ? theme.yellow : theme.red
-    }, s.onTimeRate, "%"), /*#__PURE__*/React.createElement("strong", {
+    }, s.onTimeRate, "%"), s.quotCount, s.meetingCount, /*#__PURE__*/React.createElement("strong", {
       style: {
         color: theme.accentLight,
         fontSize: 15
