@@ -964,6 +964,77 @@ function hasAdminModule(session, moduleId) {
   return Array.isArray(session.customModules) && session.customModules.includes(`${moduleId}:admin`);
 }
 
+// Notification badge counts — shows pending-approval items relevant to the logged-in user's role.
+// Top-level (not a hook) so both the sidebar nav and the Dashboard "Modul yang Anda Akses" panel
+// can compute the same counts from just (store, session, moduleId), without needing to be inside
+// the same component that owns the switch statement.
+function computeBadgeCount(store, session, moduleId) {
+  const role = session.role;
+  const isOwnerLike = role === "owner" || role === "gm";
+  switch (moduleId) {
+    case "mekanik_report":
+      if (role === "workshop_manager" || isOwnerLike) return store.dars.filter(d => d.status === "Menunggu Approval Septi").length + store.partRecs.filter(r => r.status === "Menunggu Approval Septi").length;
+      return 0;
+    case "workshop_dashboard":
+      if (role === "workshop_manager" || isOwnerLike) return store.dars.filter(d => d.status === "Menunggu Approval Septi").length + store.partRecs.filter(r => r.status === "Menunggu Approval Septi").length;
+      return 0;
+    case "quotation_unit":
+      if (isOwnerLike) return store.quotationsUnit.filter(q => q.status === "Menunggu Approval GM").length;
+      return 0;
+    case "quotation_ps":
+      if (role === "service_manager" || isOwnerLike) {
+        const pendingRecs = store.partRecs.filter(r => r.status === "Menunggu").length;
+        const pendingGM = isOwnerLike ? store.quotationsPS.filter(q => q.status === "Menunggu Approval GM").length : 0;
+        return pendingRecs + pendingGM;
+      }
+      return 0;
+    case "po_local":
+      if (isOwnerLike) return store.poLocal.filter(p => p.status === "Menunggu Approval GM").length;
+      return 0;
+    case "po_overseas":
+      if (isOwnerLike) return store.poOverseas.filter(p => p.status === "Menunggu Approval GM").length;
+      return 0;
+    case "part_request":
+      if (role === "service_manager") return store.partRequests.filter(r => r.status === "Menunggu Review Asil").length;
+      if (isOwnerLike) return store.partRequests.filter(r => r.status === "Menunggu Approval GM").length;
+      return 0;
+    case "maintenance_schedule":
+      {
+        const getDueLabel = m => {
+          if (m.status === "Selesai") return "Selesai";
+          const diffDays = Math.ceil((new Date(m.nextDueDate) - new Date(today())) / 86400000);
+          return diffDays < 0 ? "Terlambat" : diffDays <= 14 ? "Segera" : "Terjadwal";
+        };
+        if (role === "workshop_manager" || isOwnerLike) return store.maintenanceSchedules.filter(m => ["Terlambat", "Segera"].includes(getDueLabel(m))).length;
+        return 0;
+      }
+    case "invoice":
+      if (isOwnerLike) return store.invoices.filter(i => i.statusApproval === "Menunggu Approval GM").length + store.editRequests.filter(r => r.module === "Invoice" && r.action === "Edit" && r.status === "Menunggu Approval GM").length;
+      return 0;
+    case "goods_receipt":
+      if (role === "workshop_manager" || isOwnerLike) return store.editRequests.filter(r => r.module === "Penerimaan Barang" && r.action === "Edit" && r.status === "Menunggu Approval Workshop").length;
+      return 0;
+    case "master_part":
+      if (isOwnerLike) return store.editRequests.filter(r => r.module === "Master Part" && r.status === "Menunggu Approval GM").length;
+      return 0;
+    case "customer":
+      if (isOwnerLike) return store.editRequests.filter(r => r.module === "Database Client" && r.status === "Menunggu Approval GM").length;
+      return 0;
+    case "financial_dashboard":
+      if (["owner", "gm", "finance", "finance_director"].includes(role)) {
+        const ov1 = store.invoices.filter(i => i.statusBayar !== "Lunas" && i.tipePembayaran === "TEMPO" && getDueStatus(i.tipePembayaran, i.tanggalJatuhTempo).label === "Terlambat").length;
+        const ov2 = [...store.poLocal, ...store.poOverseas].filter(p => p.status !== "Sudah Diterima" && p.tipePembayaran === "TEMPO" && getDueStatus(p.tipePembayaran, p.tanggalJatuhTempo).label === "Terlambat").length;
+        return ov1 + ov2;
+      }
+      return 0;
+    case "cuti":
+      if (hasPayrollAccess(role)) return store.leaveRequests.filter(r => r.status === "Menunggu Approval HRD").length;
+      return 0;
+    default:
+      return 0;
+  }
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // DATABASE CLIENT ACCESS — a client can now be assigned to multiple sales managers
 // (by username, the stable identifier) via HO1/HO2/HO3, instead of the old single
@@ -2116,6 +2187,81 @@ function Card({
     }
   }, children);
 }
+// CollapsibleSection: reusable expand/collapse wrapper used for "ON GOING / SUCCESS / COMPLETED"
+// style status buckets across many modules (Unit Quotation, PS Quotation, Sales Order, Item
+// Requisition, PO Lokal/Overseas, Invoice, Penerimaan Barang). Defaults to COLLAPSED on first
+// visit; the open/closed state is remembered per-device via localStorage (UI-only preference,
+// intentionally not synced through Supabase) keyed by `storageKey` so each section on each module
+// keeps its own state independently.
+function CollapsibleSection({
+  title,
+  count,
+  badgeColor,
+  storageKey,
+  defaultOpen = false,
+  children
+}) {
+  const lsKey = `erp_collapse_${storageKey}`;
+  const [open, setOpen] = useState(() => {
+    try {
+      const saved = window.localStorage.getItem(lsKey);
+      return saved === null ? defaultOpen : saved === "1";
+    } catch (e) {
+      return defaultOpen;
+    }
+  });
+  const toggle = () => {
+    setOpen(o => {
+      const next = !o;
+      try {
+        window.localStorage.setItem(lsKey, next ? "1" : "0");
+      } catch (e) {}
+      return next;
+    });
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: toggle,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      cursor: "pointer",
+      userSelect: "none",
+      padding: "10px 16px",
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: open ? "10px 10px 0 0" : 10
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      transform: open ? "rotate(90deg)" : "rotate(0deg)",
+      transition: "transform 0.15s",
+      display: "inline-block"
+    }
+  }, "▶"), /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: 0,
+      fontSize: 15,
+      color: theme.text,
+      flex: 1
+    }
+  }, title), count !== undefined && /*#__PURE__*/React.createElement(Badge, {
+    color: badgeColor || theme.accent
+  }, count)), open && /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: `1px solid ${theme.border}`,
+      borderTop: "none",
+      borderRadius: "0 0 10px 10px",
+      padding: 16
+    }
+  }, children));
+}
 function Btn({
   children,
   onClick,
@@ -3021,10 +3167,12 @@ function Dashboard({
     }
   }, getAllowedModules(session.role, session.customModules).filter(m => m !== "payroll" || hasPayrollAccess(session.role)).map(mid => {
     const m = ALL_MODULES.find(x => x.id === mid);
-    return m ? /*#__PURE__*/React.createElement(Badge, {
+    if (!m) return null;
+    const pending = computeBadgeCount(store, session, mid);
+    return /*#__PURE__*/React.createElement(Badge, {
       key: mid,
-      color: theme.accent
-    }, m.icon, " ", m.label) : null;
+      color: pending > 0 ? theme.red : theme.accent
+    }, m.icon, " ", m.label, pending > 0 && ` (${pending})`);
   }))));
 }
 
@@ -10102,33 +10250,30 @@ function QuotationUnit({
     style: {
       marginBottom: 12
     }
-  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
-    style: {
-      margin: "0 0 12px",
-      color: theme.text,
-      fontSize: 15
-    }
-  }, "ON GOING"), /*#__PURE__*/React.createElement(Table, {
+  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "ON GOING",
+    count: onGoingQ.length,
+    badgeColor: theme.accent,
+    storageKey: "qu_ongoing"
+  }, /*#__PURE__*/React.createElement(Table, {
     headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total", "Status", "Aksi"],
     rows: onGoingQ.map(buildRow),
     emptyMsg: "Tidak ada quotation on going"
-  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
-    style: {
-      margin: "0 0 12px",
-      color: theme.cyan,
-      fontSize: 15
-    }
-  }, "QUOTATION SUCCESS (Sudah jadi SO)"), /*#__PURE__*/React.createElement(Table, {
+  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "QUOTATION SUCCESS (Sudah jadi SO)",
+    count: successQ.length,
+    badgeColor: theme.cyan,
+    storageKey: "qu_success"
+  }, /*#__PURE__*/React.createElement(Table, {
     headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total", "Status", "Aksi"],
     rows: successQ.map(buildRow),
     emptyMsg: "Belum ada quotation yang menjadi SO"
-  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
-    style: {
-      margin: "0 0 12px",
-      color: theme.muted,
-      fontSize: 15
-    }
-  }, "QUOTATION CLOSED"), /*#__PURE__*/React.createElement(Table, {
+  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "QUOTATION CLOSED",
+    count: closedQ.length,
+    badgeColor: theme.muted,
+    storageKey: "qu_closed"
+  }, /*#__PURE__*/React.createElement(Table, {
     headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total", "Status", "Aksi"],
     rows: closedQ.map(buildRow),
     emptyMsg: "Belum ada quotation yang closed"
@@ -11380,33 +11525,30 @@ function QuotationPS({
     style: {
       marginBottom: 12
     }
-  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
-    style: {
-      margin: "0 0 12px",
-      color: theme.text,
-      fontSize: 15
-    }
-  }, "ON GOING"), /*#__PURE__*/React.createElement(Table, {
+  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "ON GOING",
+    count: qpsOnGoing.length,
+    badgeColor: theme.accent,
+    storageKey: "qps_ongoing"
+  }, /*#__PURE__*/React.createElement(Table, {
     headers: ["No. Quotation", "Tanggal", "Client", "Total", "Sumber", "Status", "Aksi"],
     rows: qpsOnGoing.map(buildRowPS),
     emptyMsg: "Tidak ada quotation on going"
-  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
-    style: {
-      margin: "0 0 12px",
-      color: theme.cyan,
-      fontSize: 15
-    }
-  }, "QUOTATION SUCCESS (Sudah jadi SO)"), /*#__PURE__*/React.createElement(Table, {
+  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "QUOTATION SUCCESS (Sudah jadi SO)",
+    count: qpsSuccess.length,
+    badgeColor: theme.cyan,
+    storageKey: "qps_success"
+  }, /*#__PURE__*/React.createElement(Table, {
     headers: ["No. Quotation", "Tanggal", "Client", "Total", "Sumber", "Status", "Aksi"],
     rows: qpsSuccess.map(buildRowPS),
     emptyMsg: "Belum ada quotation yang menjadi SO"
-  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
-    style: {
-      margin: "0 0 12px",
-      color: theme.muted,
-      fontSize: 15
-    }
-  }, "QUOTATION CLOSED"), /*#__PURE__*/React.createElement(Table, {
+  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "QUOTATION CLOSED",
+    count: qpsClosed.length,
+    badgeColor: theme.muted,
+    storageKey: "qps_closed"
+  }, /*#__PURE__*/React.createElement(Table, {
     headers: ["No. Quotation", "Tanggal", "Client", "Total", "Sumber", "Status", "Aksi"],
     rows: qpsClosed.map(buildRowPS),
     emptyMsg: "Belum ada quotation yang closed"
@@ -12002,7 +12144,6 @@ function SalesOrderModule({
     const revised = bomRevisedUnits(so.bomSnapshot, units).length > 0;
     return (so.cascadeAlert ? "⚠ " : "") + (revised ? "🔧 " : "") + so.nomor;
   };
-  const [pullModal, setPullModal] = useState(false);
   const [detail, setDetail] = useState(null);
   const [pickQuot, setPickQuot] = useState(null); // { quot, type } — quotation chosen, now picking which items become the SO
   const [pickedItems, setPickedItems] = useState([]); // indices (into pickQuot.quot.items) currently checked
@@ -12283,7 +12424,6 @@ function SalesOrderModule({
       detail: `Dari ${quot.nomor} — ${items.length}/${quot.items.length} item — ${fmt(total)}`
     });
     setPickQuot(null);
-    setPullModal(false);
   };
   return /*#__PURE__*/React.createElement("div", {
     style: {
@@ -12325,99 +12465,11 @@ function SalesOrderModule({
       total: so.total,
       status: so.status
     })), "Sales_Order.xlsx", "Sales Order")
-  }), (isEpy || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
-    onClick: () => setPullModal(true)
-  }, "+ Buat SO dari Quotation"))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
-    placeholder: "Cari no. SO / client / sales manager / sumber quotation...",
-    value: soSearch,
-    onChange: setSoSearch,
-    style: {
-      marginBottom: 12
-    }
-  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
-    style: {
-      margin: "0 0 12px",
-      color: theme.text,
-      fontSize: 15
-    }
-  }, "ON GOING"), /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. SO", "Tipe", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Status", "Selesai"],
-    rows: salesOrdersFiltered.filter(so => !soHasBecomePO(so) && !soIsCompleted(so)).map(so => [/*#__PURE__*/React.createElement("span", {
-      style: {
-        color: theme.accentLight,
-        fontWeight: 600,
-        cursor: "pointer"
-      },
-      onClick: () => setDetail(so)
-    }, soLabel(so)), /*#__PURE__*/React.createElement(Badge, {
-      color: so.tipe === "Unit" ? theme.purple : theme.cyan
-    }, so.tipe), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
-      color: theme.green
-    }, so.status), (isEpy || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "ghost",
-      onClick: () => openSelesaiModal(so)
-    }, "✓ Tandai Selesai")]),
-    onEdit: (isEpy || isOwnerLike) ? i => openEditSO(salesOrdersFiltered.filter(so => !soHasBecomePO(so) && !soIsCompleted(so))[i]) : undefined,
-    onDelete: isOwnerLike ? i => deleteSO(salesOrdersFiltered.filter(so => !soHasBecomePO(so) && !soIsCompleted(so))[i]) : undefined,
-    emptyMsg: "Belum ada Sales Order on going"
-  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
-    style: {
-      margin: "0 0 12px",
-      color: theme.cyan,
-      fontSize: 15
-    }
-  }, "SALES ORDER TO PURCHASE ORDER"), /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. SO", "Tipe", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Status", "Selesai"],
-    rows: salesOrdersFiltered.filter(so => soHasBecomePO(so) && !soIsCompleted(so)).map(so => [/*#__PURE__*/React.createElement("span", {
-      style: {
-        color: theme.accentLight,
-        fontWeight: 600,
-        cursor: "pointer"
-      },
-      onClick: () => setDetail(so)
-    }, soLabel(so)), /*#__PURE__*/React.createElement(Badge, {
-      color: so.tipe === "Unit" ? theme.purple : theme.cyan
-    }, so.tipe), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
-      color: theme.green
-    }, so.status), (isEpy || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "ghost",
-      onClick: () => openSelesaiModal(so)
-    }, "✓ Tandai Selesai")]),
-    onEdit: (isEpy || isOwnerLike) ? i => openEditSO(salesOrdersFiltered.filter(so => soHasBecomePO(so) && !soIsCompleted(so))[i]) : undefined,
-    onDelete: isOwnerLike ? i => deleteSO(salesOrdersFiltered.filter(so => soHasBecomePO(so) && !soIsCompleted(so))[i]) : undefined,
-    emptyMsg: "Belum ada Sales Order yang sudah menjadi Purchase Order"
-  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
-    style: {
-      margin: "0 0 12px",
-      color: theme.green,
-      fontSize: 15
-    }
-  }, "SALES ORDER COMPLETED"), /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. SO", "Tipe", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Selesai Via"],
-    rows: salesOrdersFiltered.filter(so => soIsCompleted(so)).map(so => [/*#__PURE__*/React.createElement("span", {
-      style: {
-        color: theme.accentLight,
-        fontWeight: 600,
-        cursor: "pointer"
-      },
-      onClick: () => setDetail(so)
-    }, soLabel(so)), /*#__PURE__*/React.createElement(Badge, {
-      color: so.tipe === "Unit" ? theme.purple : theme.cyan
-    }, so.tipe), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
-      color: theme.green
-    }, soSelesaiVia(so))]),
-    onDelete: isOwnerLike ? i => deleteSO(salesOrdersFiltered.filter(so => soIsCompleted(so))[i]) : undefined,
-    emptyMsg: "Belum ada Sales Order yang selesai"
-  })), /*#__PURE__*/React.createElement(Modal, {
-    open: pullModal,
-    title: "Pilih Quotation yang Sudah Disetujui GM",
-    onClose: () => {
-      setPullModal(false);
-      setPullSearch("");
-    },
-    width: 680
+  }))), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "SQ ON GOING (Quotation Disetujui, Belum Jadi SO)",
+    count: approvedUnit.length + approvedPS.length,
+    badgeColor: theme.purple,
+    storageKey: "so_sq_ongoing"
   }, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -12454,7 +12506,7 @@ function SalesOrderModule({
       fontSize: 13,
       color: theme.text
     }
-  }, q.nomor, " — ", q.customerNama, " — ", fmt(q.total)), /*#__PURE__*/React.createElement(Btn, {
+  }, q.nomor, " — ", q.customerNama, " — ", fmt(q.total)), (isEpy || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     onClick: () => openPickItems(q, "Unit")
   }, "Buat SO")))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
@@ -12483,10 +12535,90 @@ function SalesOrderModule({
       fontSize: 13,
       color: theme.text
     }
-  }, q.nomor, " — ", q.customerNama, " — ", fmt(q.total)), /*#__PURE__*/React.createElement(Btn, {
+  }, q.nomor, " — ", q.customerNama, " — ", fmt(q.total)), (isEpy || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     onClick: () => openPickItems(q, "Parts/Service")
-  }, "Buat SO")))))), /*#__PURE__*/React.createElement(Modal, {
+  }, "Buat SO")))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari no. SO / client / sales manager / sumber quotation...",
+    value: soSearch,
+    onChange: setSoSearch,
+    style: {
+      marginBottom: 12
+    }
+  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "ON GOING",
+    count: salesOrdersFiltered.filter(so => !soHasBecomePO(so) && !soIsCompleted(so)).length,
+    badgeColor: theme.accent,
+    storageKey: "so_ongoing"
+  }, /*#__PURE__*/React.createElement(Table, {
+    headers: ["No. SO", "Tipe", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Status", "Selesai"],
+    rows: salesOrdersFiltered.filter(so => !soHasBecomePO(so) && !soIsCompleted(so)).map(so => [/*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.accentLight,
+        fontWeight: 600,
+        cursor: "pointer"
+      },
+      onClick: () => setDetail(so)
+    }, soLabel(so)), /*#__PURE__*/React.createElement(Badge, {
+      color: so.tipe === "Unit" ? theme.purple : theme.cyan
+    }, so.tipe), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
+      color: theme.green
+    }, so.status), (isEpy || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => openSelesaiModal(so)
+    }, "✓ Tandai Selesai")]),
+    onEdit: (isEpy || isOwnerLike) ? i => openEditSO(salesOrdersFiltered.filter(so => !soHasBecomePO(so) && !soIsCompleted(so))[i]) : undefined,
+    onDelete: isOwnerLike ? i => deleteSO(salesOrdersFiltered.filter(so => !soHasBecomePO(so) && !soIsCompleted(so))[i]) : undefined,
+    emptyMsg: "Belum ada Sales Order on going"
+  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "SALES ORDER TO PURCHASE ORDER",
+    count: salesOrdersFiltered.filter(so => soHasBecomePO(so) && !soIsCompleted(so)).length,
+    badgeColor: theme.cyan,
+    storageKey: "so_to_po"
+  }, /*#__PURE__*/React.createElement(Table, {
+    headers: ["No. SO", "Tipe", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Status", "Selesai"],
+    rows: salesOrdersFiltered.filter(so => soHasBecomePO(so) && !soIsCompleted(so)).map(so => [/*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.accentLight,
+        fontWeight: 600,
+        cursor: "pointer"
+      },
+      onClick: () => setDetail(so)
+    }, soLabel(so)), /*#__PURE__*/React.createElement(Badge, {
+      color: so.tipe === "Unit" ? theme.purple : theme.cyan
+    }, so.tipe), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
+      color: theme.green
+    }, so.status), (isEpy || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => openSelesaiModal(so)
+    }, "✓ Tandai Selesai")]),
+    onEdit: (isEpy || isOwnerLike) ? i => openEditSO(salesOrdersFiltered.filter(so => soHasBecomePO(so) && !soIsCompleted(so))[i]) : undefined,
+    onDelete: isOwnerLike ? i => deleteSO(salesOrdersFiltered.filter(so => soHasBecomePO(so) && !soIsCompleted(so))[i]) : undefined,
+    emptyMsg: "Belum ada Sales Order yang sudah menjadi Purchase Order"
+  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "SALES ORDER COMPLETED",
+    count: salesOrdersFiltered.filter(so => soIsCompleted(so)).length,
+    badgeColor: theme.green,
+    storageKey: "so_completed"
+  }, /*#__PURE__*/React.createElement(Table, {
+    headers: ["No. SO", "Tipe", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Selesai Via"],
+    rows: salesOrdersFiltered.filter(so => soIsCompleted(so)).map(so => [/*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.accentLight,
+        fontWeight: 600,
+        cursor: "pointer"
+      },
+      onClick: () => setDetail(so)
+    }, soLabel(so)), /*#__PURE__*/React.createElement(Badge, {
+      color: so.tipe === "Unit" ? theme.purple : theme.cyan
+    }, so.tipe), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
+      color: theme.green
+    }, soSelesaiVia(so))]),
+    onDelete: isOwnerLike ? i => deleteSO(salesOrdersFiltered.filter(so => soIsCompleted(so))[i]) : undefined,
+    emptyMsg: "Belum ada Sales Order yang selesai"
+  })), /*#__PURE__*/React.createElement(Modal, {
     open: !!pickQuot,
     title: `Pilih Item & Info Pengiriman — ${pickQuot?.quot?.nomor || ""}`,
     onClose: () => setPickQuot(null),
@@ -13049,7 +13181,6 @@ function ItemRequisitionModule({
     soNomor: "",
     items: []
   });
-  const [soPickerOpen, setSoPickerOpen] = useState(false);
   const [soPickerSearch, setSoPickerSearch] = useState("");
   const closeManualModal = () => {
     setManualModal(false);
@@ -13201,6 +13332,16 @@ function ItemRequisitionModule({
   // Traces IR -> PO (Lokal/Overseas, matched via po.irNomors) -> per-part received qty
   // (summed from po.receivedMap, which Goods Receipt maintains as items get received at
   // Office/Workshop). Lets the IR view show which requested parts have actually arrived.
+  // An IR is "fully received" once every one of its items has an accumulated received qty (summed
+  // across all linked PO receivedMap entries) that meets or exceeds the requested qtyButuh. Used to
+  // split the IR list into 3 buckets: Belum di-PO / IR ON GOING (di-PO, belum diterima semua) / IR
+  // RECEIVED (semua item sudah diterima di workshop).
+  const isIRFullyReceived = ir => {
+    if (ir.status !== "Sudah di-PO") return false;
+    const { receivedByPart } = irRefInfo(ir);
+    return (ir.items || []).every(it => (receivedByPart[it.partNumber] || 0) >= (it.qtyButuh || 0));
+  };
+  const irBucket = ir => ir.status !== "Sudah di-PO" ? "belum" : isIRFullyReceived(ir) ? "received" : "ongoing";
   const irRefInfo = ir => {
     const linkedPOs = [...(poLocal || []).map(p => ({
       ...p,
@@ -13436,18 +13577,31 @@ function ItemRequisitionModule({
       margin: 0,
       color: theme.text
     }
-  }, "Item Requisition"), canManage && React.createElement("div", {
+  }, "Item Requisition"), React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
       flexWrap: "wrap"
     }
-  }, React.createElement(Btn, {
-    onClick: () => {
-      setSoPickerSearch("");
-      setSoPickerOpen(true);
-    }
-  }, "+ Buat IR dari SO"), React.createElement(Btn, {
+  }, React.createElement(ExportExcelBtn, {
+    onClick: () => exportToExcel(itemRequisitions.map(r => {
+      const so = salesOrders.find(s => s.nomor === r.soNomor);
+      const { receivedByPart } = irRefInfo(r);
+      return (r.items || []).map(it => ({
+        noIR: r.nomor,
+        tanggalIR: r.tanggal,
+        noSO: r.soNomor || "-",
+        noPOClient: so?.noPoClient || "-",
+        tglPOClient: so?.tanggalPO || "-",
+        namaClient: r.soCustomerNama || "-",
+        partNumber: it.partNumber,
+        partName: it.partName,
+        partDeskripsi: it.description || "-",
+        sudahDiPO: r.status === "Sudah di-PO" ? "Ya" : "Belum",
+        sudahDiterimaWorkshop: (receivedByPart[it.partNumber] || 0) >= (it.qtyButuh || 0) ? "Ya" : "Belum"
+      }));
+    }).flat(), "Item_Requisition.xlsx", "Item Requisition")
+  }), canManage && React.createElement(Btn, {
     onClick: () => {
       setEditingNomor(null);
       setManualForm(blankManualForm);
@@ -13462,43 +13616,11 @@ function ItemRequisitionModule({
       borderRadius: 8,
       border: `1px dashed ${theme.border}`
     }
-  }, "ℹ️ Item Requisition hanya dibuat jika ", React.createElement("strong", null, "stock kurang"), " dari Sales Order, atau permintaan part baru di luar SO (kandidat update BOM, SO opsional). Harga tidak ditampilkan di sini."), React.createElement(Card, null, React.createElement(Input, {
-    placeholder: "Cari no. requisition / no. SO / nama client...",
-    value: irSearch,
-    onChange: setIrSearch,
-    style: {
-      marginBottom: 12
-    }
-  }), React.createElement(Table, {
-    headers: ["No. Requisition", "Tanggal", "No. SO", "No. PO Client", "Nama Client", "Jumlah Item Kurang", "Status", "IR Completed"],
-    rows: itemRequisitionsFiltered.map(r => [React.createElement("span", {
-      style: {
-        color: theme.accentLight,
-        fontWeight: 600,
-        cursor: "pointer"
-      },
-      onClick: () => setDetail(r)
-    }, (r.cascadeAlert ? "⚠ " : "") + (bomRevisedUnits(r.bomSnapshot, units).length > 0 ? "🔧 " : "") + r.nomor), r.tanggal, r.bomCandidate ? r.soNomor ? React.createElement(Badge, {
-      color: theme.blue
-    }, "Non-SO — ", r.soNomor) : React.createElement(Badge, {
-      color: theme.blue
-    }, "Non-SO / Kandidat BOM") : r.soNomor, (salesOrders.find(s => s.nomor === r.soNomor)?.noPoClient) || "-", r.soCustomerNama || "-", React.createElement(Badge, {
-      color: theme.purple
-    }, r.items.length, " part"), React.createElement(Badge, {
-      color: r.status === "Menunggu Purchasing" ? theme.yellow : theme.green
-    }, r.status), r.status === "Sudah di-PO" ? React.createElement(Badge, {
-      color: theme.green
-    }, "✓ Selesai") : React.createElement(Badge, {
-      color: theme.yellow
-    }, "Belum")]),
-    onEdit: canManage ? i => onEditIR(itemRequisitionsFiltered[i]) : undefined,
-    onDelete: canManage ? i => deleteIR(itemRequisitionsFiltered[i]) : undefined,
-    emptyMsg: "Belum ada Item Requisition"
-  })), React.createElement(Modal, {
-    open: soPickerOpen,
-    title: "Pilih Sales Order untuk dijadikan Item Requisition",
-    onClose: () => setSoPickerOpen(false),
-    width: 640
+  }, "ℹ️ Item Requisition hanya dibuat jika ", React.createElement("strong", null, "stock kurang"), " dari Sales Order, atau permintaan part baru di luar SO (kandidat update BOM, SO opsional). Harga tidak ditampilkan di sini."), canManage && React.createElement(CollapsibleSection, {
+    title: "SO ON GOING (Stock Kurang, Belum Jadi IR)",
+    count: soPickerList.length,
+    badgeColor: theme.purple,
+    storageKey: "ir_so_ongoing"
   }, React.createElement("div", {
     style: {
       display: "flex",
@@ -13547,11 +13669,75 @@ function ItemRequisitionModule({
     }
   }, so.customerNama, " · ", so.tanggal)), React.createElement(Btn, {
     size: "sm",
-    onClick: () => {
-      setSoPickerOpen(false);
-      loadFromSO(so.nomor);
+    onClick: () => loadFromSO(so.nomor)
+  }, "Buat IR")))))), React.createElement(Card, null, React.createElement(Input, {
+    placeholder: "Cari no. requisition / no. SO / nama client...",
+    value: irSearch,
+    onChange: setIrSearch,
+    style: {
+      marginBottom: 12
     }
-  }, "Pilih → Buat IR")))))), React.createElement(Modal, {
+  })), (() => {
+    const irHeaders = ["No. Requisition", "Tanggal", "No. SO", "No. PO Client", "Nama Client", "Jumlah Item Kurang", "Status", "IR Completed"];
+    const buildIRRow = r => [React.createElement("span", {
+      style: {
+        color: theme.accentLight,
+        fontWeight: 600,
+        cursor: "pointer"
+      },
+      onClick: () => setDetail(r)
+    }, (r.cascadeAlert ? "⚠ " : "") + (bomRevisedUnits(r.bomSnapshot, units).length > 0 ? "🔧 " : "") + r.nomor), r.tanggal, r.bomCandidate ? r.soNomor ? React.createElement(Badge, {
+      color: theme.blue
+    }, "Non-SO — ", r.soNomor) : React.createElement(Badge, {
+      color: theme.blue
+    }, "Non-SO / Kandidat BOM") : r.soNomor, (salesOrders.find(s => s.nomor === r.soNomor)?.noPoClient) || "-", r.soCustomerNama || "-", React.createElement(Badge, {
+      color: theme.purple
+    }, r.items.length, " part"), React.createElement(Badge, {
+      color: r.status === "Menunggu Purchasing" ? theme.yellow : theme.green
+    }, r.status), r.status === "Sudah di-PO" ? React.createElement(Badge, {
+      color: theme.green
+    }, "✓ Selesai") : React.createElement(Badge, {
+      color: theme.yellow
+    }, "Belum")];
+    const belumDiPO = itemRequisitionsFiltered.filter(r => irBucket(r) === "belum");
+    const irOnGoing = itemRequisitionsFiltered.filter(r => irBucket(r) === "ongoing");
+    const irReceived = itemRequisitionsFiltered.filter(r => irBucket(r) === "received");
+    return React.createElement(React.Fragment, null, React.createElement(CollapsibleSection, {
+      title: "Belum di-PO",
+      count: belumDiPO.length,
+      badgeColor: theme.yellow,
+      storageKey: "ir_belum_po",
+      defaultOpen: true
+    }, React.createElement(Table, {
+      headers: irHeaders,
+      rows: belumDiPO.map(buildIRRow),
+      onEdit: canManage ? i => onEditIR(belumDiPO[i]) : undefined,
+      onDelete: canManage ? i => deleteIR(belumDiPO[i]) : undefined,
+      emptyMsg: "Tidak ada IR yang belum di-PO"
+    })), React.createElement(CollapsibleSection, {
+      title: "IR ON GOING (Sudah di-PO, Belum Diterima)",
+      count: irOnGoing.length,
+      badgeColor: theme.accent,
+      storageKey: "ir_ongoing"
+    }, React.createElement(Table, {
+      headers: irHeaders,
+      rows: irOnGoing.map(buildIRRow),
+      onEdit: canManage ? i => onEditIR(irOnGoing[i]) : undefined,
+      onDelete: canManage ? i => deleteIR(irOnGoing[i]) : undefined,
+      emptyMsg: "Tidak ada IR yang sedang berjalan ke Purchase Order"
+    })), React.createElement(CollapsibleSection, {
+      title: "IR RECEIVED (Sudah Diterima di Workshop)",
+      count: irReceived.length,
+      badgeColor: theme.green,
+      storageKey: "ir_received"
+    }, React.createElement(Table, {
+      headers: irHeaders,
+      rows: irReceived.map(buildIRRow),
+      onEdit: canManage ? i => onEditIR(irReceived[i]) : undefined,
+      onDelete: canManage ? i => deleteIR(irReceived[i]) : undefined,
+      emptyMsg: "Belum ada IR yang selesai diterima"
+    })));
+  })(), React.createElement(Modal, {
     open: !!detail,
     title: `Detail ${detail?.nomor}`,
     onClose: () => setDetail(null),
@@ -13923,6 +14109,9 @@ function PurchaseOrderModule({
   const canMarkPaid = ["purchasing", "finance_director", "owner", "gm"].includes(session.role); // Erni or Christine (Finance Director)
   const isMaria = session.role === "purchasing_overseas";
   const [poSearch, setPoSearch] = useState("");
+  const [irOngoingSearch, setIrOngoingSearch] = useState("");
+  const irOngoingListAll = itemRequisitions.filter(ir => ir.status === "Menunggu Purchasing" && (ir.items || []).some(it => !it.sudahDiPO));
+  const irOngoingList = irOngoingSearch.trim() ? irOngoingListAll.filter(ir => [ir.nomor, ir.soNomor, ir.soCustomerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(irOngoingSearch.trim().toLowerCase()))) : irOngoingListAll;
   const poFiltered = (poSearch.trim() ? po.filter(p => {
     const q = poSearch.trim().toLowerCase();
     if ([p.nomor, p.supplierNama].filter(Boolean).some(x => String(x).toLowerCase().includes(q))) return true;
@@ -14002,6 +14191,37 @@ function PurchaseOrderModule({
       urgent: false
     });
     setModal(true);
+  };
+
+  // "IR Ongoing" (belum di-PO) inline list entry point: start a new PO pre-seeded from a specific
+  // IR's still-available items, instead of the old blank "+ Buat PO" -> pick-IR-from-dropdown flow.
+  // Opens the same create form + per-item picker, just auto-triggered for the chosen IR.
+  const startPOFromIR = irNomor => {
+    openCreate();
+    openIrPick(irNomor, "create");
+  };
+  const [editTanggalPO, setEditTanggalPO] = useState(null); // { po, tanggal } — lightweight date-only revision, never touches items/price/approval status
+  const openEditTanggalPO = p => {
+    setEditTanggalPO({
+      po: p,
+      tanggal: p.tanggal || today()
+    });
+  };
+  const saveEditTanggalPO = () => {
+    if (!editTanggalPO) return;
+    const arr = [...po];
+    arr[po.indexOf(editTanggalPO.po)] = {
+      ...editTanggalPO.po,
+      tanggal: editTanggalPO.tanggal
+    };
+    setPo(arr);
+    logAudit(store, session, {
+      module: isLocal ? "Purchase Order Lokal" : "Purchase Order Overseas",
+      docNomor: editTanggalPO.po.nomor,
+      action: "Revisi Tanggal PO",
+      detail: `${editTanggalPO.po.tanggal} → ${editTanggalPO.tanggal}`
+    });
+    setEditTanggalPO(null);
   };
 
   // Add items from one more Item Requisition into the PO being built (multi-IR per supplier)
@@ -14391,14 +14611,69 @@ function PurchaseOrderModule({
       noFakturPajak: p.noFakturPajak || "-"
     })), `Purchase_Order_${isLocal ? "Lokal" : "Overseas"}.xlsx`, "PO")
   }), (isHandler || isMaria || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
     onClick: openCreate
-  }, "+ Buat PO"))), isOwnerLike && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+  }, "+ Buat PO Manual (multi-IR)"))), (isHandler || isMaria || isOwnerLike) && /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "IR ON GOING (Belum di-PO)",
+    count: irOngoingList.length,
+    badgeColor: theme.purple,
+    storageKey: `po_ir_ongoing_${mode}`
+  }, /*#__PURE__*/React.createElement("div", {
     style: {
-      margin: "0 0 12px",
-      color: theme.text,
-      fontSize: 15
+      display: "flex",
+      flexDirection: "column",
+      gap: 12
     }
-  }, "Approval GM — Menunggu Keputusan"), po.filter(p => p.status === "Menunggu Approval GM").length === 0 ? /*#__PURE__*/React.createElement("p", {
+  }, /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari no. IR / no. SO / nama client...",
+    value: irOngoingSearch,
+    onChange: setIrOngoingSearch
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+      maxHeight: 420,
+      overflowY: "auto"
+    }
+  }, irOngoingList.length === 0 && /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: theme.muted,
+      fontSize: 13,
+      margin: 0
+    }
+  }, "Tidak ada Item Requisition yang belum di-PO."), irOngoingList.map(ir => /*#__PURE__*/React.createElement("div", {
+    key: ir.nomor,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8,
+      padding: "10px 14px",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 600,
+      color: theme.text,
+      fontSize: 14
+    }
+  }, ir.nomor, ir.soNomor ? ` — SO ${ir.soNomor}` : ""), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, ir.soCustomerNama || "-", " · ", ir.tanggal)), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    onClick: () => startPOFromIR(ir.nomor)
+  }, "Buat PO")))))), isOwnerLike && /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "Approval GM — Menunggu Keputusan",
+    count: po.filter(p => p.status === "Menunggu Approval GM").length,
+    badgeColor: theme.yellow,
+    storageKey: `po_approval_${mode}`,
+    defaultOpen: true
+  }, po.filter(p => p.status === "Menunggu Approval GM").length === 0 ? /*#__PURE__*/React.createElement("p", {
     style: {
       color: theme.muted,
       fontSize: 13
@@ -14446,13 +14721,12 @@ function PurchaseOrderModule({
     size: "sm",
     variant: "danger",
     onClick: () => gmReject(p)
-  }, "✗ Tolak"))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
-    style: {
-      margin: "0 0 12px",
-      color: theme.text,
-      fontSize: 15
-    }
-  }, "Recap Pembayaran"), /*#__PURE__*/React.createElement(Table, {
+  }, "✗ Tolak"))))), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "Recap Pembayaran",
+    count: po.filter(p => p.status === "Disetujui GM - Kirim ke Supplier" || p.status === "Sudah Diterima").length,
+    badgeColor: theme.accent,
+    storageKey: `po_recap_bayar_${mode}`
+  }, /*#__PURE__*/React.createElement(Table, {
     headers: ["No. PO", "Supplier", "Total", "Tipe", "Jatuh Tempo", "No. Invoice Supplier", "No. Faktur Pajak", "Status Bayar", "Aksi"],
     rows: po.filter(p => p.status === "Disetujui GM - Kirim ke Supplier" || p.status === "Sudah Diterima").map(p => {
       const due = getDueStatus(p.tipePembayaran, p.tanggalJatuhTempo);
@@ -14504,7 +14778,13 @@ function PurchaseOrderModule({
     style: {
       marginBottom: 12
     }
-  }), /*#__PURE__*/React.createElement(Table, {
+  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: `Daftar Purchase Order ${isLocal ? "Lokal" : "Overseas"}`,
+    count: poFiltered.length,
+    badgeColor: theme.accent,
+    storageKey: `po_list_${mode}`,
+    defaultOpen: true
+  }, /*#__PURE__*/React.createElement(Table, {
     headers: ["No. PO", "Tanggal", "Supplier", "Tipe Bayar", "Jatuh Tempo", "Total", "Status", "Status Bayar", "Aksi"],
     rows: poFiltered.map(p => {
       const due = getDueStatus(p.tipePembayaran, p.tanggalJatuhTempo);
@@ -14534,11 +14814,20 @@ function PurchaseOrderModule({
         color: statusColor[p.status]
       }, p.status), /*#__PURE__*/React.createElement(Badge, {
         color: p.statusBayar === "Sudah Dibayar" ? theme.green : p.statusBayar === "Dibayar Sebagian" ? theme.yellow : theme.red
-      }, p.statusBayar), (isHandler || isMaria || isOwnerLike) && p.status !== "Sudah Diterima" ? /*#__PURE__*/React.createElement(Btn, {
+      }, p.statusBayar), (isHandler || isMaria || isOwnerLike) ? /*#__PURE__*/React.createElement("div", {
+        style: {
+          display: "flex",
+          gap: 6
+        }
+      }, p.status !== "Sudah Diterima" && /*#__PURE__*/React.createElement(Btn, {
         size: "sm",
         variant: "ghost",
         onClick: () => openRevise(p)
-      }, "Edit") : "-"];
+      }, "Edit"), /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "ghost",
+        onClick: () => openEditTanggalPO(p)
+      }, "📅 Tanggal")) : "-"];
     }),
     onDelete: isOwnerLike || isHandler || isMaria ? i => {
       const target = po[i];
@@ -14577,13 +14866,12 @@ function PurchaseOrderModule({
       });
     } : undefined,
     emptyMsg: `Belum ada PO ${isLocal ? "Lokal" : "Overseas"}`
-  })), !isLocal && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
-    style: {
-      margin: "0 0 12px",
-      color: theme.text,
-      fontSize: 15
-    }
-  }, "Import Cost (Bea Masuk, PPN/PPH Import, Ekspedisi)"), /*#__PURE__*/React.createElement("p", {
+  })), !isLocal && /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "Import Cost (Bea Masuk, PPN/PPH Import, Ekspedisi)",
+    count: po.filter(p => p.status === "Sudah Diterima" || p.status === "Disetujui GM - Kirim ke Supplier").length,
+    badgeColor: theme.cyan,
+    storageKey: "po_import_cost"
+  }, /*#__PURE__*/React.createElement("p", {
     style: {
       margin: "0 0 12px",
       fontSize: 12,
@@ -15467,6 +15755,42 @@ function PurchaseOrderModule({
     onClick: () => setSupplierDocModal(null)
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     onClick: saveSupplierDoc
+  }, "Simpan")))), /*#__PURE__*/React.createElement(Modal, {
+    open: !!editTanggalPO,
+    title: `Revisi Tanggal PO — ${editTanggalPO?.po?.nomor || ""}`,
+    onClose: () => setEditTanggalPO(null),
+    width: 380
+  }, editTanggalPO && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Hanya mengubah tanggal PO — item, harga, dan status approval tidak terpengaruh."), /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal PO",
+    type: "date",
+    value: editTanggalPO.tanggal,
+    onChange: v => setEditTanggalPO({
+      ...editTanggalPO,
+      tanggal: v
+    })
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setEditTanggalPO(null)
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: saveEditTanggalPO
   }, "Simpan")))));
 }
 
@@ -15920,13 +16244,13 @@ function GoodsReceiptModule({
       fontSize: 12,
       color: theme.muted
     }
-  }, "Penerimaan FINAL hanya berlaku saat barang diterima di Workshop. Penerimaan di Head Office bersifat sementara dan memerlukan konfirmasi via Internal Delivery Order."), isWorkshopApprover && pendingGREdits.length > 0 && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
-    style: {
-      margin: "0 0 12px",
-      color: theme.text,
-      fontSize: 15
-    }
-  }, "Menunggu Approval Edit (Workshop)"), pendingGREdits.map(r => /*#__PURE__*/React.createElement("div", {
+  }, "Penerimaan FINAL hanya berlaku saat barang diterima di Workshop. Penerimaan di Head Office bersifat sementara dan memerlukan konfirmasi via Internal Delivery Order."), isWorkshopApprover && pendingGREdits.length > 0 && /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "Menunggu Approval Edit (Workshop)",
+    count: pendingGREdits.length,
+    badgeColor: theme.yellow,
+    storageKey: "gr_pending_edits",
+    defaultOpen: true
+  }, pendingGREdits.map(r => /*#__PURE__*/React.createElement("div", {
     key: r.id,
     style: {
       display: "flex",
@@ -15965,9 +16289,15 @@ function GoodsReceiptModule({
     value: grSearch,
     onChange: setGrSearch,
     style: {
-      marginBottom: 12
+      marginBottom: 0
     }
-  }), /*#__PURE__*/React.createElement(Table, {
+  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "Daftar Penerimaan Barang",
+    count: goodsReceiptsFiltered.length,
+    badgeColor: theme.accent,
+    storageKey: "gr_list",
+    defaultOpen: true
+  }, /*#__PURE__*/React.createElement(Table, {
     headers: ["No. Penerimaan", "Tanggal", "No. PO", "Diterima Oleh", "Jumlah Item", "Status"],
     rows: goodsReceiptsFiltered.map(g => [/*#__PURE__*/React.createElement("span", {
       style: {
@@ -16218,13 +16548,12 @@ function GoodsReceiptModule({
   }, "✗ Tolak"), /*#__PURE__*/React.createElement(Btn, {
     variant: "success",
     onClick: () => approveGREdit(reviewGR, reviewGRForm)
-  }, "✓ Approve")))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
-    style: {
-      margin: "0 0 12px",
-      color: theme.text,
-      fontSize: 15
-    }
-  }, "Internal Delivery Order (Office → Workshop)"), /*#__PURE__*/React.createElement("p", {
+  }, "✓ Approve")))), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "Internal Delivery Order (Office → Workshop)",
+    count: internalDOs.length,
+    badgeColor: theme.cyan,
+    storageKey: "gr_internal_do"
+  }, /*#__PURE__*/React.createElement("p", {
     style: {
       margin: "0 0 12px",
       fontSize: 12,
@@ -17556,6 +17885,7 @@ function InvoiceModule({
   const [editInv, setEditInv] = useState(null);
   const [editInvForm, setEditInvForm] = useState({
     nomor: "",
+    tanggal: "",
     tipePembayaran: "COD",
     tanggalJatuhTempo: "",
     noFakturPajak: "",
@@ -17566,6 +17896,7 @@ function InvoiceModule({
     setEditInv(inv);
     setEditInvForm({
       nomor: inv.nomor || "",
+      tanggal: inv.tanggal || today(),
       tipePembayaran: inv.tipePembayaran || "COD",
       tanggalJatuhTempo: inv.tanggalJatuhTempo || "",
       noFakturPajak: inv.noFakturPajak || "",
@@ -17685,6 +18016,25 @@ function InvoiceModule({
   });
   const selectedSO = salesOrders.find(s => s.nomor === form.soNomor);
   const selectedSORemainingTermin = selectedSO ? remainingTermin(selectedSO) : null;
+  const [invSoSearch, setInvSoSearch] = useState("");
+  const invSoOngoingList = (invSoSearch.trim() ? availableSO.filter(so => [so.nomor, so.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(invSoSearch.trim().toLowerCase()))) : availableSO).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  const startInvoiceFromSO = so => {
+    setForm({
+      soNomor: so.nomor,
+      terminLabel: "",
+      noPoClient: so.noPoClient || "",
+      tipePembayaran: "COD",
+      jatuhTempoMode: "tanggal",
+      tanggalJatuhTempo: "",
+      jumlahHari: "30",
+      noFakturPajak: "",
+      diskonMode: "persen",
+      diskonValue: "0",
+      uangMuka: "0",
+      catatan: ""
+    });
+    setModal(true);
+  };
   const computeTerminAmount = (so, label) => {
     const top = so.termOfPayment || [];
     const t = top.find(x => x.label === label);
@@ -17973,6 +18323,7 @@ function InvoiceModule({
       nomor: i.nomor,
       tanggal: i.tanggal,
       noSO: i.soNomor,
+      noPOClient: i.noPoClient || "-",
       client: i.customerNama,
       tipePembayaran: i.tipePembayaran,
       jatuhTempo: i.tanggalJatuhTempo || "-",
@@ -17983,8 +18334,9 @@ function InvoiceModule({
       statusApproval: i.statusApproval
     })), "Invoice.xlsx", "Invoice")
   }), (isFinance || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
     onClick: () => setModal(true)
-  }, "+ Buat Invoice"))), /*#__PURE__*/React.createElement("div", {
+  }, "+ Buat Invoice Manual"))), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
       color: theme.muted,
@@ -17993,13 +18345,60 @@ function InvoiceModule({
       borderRadius: 8,
       border: `1px dashed ${theme.border}`
     }
-  }, "🔒 Description part bersifat internal — tidak ditampilkan di Invoice yang diterima client. Invoice baru wajib disetujui GM sebelum dikirim ke client."), isOwnerLike && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+  }, "🔒 Description part bersifat internal — tidak ditampilkan di Invoice yang diterima client. Invoice baru wajib disetujui GM sebelum dikirim ke client."), (isFinance || isOwnerLike) && /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "SO ONGOING (Bisa Dibuat Invoice — DP1/DP2/Final)",
+    count: invSoOngoingList.length,
+    badgeColor: theme.cyan,
+    storageKey: "inv_so_ongoing"
+  }, /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari no. SO / client...",
+    value: invSoSearch,
+    onChange: setInvSoSearch,
     style: {
-      margin: "0 0 12px",
-      color: theme.text,
-      fontSize: 15
+      marginBottom: 12
     }
-  }, "Approval GM — Menunggu Keputusan"), invoices.filter(i => i.statusApproval === "Menunggu Approval GM").length === 0 ? /*#__PURE__*/React.createElement("p", {
+  }), invSoOngoingList.length === 0 ? /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "Tidak ada SO yang bisa dibuatkan Invoice.") : invSoOngoingList.map(so => {
+    const rem = remainingTermin(so);
+    return /*#__PURE__*/React.createElement("div", {
+      key: so.nomor,
+      style: {
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        padding: "10px 0",
+        borderBottom: `1px solid ${theme.border}33`,
+        flexWrap: "wrap",
+        gap: 8
+      }
+    }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", {
+      style: {
+        color: theme.text
+      }
+    }, so.nomor), " — ", so.customerNama, " — ", /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.green
+      }
+    }, fmt(so.total)), " ", rem ? rem.map(t => /*#__PURE__*/React.createElement(Badge, {
+      key: t.label,
+      color: theme.purple
+    }, t.label, " (", t.percent, "%)")) : /*#__PURE__*/React.createElement(Badge, {
+      color: theme.muted
+    }, "Full")), /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      onClick: () => startInvoiceFromSO(so)
+    }, "+ Buat Invoice"));
+  })), isOwnerLike && /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "Approval GM — Menunggu Keputusan",
+    count: invoices.filter(i => i.statusApproval === "Menunggu Approval GM").length,
+    badgeColor: theme.yellow,
+    storageKey: "inv_approval",
+    defaultOpen: true
+  }, invoices.filter(i => i.statusApproval === "Menunggu Approval GM").length === 0 ? /*#__PURE__*/React.createElement("p", {
     style: {
       color: theme.muted,
       fontSize: 13
@@ -18119,13 +18518,13 @@ function InvoiceModule({
   }, "✗ Tolak"), /*#__PURE__*/React.createElement(Btn, {
     variant: "success",
     onClick: reviewNewInvApprove
-  }, "✓ Approve")))), pendingInvEdits.length > 0 && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
-    style: {
-      margin: "0 0 12px",
-      color: theme.text,
-      fontSize: 15
-    }
-  }, "Menunggu Approval Edit (GM)"), pendingInvEdits.map(r => /*#__PURE__*/React.createElement("div", {
+  }, "✓ Approve")))), pendingInvEdits.length > 0 && /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "Menunggu Approval Edit (GM)",
+    count: pendingInvEdits.length,
+    badgeColor: theme.yellow,
+    storageKey: "inv_pending_edits",
+    defaultOpen: true
+  }, pendingInvEdits.map(r => /*#__PURE__*/React.createElement("div", {
     key: r.id,
     style: {
       display: "flex",
@@ -18240,10 +18639,16 @@ function InvoiceModule({
     value: invSearch,
     onChange: setInvSearch,
     style: {
-      marginBottom: 12
+      marginBottom: 0
     }
-  }), /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. Invoice", "Tanggal", "No. SO", "Termin", "Client", "Tipe Bayar", "Jatuh Tempo", "No. Faktur Pajak", "Total", "Terbayar", "Approval", "Status Bayar"],
+  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "Daftar Invoice",
+    count: filtered.length,
+    badgeColor: theme.accent,
+    storageKey: "inv_list",
+    defaultOpen: true
+  }, /*#__PURE__*/React.createElement(Table, {
+    headers: ["No. Invoice", "Tanggal", "No. SO", "No. PO Client", "Termin", "Client", "Tipe Bayar", "Jatuh Tempo", "No. Faktur Pajak", "Total", "Terbayar", "Approval", "Status Bayar"],
     rows: filtered.map(inv => {
       const due = getDueStatus(inv.tipePembayaran, inv.tanggalJatuhTempo);
       return [/*#__PURE__*/React.createElement("span", {
@@ -18253,7 +18658,7 @@ function InvoiceModule({
           cursor: "pointer"
         },
         onClick: () => setDetail(inv)
-      }, inv.nomor), inv.tanggal, inv.soNomor, inv.terminLabel ? /*#__PURE__*/React.createElement(Badge, {
+      }, inv.nomor), inv.tanggal, inv.soNomor, inv.noPoClient || "-", inv.terminLabel ? /*#__PURE__*/React.createElement(Badge, {
         color: theme.purple
       }, inv.terminLabel, " (", inv.terminPercent, "%)") : /*#__PURE__*/React.createElement(Badge, {
         color: theme.muted
@@ -18317,6 +18722,14 @@ function InvoiceModule({
       nomor: v
     }),
     placeholder: editInv.nomor
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal Invoice",
+    type: "date",
+    value: editInvForm.tanggal,
+    onChange: v => setEditInvForm({
+      ...editInvForm,
+      tanggal: v
+    })
   }), /*#__PURE__*/React.createElement(Select, {
     label: "Tipe Pembayaran",
     value: editInvForm.tipePembayaran,
@@ -18372,13 +18785,12 @@ function InvoiceModule({
     onClick: () => setEditInv(null)
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     onClick: submitEditInv
-  }, "Ajukan Perubahan"))))), (isFinance || isOwnerLike) && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
-    style: {
-      margin: "0 0 12px",
-      color: theme.text,
-      fontSize: 15
-    }
-  }, "Pembayaran"), filtered.filter(i => i.statusBayar !== "Lunas" && i.statusApproval === "Disetujui GM").length === 0 ? /*#__PURE__*/React.createElement("p", {
+  }, "Ajukan Perubahan"))))), (isFinance || isOwnerLike) && /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "Pembayaran",
+    count: filtered.filter(i => i.statusBayar !== "Lunas" && i.statusApproval === "Disetujui GM").length,
+    badgeColor: theme.red,
+    storageKey: "inv_pembayaran"
+  }, filtered.filter(i => i.statusBayar !== "Lunas" && i.statusApproval === "Disetujui GM").length === 0 ? /*#__PURE__*/React.createElement("p", {
     style: {
       color: theme.muted,
       fontSize: 13
@@ -26425,70 +26837,9 @@ function App() {
     setSession(null);
   };
 
-  // Notification badge counts — shows pending items relevant to the logged-in user's role
-  const getBadgeCount = moduleId => {
-    const role = session.role;
-    const isOwnerLike = role === "owner" || role === "gm";
-    switch (moduleId) {
-      case "mekanik_report":
-        if (role === "workshop_manager" || isOwnerLike) return store.dars.filter(d => d.status === "Menunggu Approval Septi").length + store.partRecs.filter(r => r.status === "Menunggu Approval Septi").length;
-        return 0;
-      case "workshop_dashboard":
-        if (role === "workshop_manager" || isOwnerLike) return store.dars.filter(d => d.status === "Menunggu Approval Septi").length + store.partRecs.filter(r => r.status === "Menunggu Approval Septi").length;
-        return 0;
-      case "quotation_unit":
-        if (isOwnerLike) return store.quotationsUnit.filter(q => q.status === "Menunggu Approval GM").length;
-        return 0;
-      case "quotation_ps":
-        if (role === "service_manager" || isOwnerLike) {
-          const pendingRecs = store.partRecs.filter(r => r.status === "Menunggu").length;
-          const pendingGM = isOwnerLike ? store.quotationsPS.filter(q => q.status === "Menunggu Approval GM").length : 0;
-          return pendingRecs + pendingGM;
-        }
-        return 0;
-      case "po_local":
-        if (isOwnerLike) return store.poLocal.filter(p => p.status === "Menunggu Approval GM").length;
-        return 0;
-      case "po_overseas":
-        if (isOwnerLike) return store.poOverseas.filter(p => p.status === "Menunggu Approval GM").length;
-        return 0;
-      case "part_request":
-        if (role === "service_manager") return store.partRequests.filter(r => r.status === "Menunggu Review Asil").length;
-        if (isOwnerLike) return store.partRequests.filter(r => r.status === "Menunggu Approval GM").length;
-        return 0;
-      case "maintenance_schedule":
-        {
-          const getDueLabel = m => {
-            if (m.status === "Selesai") return "Selesai";
-            const diffDays = Math.ceil((new Date(m.nextDueDate) - new Date(today())) / 86400000);
-            return diffDays < 0 ? "Terlambat" : diffDays <= 14 ? "Segera" : "Terjadwal";
-          };
-          if (role === "workshop_manager" || isOwnerLike) return store.maintenanceSchedules.filter(m => ["Terlambat", "Segera"].includes(getDueLabel(m))).length;
-          return 0;
-        }
-      case "invoice":
-        if (isOwnerLike) return store.invoices.filter(i => i.statusApproval === "Menunggu Approval GM").length;
-        return 0;
-      case "master_part":
-        if (isOwnerLike) return store.editRequests.filter(r => r.module === "Master Part" && r.status === "Menunggu Approval GM").length;
-        return 0;
-      case "customer":
-        if (isOwnerLike) return store.editRequests.filter(r => r.module === "Database Client" && r.status === "Menunggu Approval GM").length;
-        return 0;
-      case "financial_dashboard":
-        if (["owner", "gm", "finance", "finance_director"].includes(role)) {
-          const ov1 = store.invoices.filter(i => i.statusBayar !== "Lunas" && i.tipePembayaran === "TEMPO" && getDueStatus(i.tipePembayaran, i.tanggalJatuhTempo).label === "Terlambat").length;
-          const ov2 = [...store.poLocal, ...store.poOverseas].filter(p => p.status !== "Sudah Diterima" && p.tipePembayaran === "TEMPO" && getDueStatus(p.tipePembayaran, p.tanggalJatuhTempo).label === "Terlambat").length;
-          return ov1 + ov2;
-        }
-        return 0;
-      case "cuti":
-        if (hasPayrollAccess(role)) return store.leaveRequests.filter(r => r.status === "Menunggu Approval HRD").length;
-        return 0;
-      default:
-        return 0;
-    }
-  };
+  // Notification badge counts — shows pending items relevant to the logged-in user's role.
+  // Logic lives in top-level computeBadgeCount() so Dashboard can reuse the same counts.
+  const getBadgeCount = moduleId => computeBadgeCount(store, session, moduleId);
   const renderPage = () => {
     switch (activeMenu?.id) {
       case "dashboard":
