@@ -90,7 +90,7 @@ function markAuthReady() {
 // ════════════════════════════════════════════════════════════════════════════
 // THEME
 // ════════════════════════════════════════════════════════════════════════════
-const theme = {
+const THEME_LIGHT = {
   bg: "#f4f6f9",
   surface: "#eef1f5",
   card: "#ffffff",
@@ -105,6 +105,35 @@ const theme = {
   text: "#1e293b",
   muted: "#64748b"
 };
+const THEME_DARK = {
+  bg: "#0f172a",
+  surface: "#1e293b",
+  card: "#16213a",
+  border: "#334155",
+  accent: "#3b82f6",
+  accentLight: "#60a5fa",
+  green: "#22c55e",
+  red: "#f87171",
+  yellow: "#eab308",
+  purple: "#a855f7",
+  cyan: "#22d3ee",
+  text: "#e2e8f0",
+  muted: "#94a3b8"
+};
+// `theme` stays the same object reference everywhere in the app (hundreds of call sites read
+// theme.xxx directly at render time) — switching mode mutates its properties in place via
+// applyThemeMode() rather than reassigning the binding, so every component picks up the new
+// colors on its next re-render without needing a context provider rewrite.
+const theme = { ...THEME_LIGHT };
+const THEME_MODE_KEY = "erp_theme_mode";
+const applyThemeMode = mode => {
+  Object.assign(theme, mode === "dark" ? THEME_DARK : THEME_LIGHT);
+};
+(() => {
+  try {
+    applyThemeMode(window.localStorage.getItem(THEME_MODE_KEY) || "light");
+  } catch (e) {}
+})();
 const fmt = n => new Intl.NumberFormat("id-ID", {
   style: "currency",
   currency: "IDR",
@@ -153,6 +182,17 @@ const terbilang = n => {
   return (eja(n) + " Rupiah").replace(/\s+/g, " ").trim();
 };
 const today = () => new Date().toISOString().split("T")[0];
+// Unified "revision date" display format requested app-wide: DD-MMM-YYYY, e.g. "23-JUL-2026".
+// Accepts a YYYY-MM-DD (or any Date-parseable) string; returns "-" for empty/invalid input so
+// callers can drop it straight into a table cell without extra guarding.
+const REV_MONTHS = ["JAN", "FEB", "MAR", "APR", "MEI", "JUN", "JUL", "AGU", "SEP", "OKT", "NOV", "DES"];
+const fmtDateRev = dateStr => {
+  if (!dateStr) return "-";
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return "-";
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${dd}-${REV_MONTHS[d.getMonth()]}-${d.getFullYear()}`;
+};
 const uid = () => Math.random().toString(36).slice(2, 9).toUpperCase();
 // Compares a document's bomSnapshot (captured at creation time, {unitCode: bomUpdatedAt}) against
 // the CURRENT live Master Unit records. Returns the list of unitCodes whose BOM has since been
@@ -13353,13 +13393,21 @@ function ItemRequisitionModule({
     });
     return Object.values(merged);
   };
+  // Total qty already requested for a given SO+part across any existing (non-cancelled) Item
+  // Requisition. This must be subtracted from the raw stock shortfall below — otherwise, since
+  // physical stock only rises once Goods Receipt actually happens (a separate, later step), an SO
+  // whose shortfall was already fully covered by an IR would incorrectly keep showing as "belum
+  // jadi IR" until the parts physically arrived. Root cause of the reported bug (SO-001 already
+  // converted to IR-003 but still appearing in the picker).
+  const irRequestedQtyFor = (soNomor, partNumber) => (itemRequisitions || []).filter(ir => ir.soNomor === soNomor).reduce((sum, ir) => sum + (ir.items || []).filter(it => it.partNumber === partNumber).reduce((s, it) => s + (Number(it.qtyButuh) || 0), 0), 0);
   const checkStockForSO = soNomor => {
     const so = salesOrders.find(s => s.nomor === soNomor);
     if (!so) return [];
     return explodeSOItems(so).map(m => {
       const part = parts.find(p => p.partNumber === m.partNumber);
       const stok = part?.stok ?? 0;
-      const kurang = Math.max(0, m.qty - stok);
+      const sudahDiminta = irRequestedQtyFor(soNomor, m.partNumber);
+      const kurang = Math.max(0, m.qty - stok - sudahDiminta);
       return {
         partNumber: m.partNumber,
         partName: m.partName || part?.partName || m.partNumber,
@@ -13369,13 +13417,13 @@ function ItemRequisitionModule({
         qtyKurang: kurang,
         catatan: m.fromUnits && m.fromUnits.size > 0 ? `Dari BOM Unit: ${[...m.fromUnits].join(", ")}` : ""
       };
-    }).filter(x => x.qtyKurang > 0); // only short items
+    }).filter(x => x.qtyKurang > 0); // only short items still not covered by stock or an existing IR
   };
   // "+ Buat IR dari SO" picker: an active SO should stop appearing here once it's already been
-  // fully turned into Item Requisition(s) — i.e. current stock now covers every item on the SO
-  // (checkStockForSO returns no shortfall). If the SO still has items not yet covered by an IR
-  // (partially converted, or never requisitioned at all), it keeps showing so HRD/Purchasing can
-  // still pull the remaining items.
+  // fully turned into Item Requisition(s) — i.e. every shortfall item is covered either by current
+  // stock or by an existing IR already requesting it (checkStockForSO returns no remaining
+  // shortfall). If the SO still has items not yet covered (partially converted, or never
+  // requisitioned at all), it keeps showing so HRD/Purchasing can still pull the remaining items.
   const soPickerEligible = activeSO.filter(so => checkStockForSO(so.nomor).length > 0);
   const soPickerList = soPickerSearch.trim() ? soPickerEligible.filter(so => [so.nomor, so.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(soPickerSearch.trim().toLowerCase()))) : soPickerEligible;
   // Traces IR -> PO (Lokal/Overseas, matched via po.irNomors) -> per-part received qty
@@ -14179,8 +14227,10 @@ function PurchaseOrderModule({
     beaMasuk: "",
     ppnImport: "",
     pphImport: "",
+    tanggalPembayaranPIB: "",
     ekspedisiSupplierId: "",
-    ekspedisiBiaya: ""
+    ekspedisiBiaya: "",
+    tanggalPembayaranEkspedisi: ""
   });
   const [supplierDocModal, setSupplierDocModal] = useState(null);
   const [supplierDocForm, setSupplierDocForm] = useState({
@@ -14209,7 +14259,8 @@ function PurchaseOrderModule({
     tanggalJatuhTempo: "",
     jumlahHari: "30",
     catatan: "",
-    urgent: false
+    urgent: false,
+    biayaTambahan: []
   });
   const [reviseUrgent, setReviseUrgent] = useState(false);
   const [itemForm, setItemForm] = useState({
@@ -14218,6 +14269,37 @@ function PurchaseOrderModule({
     qty: 1,
     harga: ""
   });
+  // Biaya Tambahan (extra cost) — repeatable Nama/Qty/Harga rows added on top of the parts subtotal
+  // when creating a PO. Requested specifically for PO Overseas (freight surcharge, handling fee,
+  // etc. that aren't a Master Part line item) but the mechanism itself is mode-agnostic.
+  const [biayaForm, setBiayaForm] = useState({
+    nama: "",
+    qty: 1,
+    harga: ""
+  });
+  const addBiayaTambahan = () => {
+    if (!biayaForm.nama.trim()) return alert("Isi Nama Biaya Tambahan");
+    const qty = parseFloat(biayaForm.qty) || 1;
+    const harga = parseFloat(biayaForm.harga) || 0;
+    setForm(f => ({
+      ...f,
+      biayaTambahan: [...(f.biayaTambahan || []), {
+        nama: biayaForm.nama.trim(),
+        qty,
+        harga,
+        subtotal: qty * harga
+      }]
+    }));
+    setBiayaForm({
+      nama: "",
+      qty: 1,
+      harga: ""
+    });
+  };
+  const removeBiayaTambahan = idx => setForm(f => ({
+    ...f,
+    biayaTambahan: (f.biayaTambahan || []).filter((_, i) => i !== idx)
+  }));
   // irPick: the IR currently being picked from (per-item, works for both the create form and the
   // full-edit/revise modal — irPickTarget tells confirmIrPick which one to add the chosen items into).
   const [irPick, setIrPick] = useState(null);
@@ -14243,7 +14325,8 @@ function PurchaseOrderModule({
       tanggalJatuhTempo: "",
       jumlahHari: "30",
       catatan: "",
-      urgent: false
+      urgent: false,
+      biayaTambahan: []
     });
     setModal(true);
   };
@@ -14349,8 +14432,9 @@ function PurchaseOrderModule({
     });
   };
   const subtotal = form.items.reduce((s, i) => s + i.qty * (i.harga || 0), 0);
+  const biayaTambahanTotal = (form.biayaTambahan || []).reduce((s, b) => s + (b.subtotal ?? b.qty * (b.harga || 0)), 0);
   const ppnAmount = form.pakaiPpn ? subtotal * 0.11 : 0;
-  const grandTotal = subtotal + ppnAmount;
+  const grandTotal = subtotal + biayaTambahanTotal + ppnAmount;
   const save = () => {
     if (!form.supplierId) return alert("Pilih supplier");
     if (form.items.length === 0) return alert("Tambahkan item dari minimal 1 Item Requisition");
@@ -14369,6 +14453,13 @@ function PurchaseOrderModule({
       ...it,
       subtotal: it.qty * (it.harga || 0)
     }));
+    const itemsSubtotal = items.reduce((s, i) => s + i.subtotal, 0);
+    const biayaTambahan = (form.biayaTambahan || []).map(b => ({
+      ...b,
+      subtotal: b.subtotal ?? b.qty * (b.harga || 0)
+    }));
+    const biayaTambahanTotalSave = biayaTambahan.reduce((s, b) => s + b.subtotal, 0);
+    const ppnAmountSave = form.pakaiPpn ? itemsSubtotal * 0.11 : 0;
     setPo(prev => [...prev, {
       nomor: newNomor(prev),
       tanggal: today(),
@@ -14377,10 +14468,12 @@ function PurchaseOrderModule({
       supplierNama: sup?.nama,
       currency: isLocal ? "IDR" : form.currency,
       items,
-      subtotal: items.reduce((s, i) => s + i.subtotal, 0),
+      subtotal: itemsSubtotal,
+      biayaTambahan,
+      biayaTambahanTotal: biayaTambahanTotalSave,
       pakaiPpn: form.pakaiPpn,
-      ppnAmount: form.pakaiPpn ? items.reduce((s, i) => s + i.subtotal, 0) * 0.11 : 0,
-      total: items.reduce((s, i) => s + i.subtotal, 0) + (form.pakaiPpn ? items.reduce((s, i) => s + i.subtotal, 0) * 0.11 : 0),
+      ppnAmount: ppnAmountSave,
+      total: itemsSubtotal + biayaTambahanTotalSave + ppnAmountSave,
       tipePembayaran: form.tipePembayaran,
       tanggalJatuhTempo,
       catatan: form.catatan,
@@ -14422,7 +14515,8 @@ function PurchaseOrderModule({
       jatuhTempoMode: "tanggal",
       tanggalJatuhTempo: "",
       jumlahHari: "30",
-      catatan: ""
+      catatan: "",
+      biayaTambahan: []
     });
   };
   const gmApprove = p => {
@@ -14508,7 +14602,10 @@ function PurchaseOrderModule({
   };
   const reviseSubtotal = reviseItems.reduce((s, i) => s + i.qty * (i.harga || 0), 0);
   const revisePpnAmount = revisePakaiPpn ? reviseSubtotal * 0.11 : 0;
-  const reviseTotal = reviseSubtotal + revisePpnAmount;
+  // Revise only edits parts items/PPN/supplier — any Biaya Tambahan already on the PO isn't touched
+  // by this flow, so its total must still be folded back in here or the revised PO's grand Total
+  // would silently drop the extra-cost amount.
+  const reviseTotal = reviseSubtotal + revisePpnAmount + (reviseModal?.biayaTambahanTotal || 0);
   const saveRevise = () => {
     if (!reviseSupplierId) return alert("Pilih supplier");
     if (reviseItems.length === 0) return alert("PO harus punya minimal 1 item");
@@ -14601,8 +14698,10 @@ function PurchaseOrderModule({
       beaMasuk: "",
       ppnImport: "",
       pphImport: "",
+      tanggalPembayaranPIB: "",
       ekspedisiSupplierId: "",
-      ekspedisiBiaya: ""
+      ekspedisiBiaya: "",
+      tanggalPembayaranEkspedisi: ""
     });
   };
   const saveImportCost = () => {
@@ -14611,8 +14710,12 @@ function PurchaseOrderModule({
       beaMasuk: parseFloat(importCostForm.beaMasuk) || 0,
       ppnImport: parseFloat(importCostForm.ppnImport) || 0,
       pphImport: parseFloat(importCostForm.pphImport) || 0,
+      // Tanggal pembayaran PIB = tanggal pembayaran gabungan Bea Masuk + PPN Import + PPH Import.
+      tanggalPembayaranPIB: importCostForm.tanggalPembayaranPIB || "",
       ekspedisiNama: ekspedisi?.nama || "",
-      ekspedisiBiaya: parseFloat(importCostForm.ekspedisiBiaya) || 0
+      ekspedisiBiaya: parseFloat(importCostForm.ekspedisiBiaya) || 0,
+      // Tanggal pembayaran khusus Ekspedisi — dipisah dari tanggal pembayaran PIB.
+      tanggalPembayaranEkspedisi: importCostForm.tanggalPembayaranEkspedisi || ""
     };
     const arr = [...po];
     arr[po.indexOf(importCostModal)] = {
@@ -14770,7 +14873,7 @@ function PurchaseOrderModule({
       fontSize: 12,
       color: theme.muted
     }
-  }, payLabel(p.tipePembayaran), p.tipePembayaran === "TEMPO" ? ` · Jatuh tempo: ${p.tanggalJatuhTempo}` : "")), /*#__PURE__*/React.createElement("div", {
+  }, payLabel(p.tipePembayaran), p.tipePembayaran === "TEMPO" ? ` · Jatuh tempo: ${fmtDateRev(p.tanggalJatuhTempo)}` : "")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 8
@@ -14809,7 +14912,7 @@ function PurchaseOrderModule({
           fontSize: 11,
           color: theme.muted
         }
-      }, p.tanggalJatuhTempo)) : "-", p.noInvoiceSupplier ? /*#__PURE__*/React.createElement("span", {
+      }, fmtDateRev(p.tanggalJatuhTempo))) : "-", p.noInvoiceSupplier ? /*#__PURE__*/React.createElement("span", {
         style: {
           color: theme.text
         }
@@ -14871,7 +14974,7 @@ function PurchaseOrderModule({
         }
       }, /*#__PURE__*/React.createElement(Badge, {
         color: theme.red
-      }, "⚠ URGENT"))), p.tanggal, p.supplierNama, /*#__PURE__*/React.createElement(Badge, {
+      }, "⚠ URGENT"))), fmtDateRev(p.tanggal), p.supplierNama, /*#__PURE__*/React.createElement(Badge, {
         color: p.tipePembayaran === "COD" ? theme.cyan : theme.purple
       }, payLabel(p.tipePembayaran)), p.tipePembayaran === "TEMPO" ? /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement(Badge, {
         color: due.color
@@ -14880,7 +14983,7 @@ function PurchaseOrderModule({
           fontSize: 11,
           color: theme.muted
         }
-      }, p.tanggalJatuhTempo)) : "-", fmtMoney(p.total, p.currency), /*#__PURE__*/React.createElement(Badge, {
+      }, fmtDateRev(p.tanggalJatuhTempo))) : "-", fmtMoney(p.total, p.currency), /*#__PURE__*/React.createElement(Badge, {
         color: statusColor[p.status]
       }, p.status), /*#__PURE__*/React.createElement(Badge, {
         color: p.statusBayar === "Sudah Dibayar" ? theme.green : p.statusBayar === "Dibayar Sebagian" ? theme.yellow : theme.red
@@ -14949,8 +15052,8 @@ function PurchaseOrderModule({
       color: theme.muted
     }
   }, "Diakses oleh Ibu Maria — ditarik per PO Overseas yang sudah diterima."), /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. PO", "Supplier", "Bea Masuk", "PPN Import", "PPH Import", "Ekspedisi", "Aksi"],
-    rows: po.filter(p => p.status === "Sudah Diterima" || p.status === "Disetujui GM - Kirim ke Supplier").map(p => [p.nomor, p.supplierNama, p.importCost ? fmt(p.importCost.beaMasuk) : "-", p.importCost ? fmt(p.importCost.ppnImport) : "-", p.importCost ? fmt(p.importCost.pphImport) : "-", p.importCost ? `${p.importCost.ekspedisiNama} (${fmt(p.importCost.ekspedisiBiaya)})` : "-", isMaria || isOwnerLike ? /*#__PURE__*/React.createElement(Btn, {
+    headers: ["No. PO", "Supplier", "Bea Masuk", "PPN Import", "PPH Import", "Tgl Bayar PIB", "Ekspedisi", "Tgl Bayar Ekspedisi", "Aksi"],
+    rows: po.filter(p => p.status === "Sudah Diterima" || p.status === "Disetujui GM - Kirim ke Supplier").map(p => [p.nomor, p.supplierNama, p.importCost ? fmt(p.importCost.beaMasuk) : "-", p.importCost ? fmt(p.importCost.ppnImport) : "-", p.importCost ? fmt(p.importCost.pphImport) : "-", p.importCost?.tanggalPembayaranPIB ? fmtDateRev(p.importCost.tanggalPembayaranPIB) : "-", p.importCost ? `${p.importCost.ekspedisiNama} (${fmt(p.importCost.ekspedisiBiaya)})` : "-", p.importCost?.tanggalPembayaranEkspedisi ? fmtDateRev(p.importCost.tanggalPembayaranEkspedisi) : "-", isMaria || isOwnerLike ? /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       onClick: () => openImportCost(p)
     }, p.importCost ? "Edit" : "+ Input") : "-"]),
@@ -15092,7 +15195,7 @@ function PurchaseOrderModule({
     style: {
       color: theme.text
     }
-  }, detail.tanggalJatuhTempo)), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+  }, fmtDateRev(detail.tanggalJatuhTempo))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.muted
     }
@@ -15122,13 +15225,16 @@ function PurchaseOrderModule({
         fontSize: 12
       }
     }, it.partDescription || "-"), fmtNum(it.qty), fmtMoney(it.harga, detail.currency), fmtMoney(it.subtotal, detail.currency)])
+  }), (detail.biayaTambahan || []).length > 0 && /*#__PURE__*/React.createElement(Table, {
+    headers: ["Biaya Tambahan", "", "", "Qty", "Harga", "Subtotal"],
+    rows: detail.biayaTambahan.map(b => ["-", b.nama, "", fmtNum(b.qty), fmtMoney(b.harga, detail.currency), fmtMoney(b.subtotal, detail.currency)])
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       textAlign: "right",
       fontSize: 13,
       color: theme.muted
     }
-  }, "Subtotal: ", detail.currency, " ", fmtNum(detail.subtotal ?? detail.total), detail.pakaiPpn && /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("br", null), "PPN (11%): ", detail.currency, " ", fmtNum(detail.ppnAmount || 0))), /*#__PURE__*/React.createElement("div", {
+  }, "Subtotal: ", detail.currency, " ", fmtNum(detail.subtotal ?? detail.total), detail.biayaTambahanTotal > 0 && /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("br", null), "Biaya Tambahan: ", detail.currency, " ", fmtNum(detail.biayaTambahanTotal)), detail.pakaiPpn && /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("br", null), "PPN (11%): ", detail.currency, " ", fmtNum(detail.ppnAmount || 0))), /*#__PURE__*/React.createElement("div", {
     style: {
       textAlign: "right",
       color: theme.green,
@@ -15152,7 +15258,7 @@ function PurchaseOrderModule({
       partyExtra: suppliers.find(s => s.id === detail.supplierId)?.alamat || "",
       currency: detail.currency,
       itemHeaders: ["Part Number", "Part Name", "Description", "Qty", isLocal ? "Harga" : "Price", "Subtotal"],
-      items: detail.items.map(it => [it.partNumber, it.partName, it.partDescription || "-", fmtNum(it.qty), fmtMoney(it.harga, detail.currency), fmtMoney(it.subtotal, detail.currency)]),
+      items: [...detail.items.map(it => [it.partNumber, it.partName, it.partDescription || "-", fmtNum(it.qty), fmtMoney(it.harga, detail.currency), fmtMoney(it.subtotal, detail.currency)]), ...(detail.biayaTambahan || []).map(b => ["-", b.nama, "Biaya Tambahan", fmtNum(b.qty), fmtMoney(b.harga, detail.currency), fmtMoney(b.subtotal, detail.currency)])],
       subtotal: detail.total,
       diskon: 0,
       pajak: 0,
@@ -15419,7 +15525,121 @@ function PurchaseOrderModule({
     style: {
       color: theme.text
     }
-  }, addDays(today(), form.jumlahHari)))), /*#__PURE__*/React.createElement("div", {
+  }, addDays(today(), form.jumlahHari)))), !isLocal && /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: `1px solid ${theme.border}`,
+      borderRadius: 10,
+      padding: 14,
+      display: "flex",
+      flexDirection: "column",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 13,
+      color: theme.muted,
+      fontWeight: 600
+    }
+  }, "BIAYA TAMBAHAN"), (form.biayaTambahan || []).map((b, idx) => /*#__PURE__*/React.createElement("div", {
+    key: idx,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      fontSize: 12,
+      color: theme.text,
+      background: theme.surface,
+      borderRadius: 6,
+      padding: "6px 10px"
+    }
+  }, /*#__PURE__*/React.createElement("span", null, b.nama, " — Qty ", b.qty, " × ", form.currency, " ", fmtCur(b.harga, form.currency)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("strong", null, form.currency, " ", fmtCur(b.subtotal, form.currency)), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => removeBiayaTambahan(idx),
+    style: {
+      background: "transparent",
+      border: "none",
+      color: theme.red,
+      cursor: "pointer",
+      fontSize: 14
+    }
+  }, "✕")))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      alignItems: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    placeholder: "Nama Biaya Tambahan",
+    value: biayaForm.nama,
+    onChange: ev => setBiayaForm({
+      ...biayaForm,
+      nama: ev.target.value
+    }),
+    style: {
+      flex: 2,
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 6,
+      padding: "7px 9px",
+      color: theme.text,
+      fontSize: 12
+    }
+  }), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    placeholder: "Qty",
+    value: biayaForm.qty,
+    onChange: ev => setBiayaForm({
+      ...biayaForm,
+      qty: ev.target.value
+    }),
+    style: {
+      width: 60,
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 6,
+      padding: "7px 9px",
+      color: theme.text,
+      fontSize: 12
+    }
+  }), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    placeholder: "Harga",
+    value: biayaForm.harga,
+    onChange: ev => setBiayaForm({
+      ...biayaForm,
+      harga: ev.target.value
+    }),
+    style: {
+      width: 110,
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 6,
+      padding: "7px 9px",
+      color: theme.text,
+      fontSize: 12
+    }
+  }), /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: addBiayaTambahan
+  }, "+ Tambah")), biayaTambahanTotal > 0 && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted,
+      textAlign: "right"
+    }
+  }, "Total Biaya Tambahan: ", /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, form.currency, " ", fmtCur(biayaTambahanTotal, form.currency)))), /*#__PURE__*/React.createElement("div", {
     style: {
       background: theme.surface,
       borderRadius: 8,
@@ -15431,7 +15651,12 @@ function PurchaseOrderModule({
       fontSize: 13,
       color: theme.muted
     }
-  }, "Subtotal: ", form.currency, " ", fmtCur(subtotal, form.currency)), form.pakaiPpn && /*#__PURE__*/React.createElement("div", {
+  }, "Subtotal: ", form.currency, " ", fmtCur(subtotal, form.currency)), biayaTambahanTotal > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: theme.muted
+    }
+  }, "Biaya Tambahan: ", form.currency, " ", fmtCur(biayaTambahanTotal, form.currency)), form.pakaiPpn && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 13,
       color: theme.muted
@@ -15564,6 +15789,14 @@ function PurchaseOrderModule({
       pphImport: v
     }),
     type: "number"
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal Pembayaran PIB (Bea Masuk + PPN Import + PPH Import)",
+    value: importCostForm.tanggalPembayaranPIB,
+    onChange: v => setImportCostForm({
+      ...importCostForm,
+      tanggalPembayaranPIB: v
+    }),
+    type: "date"
   }), /*#__PURE__*/React.createElement(Select, {
     label: "Ekspedisi (dari Database Supplier)",
     value: importCostForm.ekspedisiSupplierId,
@@ -15583,6 +15816,14 @@ function PurchaseOrderModule({
       ekspedisiBiaya: v
     }),
     type: "number"
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal Pembayaran Ekspedisi",
+    value: importCostForm.tanggalPembayaranEkspedisi,
+    onChange: v => setImportCostForm({
+      ...importCostForm,
+      tanggalPembayaranEkspedisi: v
+    }),
+    type: "date"
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -18409,7 +18650,8 @@ function InvoiceModule({
     tanggalJatuhTempo: "",
     noFakturPajak: "",
     noPoClient: "",
-    catatan: ""
+    catatan: "",
+    items: []
   });
   const openEditInv = inv => {
     setEditInv(inv);
@@ -18420,15 +18662,39 @@ function InvoiceModule({
       tanggalJatuhTempo: inv.tanggalJatuhTempo || "",
       noFakturPajak: inv.noFakturPajak || "",
       noPoClient: inv.noPoClient || "",
-      catatan: inv.catatan || ""
+      catatan: inv.catatan || "",
+      items: (inv.items || []).map(it => ({
+        ...it
+      }))
     });
   };
+  const setEditInvItemField = (idx, field, value) => setEditInvForm(f => ({
+    ...f,
+    items: f.items.map((it, i) => i === idx ? {
+      ...it,
+      [field]: value,
+      subtotal: field === "qty" || field === "harga" ? (field === "qty" ? parseFloat(value) || 0 : it.qty || 0) * (field === "harga" ? parseFloat(value) || 0 : it.harga || 0) : it.subtotal
+    } : it)
+  }));
   const submitEditInv = () => {
     // No. Invoice must stay unique — block the submission early rather than letting a collision
     // slip through to GM approval and silently overwrite another invoice's number.
     if (editInvForm.nomor.trim() && editInvForm.nomor.trim() !== editInv.nomor && invoices.some(i => i.nomor === editInvForm.nomor.trim())) {
       return alert("No. Invoice tersebut sudah dipakai oleh invoice lain.");
     }
+    if (!editInvForm.items || editInvForm.items.length === 0) {
+      return alert("Invoice harus memiliki minimal satu item.");
+    }
+    // Item edits change the money amounts too — recompute subtotal/pajak/total from the edited
+    // items using the same Diskon% and Uang Muka nominal the invoice already carries, so editing
+    // a line item's qty/harga correctly ripples through to the invoice total.
+    const newSubtotal = editInvForm.items.reduce((s, it) => s + (parseFloat(it.subtotal) || (parseFloat(it.qty) || 0) * (parseFloat(it.harga) || 0)), 0);
+    const diskonPersen = editInv.diskonPersen != null ? editInv.diskonPersen : null;
+    const diskonNominal = diskonPersen != null ? newSubtotal * diskonPersen / 100 : (editInv.diskon || 0);
+    const afterDiskon = Math.max(0, newSubtotal - diskonNominal);
+    const pajakNominal = afterDiskon * 0.11;
+    const uangMukaNominal = editInv.uangMuka || 0;
+    const newTotal = Math.max(0, afterDiskon + pajakNominal - uangMukaNominal);
     submitEditRequest(store, session, {
       module: "Invoice",
       action: "Edit",
@@ -18436,7 +18702,11 @@ function InvoiceModule({
       targetLabel: editInv.nomor,
       payload: {
         ...editInvForm,
-        nomor: editInvForm.nomor.trim() || editInv.nomor
+        nomor: editInvForm.nomor.trim() || editInv.nomor,
+        subtotal: newSubtotal,
+        diskon: diskonNominal,
+        pajak: pajakNominal,
+        total: newTotal
       },
       approverLabel: "GM"
     });
@@ -18511,7 +18781,8 @@ function InvoiceModule({
     diskonMode: "persen",
     diskonValue: "0",
     uangMuka: "0",
-    catatan: ""
+    catatan: "",
+    selectedItemKeys: []
   });
   const [filter, setFilter] = useState("Semua");
   const [fakturModal, setFakturModal] = useState(null);
@@ -18528,9 +18799,19 @@ function InvoiceModule({
     const usedLabels = soInvoices(so.nomor).map(i => i.terminLabel);
     return top.filter(t => !usedLabels.includes(t.label));
   };
+  // Legacy (no Term of Payment) SOs used to allow exactly ONE invoice covering ALL items at once.
+  // Now an SO's items can be split across several invoices (e.g. jasa/parts billed separately), so
+  // instead we track which specific items have already been invoiced and keep offering the SO in
+  // the picker as long as at least one item still isn't on any invoice.
+  const itemKey = it => `${it.partNumber || ""}::${it.partName || ""}`;
+  const invoicedItemKeySet = soNomor => new Set(soInvoices(soNomor).flatMap(inv => (inv.items || []).map(itemKey)));
+  const soUninvoicedItems = so => {
+    const used = invoicedItemKeySet(so.nomor);
+    return (so.items || []).filter(it => !used.has(itemKey(it)));
+  };
   const availableSO = salesOrders.filter(so => {
     const rem = remainingTermin(so);
-    if (rem === null) return soInvoices(so.nomor).length === 0; // legacy: 1 invoice max
+    if (rem === null) return soUninvoicedItems(so).length > 0; // legacy: keep offering until all items invoiced
     return rem.length > 0;
   });
   const selectedSO = salesOrders.find(s => s.nomor === form.soNomor);
@@ -18550,10 +18831,15 @@ function InvoiceModule({
       diskonMode: "persen",
       diskonValue: "0",
       uangMuka: "0",
-      catatan: ""
+      catatan: "",
+      selectedItemKeys: []
     });
     setModal(true);
   };
+  const toggleInvoiceItemKey = key => setForm(f => ({
+    ...f,
+    selectedItemKeys: f.selectedItemKeys.includes(key) ? f.selectedItemKeys.filter(k => k !== key) : [...f.selectedItemKeys, key]
+  }));
   const computeTerminAmount = (so, label) => {
     const top = so.termOfPayment || [];
     const t = top.find(x => x.label === label);
@@ -18587,13 +18873,16 @@ function InvoiceModule({
         tanggalJatuhTempo = addDays(today(), form.jumlahHari);
       }
     }
-    const terminAmount = hasTop ? computeTerminAmount(so, form.terminLabel) : so?.total;
+    const uninvoicedItems = !hasTop && so ? soUninvoicedItems(so) : [];
+    const chosenItems = !hasTop && so ? (form.selectedItemKeys.length > 0 ? uninvoicedItems.filter(it => form.selectedItemKeys.includes(itemKey(it))) : uninvoicedItems) : [];
+    if (!hasTop && chosenItems.length === 0) return alert("Pilih minimal satu item SO untuk dijadikan invoice ini.");
+    const terminAmount = hasTop ? computeTerminAmount(so, form.terminLabel) : chosenItems.reduce((s, it) => s + (it.subtotal ?? (it.qty || 0) * (it.harga || 0)), 0);
     const termin = hasTop ? so.termOfPayment.find(t => t.label === form.terminLabel) : null;
     // Invoice-level Discount + PPN (11%) + Uang Muka (DP) are entered independently at invoice
     // creation time — they no longer just inherit the SO's own diskon/pajak. Discount is taken off
     // the invoice subtotal first, THEN PPN 11% is calculated on the discounted amount, THEN Uang
     // Muka (down payment already received) is deducted to arrive at the invoice Total.
-    const baseSubtotal = hasTop ? terminAmount : (so?.subtotal ?? so?.total ?? 0);
+    const baseSubtotal = terminAmount;
     const diskonInputValue = parseFloat(form.diskonValue) || 0;
     const diskonNominal = form.diskonMode === "persen" ? baseSubtotal * diskonInputValue / 100 : diskonInputValue;
     const afterDiskon = Math.max(0, baseSubtotal - diskonNominal);
@@ -18613,7 +18902,7 @@ function InvoiceModule({
         qty: 1,
         harga: terminAmount,
         subtotal: terminAmount
-      }] : so?.items,
+      }] : chosenItems,
       terminLabel: hasTop ? form.terminLabel : null,
       terminPercent: termin?.percent ?? null,
       soTotal: so?.total,
@@ -18646,7 +18935,8 @@ function InvoiceModule({
       diskonMode: "persen",
       diskonValue: "0",
       uangMuka: "0",
-      catatan: ""
+      catatan: "",
+      selectedItemKeys: []
     });
   };
   const gmApprove = inv => {
@@ -19285,7 +19575,107 @@ function InvoiceModule({
       ...editInvForm,
       noPoClient: v
     })
-  }), /*#__PURE__*/React.createElement(Input, {
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Item Invoice"), (editInvForm.items || []).map((it, idx) => /*#__PURE__*/React.createElement("div", {
+    key: idx,
+    style: {
+      display: "flex",
+      gap: 6,
+      alignItems: "center",
+      border: `1px solid ${theme.border}`,
+      borderRadius: 6,
+      padding: 6
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    value: it.partName || "",
+    onChange: ev => setEditInvItemField(idx, "partName", ev.target.value),
+    style: {
+      flex: 2,
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 6,
+      padding: "5px 7px",
+      color: theme.text,
+      fontSize: 12
+    }
+  }), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    value: it.qty ?? 1,
+    onChange: ev => setEditInvItemField(idx, "qty", ev.target.value),
+    style: {
+      width: 60,
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 6,
+      padding: "5px 7px",
+      color: theme.text,
+      fontSize: 12
+    }
+  }), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    value: it.harga ?? 0,
+    onChange: ev => setEditInvItemField(idx, "harga", ev.target.value),
+    style: {
+      width: 110,
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 6,
+      padding: "5px 7px",
+      color: theme.text,
+      fontSize: 12
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => setEditInvForm(f => ({
+      ...f,
+      items: f.items.filter((_, i) => i !== idx)
+    })),
+    style: {
+      background: "transparent",
+      border: "none",
+      color: theme.red,
+      cursor: "pointer",
+      fontSize: 14
+    }
+  }, "✕"))), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => setEditInvForm(f => ({
+      ...f,
+      items: [...f.items, {
+        partNumber: "-",
+        partName: "Item baru",
+        qty: 1,
+        harga: 0,
+        subtotal: 0
+      }]
+    })),
+    style: {
+      alignSelf: "flex-start",
+      background: "transparent",
+      border: `1px dashed ${theme.border}`,
+      borderRadius: 6,
+      padding: "5px 10px",
+      color: theme.accentLight,
+      fontSize: 12,
+      cursor: "pointer"
+    }
+  }, "+ Tambah Item"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 11,
+      color: theme.muted
+    }
+  }, "Qty × Harga = Subtotal (dihitung otomatis). Diskon %, PPN 11%, dan Uang Muka dari invoice ini tetap dipakai untuk menghitung Total baru.")), /*#__PURE__*/React.createElement(Input, {
     label: "Catatan",
     multiline: true,
     value: editInvForm.catatan,
@@ -19588,13 +19978,88 @@ function InvoiceModule({
       fontSize: 12,
       color: theme.accentLight
     }
-  }, "Jumlah invoice untuk termin ini: ", /*#__PURE__*/React.createElement("strong", null, fmt(computeTerminAmount(selectedSO, form.terminLabel))), " · Sudah tertagih sebelumnya: ", fmt(soTerbayarSoFar(selectedSO.nomor)), " dari total SO ", fmt(selectedSO.total))), selectedSO && selectedSORemainingTermin === null && /*#__PURE__*/React.createElement("p", {
+  }, "Jumlah invoice untuk termin ini: ", /*#__PURE__*/React.createElement("strong", null, fmt(computeTerminAmount(selectedSO, form.terminLabel))), " · Sudah tertagih sebelumnya: ", fmt(soTerbayarSoFar(selectedSO.nomor)), " dari total SO ", fmt(selectedSO.total))), selectedSO && selectedSORemainingTermin === null && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
     style: {
       margin: 0,
       fontSize: 12,
       color: theme.muted
     }
-  }, "SO ini tidak memiliki Term of Payment — invoice akan dibuat untuk jumlah penuh ", fmt(selectedSO.total)), /*#__PURE__*/React.createElement(Select, {
+  }, "SO ini tidak memiliki Term of Payment — pilih item mana saja dari SO ini yang akan dijadikan invoice (mis. jasa dan parts bisa ditagih terpisah)."), (() => {
+    const uninvoiced = soUninvoicedItems(selectedSO);
+    if (uninvoiced.length === 0) return /*#__PURE__*/React.createElement("p", {
+      style: {
+        margin: 0,
+        fontSize: 12,
+        color: theme.red
+      }
+    }, "Semua item SO ini sudah pernah di-invoice.");
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 4,
+        border: `1px solid ${theme.border}`,
+        borderRadius: 8,
+        padding: 10,
+        maxHeight: 220,
+        overflowY: "auto"
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        marginBottom: 4
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 11,
+        color: theme.muted
+      }
+    }, "Item SO yang belum di-invoice:"), /*#__PURE__*/React.createElement("button", {
+      type: "button",
+      onClick: () => setForm(f => ({
+        ...f,
+        selectedItemKeys: f.selectedItemKeys.length === uninvoiced.length ? [] : uninvoiced.map(itemKey)
+      })),
+      style: {
+        background: "transparent",
+        border: "none",
+        color: theme.accentLight,
+        fontSize: 11,
+        cursor: "pointer"
+      }
+    }, form.selectedItemKeys.length === uninvoiced.length ? "Batal Pilih Semua" : "Pilih Semua")), uninvoiced.map((it, idx) => {
+      const key = itemKey(it);
+      const checked = form.selectedItemKeys.includes(key);
+      return /*#__PURE__*/React.createElement("label", {
+        key: idx,
+        style: {
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          fontSize: 12,
+          color: theme.text,
+          cursor: "pointer",
+          padding: "3px 0"
+        }
+      }, /*#__PURE__*/React.createElement("input", {
+        type: "checkbox",
+        checked,
+        onChange: () => toggleInvoiceItemKey(key)
+      }), /*#__PURE__*/React.createElement("span", {
+        style: {
+          flex: 1
+        }
+      }, it.partName, it.partNumber && it.partNumber !== "-" ? ` (${it.partNumber})` : "", " — Qty ", it.qty), /*#__PURE__*/React.createElement("span", null, fmt(it.subtotal ?? (it.qty || 0) * (it.harga || 0))));
+    }), /*#__PURE__*/React.createElement("p", {
+      style: {
+        margin: "4px 0 0",
+        fontSize: 11,
+        color: theme.muted
+      }
+    }, "Tidak dicentang satupun = semua item di atas akan dijadikan invoice ini."));
+  })()), /*#__PURE__*/React.createElement(Select, {
     label: "Tipe Pembayaran",
     value: form.tipePembayaran,
     onChange: v => setForm({
@@ -19969,33 +20434,54 @@ function PayrollModule({
   const [empSearch, setEmpSearch] = useState("");
   const empFiltered = empSearch.trim() ? employees.filter(e => [e.nama, e.jabatan].filter(Boolean).some(x => String(x).toLowerCase().includes(empSearch.trim().toLowerCase()))) : employees;
   const isOwnerLike = session.role === "owner" || session.role === "gm";
+  // Uang Makan Harian / Sisa Lembur / overtime-legal-estimate figures below are joined against
+  // Rekap Absensi (mesin fingerprint import) by matching employee NAMA, because the machine export
+  // only carries a free-text name column — not username. Two active employees sharing the exact
+  // same nama will therefore have their attendance-derived payroll figures cross-assigned to each
+  // other. Surface this as a visible warning so HRD can rename/disambiguate rather than silently
+  // getting "data kecampur2".
+  const duplicateNamaSet = (() => {
+    const counts = {};
+    employees.forEach(e => {
+      const key = String(e.nama || "").toLowerCase().trim();
+      if (!key) return;
+      counts[key] = (counts[key] || 0) + 1;
+    });
+    return new Set(Object.keys(counts).filter(k => counts[k] > 1));
+  })();
+  const hasDuplicateNama = employees.some(e => duplicateNamaSet.has(String(e.nama || "").toLowerCase().trim()));
   const PAYROLL_TEMPLATE_HEADERS = ["username", "nama", "jabatan", "gajiPokok", "tunjangan", "bpjsTkPct", "bpjsKesPct", "ktp", "kk", "alamat", "noTelp"];
   const FAMILY_TEMPLATE_HEADERS = ["username", "namaAnggota", "hubungan", "tanggalLahir", "ktp", "alamat", "noTelp"];
   const handleImportRows = rows => {
     let updated = 0,
       notFound = 0;
-    const arr = [...employees];
-    rows.forEach(r => {
-      const username = String(r.username || "").trim().toLowerCase();
-      if (!username) return;
-      const idx = arr.findIndex(e => e.username === username);
-      if (idx >= 0) {
-        arr[idx] = {
-          ...arr[idx],
-          jabatan: r.jabatan || arr[idx].jabatan || "",
-          gajiPokok: parseFloat(r.gajiPokok) || arr[idx].gajiPokok,
-          tunjangan: parseFloat(r.tunjangan) || arr[idx].tunjangan,
-          bpjsTkPct: r.bpjsTkPct !== undefined && r.bpjsTkPct !== "" ? parseFloat(r.bpjsTkPct) : arr[idx].bpjsTkPct ?? 2,
-          bpjsKesPct: r.bpjsKesPct !== undefined && r.bpjsKesPct !== "" ? parseFloat(r.bpjsKesPct) : arr[idx].bpjsKesPct ?? 1,
-          ktp: r.ktp || arr[idx].ktp || "",
-          kk: r.kk || arr[idx].kk || "",
-          alamat: r.alamat || arr[idx].alamat || "",
-          noTelp: r.noTelp || arr[idx].noTelp || ""
-        };
-        updated++;
-      } else notFound++;
+    // Functional update — re-reads the freshest employees list from the server right before
+    // applying, so this import can't silently clobber another admin's concurrent edit to a
+    // DIFFERENT employee (the exact "data payroll kecampur2 / revisi kecampur2" symptom reported).
+    setEmployees(prev => {
+      const arr = [...(prev || [])];
+      rows.forEach(r => {
+        const username = String(r.username || "").trim().toLowerCase();
+        if (!username) return;
+        const idx = arr.findIndex(e => e.username === username);
+        if (idx >= 0) {
+          arr[idx] = {
+            ...arr[idx],
+            jabatan: r.jabatan || arr[idx].jabatan || "",
+            gajiPokok: parseFloat(r.gajiPokok) || arr[idx].gajiPokok,
+            tunjangan: parseFloat(r.tunjangan) || arr[idx].tunjangan,
+            bpjsTkPct: r.bpjsTkPct !== undefined && r.bpjsTkPct !== "" ? parseFloat(r.bpjsTkPct) : arr[idx].bpjsTkPct ?? 2,
+            bpjsKesPct: r.bpjsKesPct !== undefined && r.bpjsKesPct !== "" ? parseFloat(r.bpjsKesPct) : arr[idx].bpjsKesPct ?? 1,
+            ktp: r.ktp || arr[idx].ktp || "",
+            kk: r.kk || arr[idx].kk || "",
+            alamat: r.alamat || arr[idx].alamat || "",
+            noTelp: r.noTelp || arr[idx].noTelp || ""
+          };
+          updated++;
+        } else notFound++;
+      });
+      return arr;
     });
-    setEmployees(arr);
     setImportSummary({
       updated,
       notFound
@@ -20004,35 +20490,37 @@ function PayrollModule({
   const handleImportKeluarga = rows => {
     let added = 0,
       notFound = 0;
-    const arr = [...employees];
-    rows.forEach(r => {
-      const username = String(r.username || "").trim().toLowerCase();
-      const namaAnggota = String(r.namaAnggota || "").trim();
-      if (!username || !namaAnggota) return;
-      const idx = arr.findIndex(e => e.username === username);
-      if (idx < 0) {
-        notFound++;
-        return;
-      }
-      const existingKeluarga = arr[idx].keluarga || [];
-      const hubungan = r.hubungan || "";
-      // Skip if this exact family member (name + hubungan) already exists, to keep re-imports idempotent.
-      const alreadyExists = existingKeluarga.some(k => k.nama === namaAnggota && k.hubungan === hubungan);
-      if (alreadyExists) return;
-      arr[idx] = {
-        ...arr[idx],
-        keluarga: [...existingKeluarga, {
-          nama: namaAnggota,
-          hubungan,
-          tanggalLahir: r.tanggalLahir || "",
-          ktp: r.ktp || "",
-          alamat: r.alamat || "",
-          noTelp: r.noTelp || ""
-        }]
-      };
-      added++;
+    setEmployees(prev => {
+      const arr = [...(prev || [])];
+      rows.forEach(r => {
+        const username = String(r.username || "").trim().toLowerCase();
+        const namaAnggota = String(r.namaAnggota || "").trim();
+        if (!username || !namaAnggota) return;
+        const idx = arr.findIndex(e => e.username === username);
+        if (idx < 0) {
+          notFound++;
+          return;
+        }
+        const existingKeluarga = arr[idx].keluarga || [];
+        const hubungan = r.hubungan || "";
+        // Skip if this exact family member (name + hubungan) already exists, to keep re-imports idempotent.
+        const alreadyExists = existingKeluarga.some(k => k.nama === namaAnggota && k.hubungan === hubungan);
+        if (alreadyExists) return;
+        arr[idx] = {
+          ...arr[idx],
+          keluarga: [...existingKeluarga, {
+            nama: namaAnggota,
+            hubungan,
+            tanggalLahir: r.tanggalLahir || "",
+            ktp: r.ktp || "",
+            alamat: r.alamat || "",
+            noTelp: r.noTelp || ""
+          }]
+        };
+        added++;
+      });
+      return arr;
     });
-    setEmployees(arr);
     setImportSummary({
       updated: added,
       notFound,
@@ -20087,7 +20575,9 @@ function PayrollModule({
     };
   };
   const saveGaji = () => {
-    const arr = employees.map(e => e.username === editEmp.username ? {
+    // Functional update — see handleImportRows note above; prevents this save from clobbering
+    // another admin's edit to a different employee made moments earlier.
+    setEmployees(prev => (prev || []).map(e => e.username === editEmp.username ? {
       ...e,
       nama: empForm.nama || e.nama,
       jabatan: empForm.jabatan,
@@ -20105,8 +20595,7 @@ function PayrollModule({
       statusKaryawan: empForm.statusKaryawan || "Tetap",
       uangKerajinanRate: parseFloat(empForm.uangKerajinanRate) || 0,
       uangHarianKerjaRate: parseFloat(empForm.uangHarianKerjaRate) || 0
-    } : e);
-    setEmployees(arr);
+    } : e));
     setEditEmp(null);
   };
   const addKeluarga = () => {
@@ -20302,14 +20791,43 @@ function PayrollModule({
       color: theme.green,
       cursor: "pointer"
     }
-  }, "×")), /*#__PURE__*/React.createElement(Input, {
+  }, "×")), hasDuplicateNama && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.yellow,
+      background: theme.yellow + "11",
+      padding: "8px 14px",
+      borderRadius: 8,
+      border: `1px solid ${theme.yellow}44`,
+      marginBottom: 14
+    }
+  }, "⚠️ Ada karyawan dengan Nama yang sama persis (", [...duplicateNamaSet].map(k => employees.find(e => String(e.nama || "").toLowerCase().trim() === k)?.nama || k).join(", "), "). Uang Makan Harian, Sisa Lembur, dan estimasi lembur legal dihitung dari Rekap Absensi berdasarkan Nama — karyawan dengan nama sama bisa tertukar datanya. Sarankan ubah salah satu Nama agar unik."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      alignItems: "flex-start",
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari nama / jabatan...",
     value: empSearch,
     onChange: setEmpSearch,
     style: {
-      marginBottom: 12
+      flex: 1,
+      marginBottom: 0
     }
-  }), /*#__PURE__*/React.createElement("p", {
+  }), /*#__PURE__*/React.createElement(ExportExcelBtn, {
+    onClick: () => exportToExcel(empFiltered.map(e => ({
+      nama: e.nama,
+      jabatan: e.jabatan || "-",
+      role: ROLE_DEFS[e.role]?.label || e.role,
+      gajiPokok: e.gajiPokok || 0,
+      tunjangan: e.tunjangan || 0,
+      bpjsTkPersen: e.bpjsTkPct || 0,
+      bpjsKesPersen: e.bpjsKesPct || 0,
+      uangKerajinanPerMinggu: e.uangKerajinanRate || 0
+    })), "Gaji_BPJS.xlsx", "Gaji & BPJS")
+  })), /*#__PURE__*/React.createElement("p", {
     style: {
       fontSize: 11,
       color: theme.muted,
@@ -21709,7 +22227,7 @@ function printDocument({
         </div>
         <div>
           <div class="doctitle">${docTitle}</div>
-          <div style="text-align:right;font-size:13px;margin-top:6px;">No: <strong>${nomor}</strong><br/>${tanggalLabel}: ${tanggal}</div>
+          <div style="text-align:right;font-size:13px;margin-top:6px;">No: <strong>${nomor}</strong><br/>${tanggalLabel}: ${fmtDateRev(tanggal)}</div>
         </div>
       </div>
       <div style="margin-bottom:20px;">
@@ -22149,7 +22667,7 @@ function FinancialDashboardModule({
     }
   }, "⚠️ PO Terlambat (Overdue)"), /*#__PURE__*/React.createElement(Table, {
     headers: ["No. PO", "Supplier", "Total", "Jatuh Tempo"],
-    rows: overduePOs.map(p => [p.nomor, p.supplierNama, fmt(p.total), p.tanggalJatuhTempo])
+    rows: overduePOs.map(p => [p.nomor, p.supplierNama, fmt(p.total), fmtDateRev(p.tanggalJatuhTempo)])
   })));
 }
 
@@ -27718,6 +28236,21 @@ function App() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [changePwOpen, setChangePwOpen] = useState(false);
   const [signatureOpen, setSignatureOpen] = useState(false);
+  const [themeMode, setThemeMode] = useState(() => {
+    try {
+      return window.localStorage.getItem(THEME_MODE_KEY) || "light";
+    } catch (e) {
+      return "light";
+    }
+  });
+  const toggleTheme = () => {
+    const next = themeMode === "dark" ? "light" : "dark";
+    applyThemeMode(next);
+    try {
+      window.localStorage.setItem(THEME_MODE_KEY, next);
+    } catch (e) {}
+    setThemeMode(next);
+  };
   const store = useStore();
   useEffect(() => {
     const onResize = () => {
@@ -28178,6 +28711,20 @@ function App() {
       marginBottom: 6
     }
   }, "🔑 Ganti Password"), /*#__PURE__*/React.createElement("button", {
+    onClick: toggleTheme,
+    style: {
+      width: "100%",
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 6,
+      padding: "8px",
+      color: theme.muted,
+      fontSize: 12,
+      cursor: "pointer",
+      fontFamily: "inherit",
+      marginBottom: 6
+    }
+  }, themeMode === "dark" ? "☀️ Mode Terang" : "🌙 Mode Gelap"), /*#__PURE__*/React.createElement("button", {
     onClick: () => setSignatureOpen(true),
     style: {
       width: "100%",
