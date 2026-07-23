@@ -14590,7 +14590,41 @@ function PurchaseOrderModule({
     setReviseSupplierId(p.supplierId || "");
     setReviseIrNomors(p.irNomors || []);
     setReviseUrgent(p.urgent || false);
+    setReviseBiayaTambahan((p.biayaTambahan || []).map(b => ({
+      ...b
+    })));
+    setReviseBiayaForm({
+      nama: "",
+      qty: 1,
+      harga: ""
+    });
   };
+  // Biaya Tambahan editing inside the Revisi/Edit PO modal — mirrors the create-form mechanism so
+  // an already-created PO can have extra-cost rows added, edited, or removed, not just at creation.
+  const [reviseBiayaTambahan, setReviseBiayaTambahan] = useState([]);
+  const [reviseBiayaForm, setReviseBiayaForm] = useState({
+    nama: "",
+    qty: 1,
+    harga: ""
+  });
+  const addReviseBiayaTambahan = () => {
+    if (!reviseBiayaForm.nama.trim()) return alert("Isi Nama Biaya Tambahan");
+    const qty = parseFloat(reviseBiayaForm.qty) || 1;
+    const harga = parseFloat(reviseBiayaForm.harga) || 0;
+    setReviseBiayaTambahan(prev => [...prev, {
+      nama: reviseBiayaForm.nama.trim(),
+      qty,
+      harga,
+      subtotal: qty * harga
+    }]);
+    setReviseBiayaForm({
+      nama: "",
+      qty: 1,
+      harga: ""
+    });
+  };
+  const removeReviseBiayaTambahan = idx => setReviseBiayaTambahan(prev => prev.filter((_, i) => i !== idx));
+  const reviseBiayaTambahanTotal = reviseBiayaTambahan.reduce((s, b) => s + (b.subtotal ?? b.qty * (b.harga || 0)), 0);
   const updateReviseHarga = (i, harga) => {
     const items = [...reviseItems];
     items[i] = {
@@ -14602,10 +14636,9 @@ function PurchaseOrderModule({
   };
   const reviseSubtotal = reviseItems.reduce((s, i) => s + i.qty * (i.harga || 0), 0);
   const revisePpnAmount = revisePakaiPpn ? reviseSubtotal * 0.11 : 0;
-  // Revise only edits parts items/PPN/supplier — any Biaya Tambahan already on the PO isn't touched
-  // by this flow, so its total must still be folded back in here or the revised PO's grand Total
-  // would silently drop the extra-cost amount.
-  const reviseTotal = reviseSubtotal + revisePpnAmount + (reviseModal?.biayaTambahanTotal || 0);
+  // Biaya Tambahan is now directly editable inside Revisi (see reviseBiayaTambahan above), so its
+  // total comes from that live editable state, not a frozen snapshot off reviseModal.
+  const reviseTotal = reviseSubtotal + revisePpnAmount + reviseBiayaTambahanTotal;
   const saveRevise = () => {
     if (!reviseSupplierId) return alert("Pilih supplier");
     if (reviseItems.length === 0) return alert("PO harus punya minimal 1 item");
@@ -14624,6 +14657,8 @@ function PurchaseOrderModule({
       irNomors: newIrNomors,
       items,
       subtotal: reviseSubtotal,
+      biayaTambahan: reviseBiayaTambahan,
+      biayaTambahanTotal: reviseBiayaTambahanTotal,
       pakaiPpn: revisePakaiPpn,
       ppnAmount: revisePpnAmount,
       total: reviseTotal,
@@ -16012,7 +16047,121 @@ function PurchaseOrderModule({
     type: "checkbox",
     checked: !!reviseUrgent,
     onChange: e => setReviseUrgent(e.target.checked)
-  }), " ⚠ URGENT (beri tahu supplier bahwa PO ini mendesak)"), /*#__PURE__*/React.createElement("div", {
+  }), " ⚠ URGENT (beri tahu supplier bahwa PO ini mendesak)"), !isLocal && /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: `1px solid ${theme.border}`,
+      borderRadius: 10,
+      padding: 14,
+      display: "flex",
+      flexDirection: "column",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 13,
+      color: theme.muted,
+      fontWeight: 600
+    }
+  }, "BIAYA TAMBAHAN"), reviseBiayaTambahan.map((b, idx) => /*#__PURE__*/React.createElement("div", {
+    key: idx,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      fontSize: 12,
+      color: theme.text,
+      background: theme.surface,
+      borderRadius: 6,
+      padding: "6px 10px"
+    }
+  }, /*#__PURE__*/React.createElement("span", null, b.nama, " — Qty ", b.qty, " × ", isLocal ? "IDR" : reviseCurrency, " ", fmtCur(b.harga, isLocal ? "IDR" : reviseCurrency)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("strong", null, isLocal ? "IDR" : reviseCurrency, " ", fmtCur(b.subtotal, isLocal ? "IDR" : reviseCurrency)), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => removeReviseBiayaTambahan(idx),
+    style: {
+      background: "transparent",
+      border: "none",
+      color: theme.red,
+      cursor: "pointer",
+      fontSize: 14
+    }
+  }, "✕")))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      alignItems: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    placeholder: "Nama Biaya Tambahan",
+    value: reviseBiayaForm.nama,
+    onChange: ev => setReviseBiayaForm({
+      ...reviseBiayaForm,
+      nama: ev.target.value
+    }),
+    style: {
+      flex: 2,
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 6,
+      padding: "7px 9px",
+      color: theme.text,
+      fontSize: 12
+    }
+  }), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    placeholder: "Qty",
+    value: reviseBiayaForm.qty,
+    onChange: ev => setReviseBiayaForm({
+      ...reviseBiayaForm,
+      qty: ev.target.value
+    }),
+    style: {
+      width: 60,
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 6,
+      padding: "7px 9px",
+      color: theme.text,
+      fontSize: 12
+    }
+  }), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    placeholder: "Harga",
+    value: reviseBiayaForm.harga,
+    onChange: ev => setReviseBiayaForm({
+      ...reviseBiayaForm,
+      harga: ev.target.value
+    }),
+    style: {
+      width: 110,
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 6,
+      padding: "7px 9px",
+      color: theme.text,
+      fontSize: 12
+    }
+  }), /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: addReviseBiayaTambahan
+  }, "+ Tambah")), reviseBiayaTambahanTotal > 0 && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted,
+      textAlign: "right"
+    }
+  }, "Total Biaya Tambahan: ", /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, isLocal ? "IDR" : reviseCurrency, " ", fmtCur(reviseBiayaTambahanTotal, isLocal ? "IDR" : reviseCurrency)))), /*#__PURE__*/React.createElement("div", {
     style: {
       background: theme.surface,
       borderRadius: 8,
@@ -16024,7 +16173,12 @@ function PurchaseOrderModule({
       fontSize: 13,
       color: theme.muted
     }
-  }, "Subtotal: ", fmtMoney(reviseSubtotal, isLocal ? "IDR" : reviseCurrency)), revisePakaiPpn && /*#__PURE__*/React.createElement("div", {
+  }, "Subtotal: ", fmtMoney(reviseSubtotal, isLocal ? "IDR" : reviseCurrency)), reviseBiayaTambahanTotal > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: theme.muted
+    }
+  }, "Biaya Tambahan: ", fmtMoney(reviseBiayaTambahanTotal, isLocal ? "IDR" : reviseCurrency)), revisePakaiPpn && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 13,
       color: theme.muted
