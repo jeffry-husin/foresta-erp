@@ -12761,14 +12761,24 @@ function SalesOrderModule({
     const allPO = [...(poLocal || []), ...(poOverseas || [])];
     return allPO.some(po => (po.irNomors || []).some(n => relatedIR.includes(n)));
   };
-  // An SO is considered COMPLETED once either a Delivery Order has been issued for it, or its
+  // An SO is considered COMPLETED once ALL of its items have been fully shipped across one or more
+  // Delivery Orders (partial shipments don't count — a DO covering only some items/qty must NOT
+  // move the SO out of ON GOING, otherwise the remaining un-shipped items become invisible), or its
   // Invoice is fully paid (Lunas) — auto-detected on the fly — OR the user manually marks it
   // selesai via the "Tandai Selesai" button (picking a specific DO/Invoice as the reference,
   // for cases where the DO/Invoice wasn't created through the normal SO-linked flow).
+  const soFullyShipped = so => {
+    const soDOs = (deliveryOrders || []).filter(d => d.soNomor === so.nomor);
+    if (soDOs.length === 0) return false;
+    return (so.items || []).every(it => {
+      const key = it.partNumber || it.unitCode;
+      const shippedQty = soDOs.reduce((sum, d) => sum + (d.items || []).filter(di => di.partNumber === key).reduce((s, di) => s + (Number(di.qty) || 0), 0), 0);
+      return shippedQty >= (Number(it.qty) || 0);
+    });
+  };
   const soIsCompleted = so => {
-    const hasDO = (deliveryOrders || []).some(d => d.soNomor === so.nomor);
     const hasLunasInvoice = (invoices || []).some(i => i.soNomor === so.nomor && i.statusBayar === "Lunas");
-    return hasDO || hasLunasInvoice || !!so.selesaiManual;
+    return soFullyShipped(so) || hasLunasInvoice || !!so.selesaiManual;
   };
   const soSelesaiVia = so => {
     if (so.selesaiManual) return `${so.selesaiManual.via} ${so.selesaiManual.refNomor} (manual oleh ${so.selesaiManual.oleh})`;
@@ -12860,8 +12870,25 @@ function SalesOrderModule({
   // data fix) and a quotation that's already been pulled reappearing in the picker.
   const quotAlreadyHasSO = nomor => salesOrders.some(so => so.sourceNomor === nomor);
   const [pullSearch, setPullSearch] = useState("");
-  const approvedUnit = quotationsUnit.filter(q => q.status === "Disetujui GM" && !quotAlreadyHasSO(q.nomor)).filter(q => !pullSearch.trim() || [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(pullSearch.trim().toLowerCase())));
-  const approvedPS = quotationsPS.filter(q => q.status === "Disetujui GM" && !quotAlreadyHasSO(q.nomor)).filter(q => !pullSearch.trim() || [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(pullSearch.trim().toLowerCase())));
+  // When a Quotation is revised, ALL revisions in the family share the same revisiDari (the
+  // original/base nomor) — they don't chain sequentially, they all point back to the base. The
+  // revision number is baked into the nomor suffix ("-R1", "-R2", ...), so the member with the
+  // highest -R<n> is always the latest; the un-suffixed base itself only counts as "latest" when
+  // it has no revisions yet. This keeps SQ ON GOING showing only the newest revision, never a
+  // stale one left behind from before the revision was made.
+  const quotIsLatestRevision = (arr, q) => {
+    const fam = q.revisiDari || q.nomor;
+    const members = arr.filter(x => (x.revisiDari || x.nomor) === fam);
+    if (members.length <= 1) return true;
+    const revNum = x => {
+      const m = /-R(\d+)$/.exec(x.nomor || "");
+      return m ? parseInt(m[1], 10) : -1;
+    };
+    const latest = members.reduce((a, b) => revNum(b) > revNum(a) ? b : a);
+    return latest.nomor === q.nomor;
+  };
+  const approvedUnit = quotationsUnit.filter(q => q.status === "Disetujui GM" && !quotAlreadyHasSO(q.nomor) && quotIsLatestRevision(quotationsUnit, q)).filter(q => !pullSearch.trim() || [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(pullSearch.trim().toLowerCase())));
+  const approvedPS = quotationsPS.filter(q => q.status === "Disetujui GM" && !quotAlreadyHasSO(q.nomor) && quotIsLatestRevision(quotationsPS, q)).filter(q => !pullSearch.trim() || [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(pullSearch.trim().toLowerCase())));
   const [soSearch, setSoSearch] = useState("");
   const salesOrdersFiltered = (soSearch.trim() ? salesOrders.filter(so => [so.nomor, so.customerNama, so.salesManagerNama, so.sourceNomor].filter(Boolean).some(x => String(x).toLowerCase().includes(soSearch.trim().toLowerCase()))) : salesOrders).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   // Compute the next number from the max existing sequence in the given (ideally freshly-fetched)
