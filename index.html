@@ -510,8 +510,12 @@ function hitungKoreksiAbsensi(karyawan, hariLibur, penyesuaian) {
     const normalOverride = numOrNull(p.normalOverride);
     const fullDinasLuar = dLuar > 0 && dLuar >= k.normal;
     const normalEdit = normalOverride !== null ? normalOverride : fullDinasLuar ? k.normal : Math.max(0, k.normal - liburNum);
-    // Riil = actual on-site presence only (dinas luar no longer merged in).
-    const riilEdit = Math.min(k.riil, Math.max(0, normalEdit - dLuar - otherLeave));
+    // Riil = actual on-site presence only (dinas luar no longer merged in). riilOverride lets HRD
+    // manually correct the raw machine reading (e.g. a missed fingerprint punch) — when set, it
+    // replaces k.riil as the base instead of just being capped further by it.
+    const riilOverride = numOrNull(p.riilOverride);
+    const riilBase = riilOverride !== null ? riilOverride : k.riil;
+    const riilEdit = Math.min(riilBase, Math.max(0, normalEdit - dLuar - otherLeave));
     const absenManual = numOrNull(p.absenManual);
     const absenEdit = absenManual !== null ? absenManual : Math.max(0, normalEdit - riilEdit - dLuar - otherLeave);
     // Portion of this employee's total lemburJam (from the machine, weekly aggregate — no
@@ -6680,6 +6684,11 @@ function MekanikReport({
   // Used for the Surat Tugas "Dibuat Oleh"/"Menugaskan Kepada" name pickers so they never show
   // duplicate or stale names. Falls back to `employees` if authUsers hasn't loaded yet.
   const activeUserNames = Array.from(new Set(((authUsers && authUsers.length ? authUsers.filter(u => u.aktif !== false) : employees) || []).map(u => u.nama).filter(Boolean)));
+  // Same idea, but for the mekanik-only picker lists (assigning a Kunjungan): source from the live
+  // Manajemen User list (Supabase profiles), not the local `employees` array — deleting a user in
+  // Manajemen User only removes their `profiles` row, it never touches `employees`, so a deleted
+  // mekanik (e.g. "Mekanik1") would otherwise keep showing up here forever.
+  const activeMekanikUsers = (authUsers && authUsers.length ? authUsers.filter(u => u.role === "mekanik" && u.aktif !== false) : employees.filter(e => e.role === "mekanik"));
   const partRecs = normalizePartRecs(partRecsRaw);
   const isMekanik = session.role === "mekanik";
   // HO1 (owner), HO2 (gm), HO3 (finance_director) all get delete/full-access rights here, per company hierarchy.
@@ -6703,6 +6712,24 @@ function MekanikReport({
   };
   const [visitForm, setVisitForm] = useState(emptyVisitForm);
   const [detailVisit, setDetailVisit] = useState(null);
+  const [editingJenisPekerjaan, setEditingJenisPekerjaan] = useState(false); // toggles the "Jenis Berita Acara" field in Detail Kunjungan into an editable Select
+  const saveJenisPekerjaan = v => {
+    setVisits(visits.map(x => x.id === detailVisit.id ? {
+      ...x,
+      jenisBeritaAcara: v
+    } : x));
+    setDetailVisit(d => d && d.id === detailVisit.id ? {
+      ...d,
+      jenisBeritaAcara: v
+    } : d);
+    logAudit(store, session, {
+      module: "Mekanik Report",
+      docNomor: detailVisit.id,
+      action: "Edit Jenis Pekerjaan",
+      detail: `${detailVisit.jenisBeritaAcara} → ${v}`
+    });
+    setEditingJenisPekerjaan(false);
+  };
   const [formType, setFormType] = useState(null); // 'dar' | 'partrec' | 'status' | 'bast'
   const [viewDar, setViewDar] = useState(null); // DAR being previewed for review (before approve/reject)
   const [viewRec, setViewRec] = useState(null); // Part Rec being previewed for review
@@ -7017,7 +7044,11 @@ function MekanikReport({
       } : {
         ...emptySTForm,
         nomor: nextSTNomor(),
-        tanggalPembuatan: today()
+        tanggalPembuatan: today(),
+        // "Dibuat Oleh" auto-follows whoever created this Kunjungan/MR (visit.createdByNama, added
+        // when the non-mekanik-creator fix shipped) — falls back to the current session's name for
+        // older visits that predate that field. Still editable manually below if it needs correcting.
+        dibuatOlehNama: visit.createdByNama || session.nama
       });
     }
   };
@@ -7610,7 +7641,7 @@ function MekanikReport({
       jenisBeritaAcara: v.jenisBeritaAcara,
       client: v.customerNama,
       unitLokasi: v.unitTerkait || v.lokasi,
-      mekanik: v.mekanikNama,
+      mekanik: (v.mekanikNamaList && v.mekanikNamaList.length ? v.mekanikNamaList.join(", ") : v.mekanikNama),
       jumlahDAR: visitDars(v.id).length,
       jumlahItemPartRec: visitRecDoc(v.id)?.items.length || 0,
       jumlahStatusReport: visitStatus(v.id).length,
@@ -8026,7 +8057,7 @@ function MekanikReport({
       }
     }, v.id), v.tanggal, /*#__PURE__*/React.createElement(Badge, {
       color: theme.purple
-    }, v.jenisBeritaAcara), v.customerNama, v.unitTerkait || v.lokasi, v.mekanikNama, /*#__PURE__*/React.createElement(Badge, {
+    }, v.jenisBeritaAcara), v.customerNama, v.unitTerkait || v.lokasi, (v.mekanikNamaList && v.mekanikNamaList.length ? v.mekanikNamaList.join(", ") : v.mekanikNama), /*#__PURE__*/React.createElement(Badge, {
       color: visitDars(v.id).length ? theme.green : theme.muted
     }, visitDars(v.id).length, " entri"), /*#__PURE__*/React.createElement(Badge, {
       color: visitRecDoc(v.id) ? theme.purple : theme.muted
@@ -8076,9 +8107,30 @@ function MekanikReport({
     style: {
       color: theme.muted
     }
-  }, "Jenis Berita Acara:"), " ", /*#__PURE__*/React.createElement(Badge, {
+  }, "Jenis Berita Acara:"), " ", editingJenisPekerjaan ? /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: detailVisit.jenisBeritaAcara,
+    onChange: saveJenisPekerjaan,
+    options: JENIS_BERITA_ACARA.map(j => ({
+      value: j,
+      label: j
+    }))
+  }), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => setEditingJenisPekerjaan(false)
+  }, "Batal")) : /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement(Badge, {
     color: theme.purple
-  }, detailVisit.jenisBeritaAcara)), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+  }, detailVisit.jenisBeritaAcara), (isOwnerLike || isSepti || isMekanik) && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => setEditingJenisPekerjaan(true)
+  }, "✏️ Edit"))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.muted
     }
@@ -8094,7 +8146,7 @@ function MekanikReport({
     style: {
       color: theme.text
     }
-  }, detailVisit.mekanikNama))), /*#__PURE__*/React.createElement("div", {
+  }, detailVisit.mekanikNamaList && detailVisit.mekanikNamaList.length ? detailVisit.mekanikNamaList.join(", ") : detailVisit.mekanikNama))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "flex-end"
@@ -9467,7 +9519,7 @@ function MekanikReport({
       // Dropping the same person from "Mekanik Lain" if they were checked there, to avoid duplicates.
       mekanikTambahan: (visitForm.mekanikTambahan || []).filter(u => u !== v)
     }),
-    options: employees.filter(e => e.role === "mekanik").map(e => ({
+    options: activeMekanikUsers.map(e => ({
       value: e.username,
       label: e.nama
     })),
@@ -9491,7 +9543,7 @@ function MekanikReport({
       maxHeight: 160,
       overflowY: "auto"
     }
-  }, employees.filter(e => e.role === "mekanik" && e.username !== (isMekanik ? session.username : visitForm.mekanikUtama)).map(e => {
+  }, activeMekanikUsers.filter(e => e.username !== (isMekanik ? session.username : visitForm.mekanikUtama)).map(e => {
     const checked = (visitForm.mekanikTambahan || []).includes(e.username);
     return /*#__PURE__*/React.createElement("label", {
       key: e.username,
@@ -25575,6 +25627,7 @@ function RekapMesinPanel({
   const [preview, setPreview] = useState(null); // computed rows from hitungKoreksiAbsensi
   const blankPenyesuaian = () => ({
     nama: "",
+    riilOverride: "",
     dLuar: "",
     normalOverride: "",
     ijin: "",
@@ -26011,16 +26064,12 @@ function RekapMesinPanel({
       color: theme.muted,
       marginBottom: 6
     }
-  }, "Riil (mesin)"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      padding: "9px 12px",
-      background: theme.surface,
-      border: `1px solid ${theme.border}`,
-      borderRadius: 8,
-      fontSize: 14,
-      color: theme.text
-    }
-  }, (rawParsed.karyawan.find(k => k.nama === p.nama) || {}).riil ?? "-")), /*#__PURE__*/React.createElement(Input, {
+  }, "Riil (mesin)"), /*#__PURE__*/React.createElement(Input, {
+    type: "number",
+    placeholder: String((rawParsed.karyawan.find(k => k.nama === p.nama) || {}).riil ?? "-"),
+    value: p.riilOverride,
+    onChange: v => updatePenyesuaianRow(i, "riilOverride", v)
+  })), /*#__PURE__*/React.createElement(Input, {
     label: "D.Luar (hari)",
     type: "number",
     value: p.dLuar,
