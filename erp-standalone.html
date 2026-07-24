@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-25.2";
+const APP_BUILD = "2026-07-25.3";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -410,6 +410,56 @@ function readExcelFile(file) {
   });
 }
 
+// Export multiple row-object arrays to one .xlsx file, one sheet per entry in `sheets`
+// (array of {name, rows}). Used where a single flat table can't represent the data — e.g.
+// Data Karyawan Lengkap, which needs a "Karyawan" sheet plus a "Keluarga" sheet linked by username.
+async function exportToExcelMultiSheet(sheets, filename) {
+  try {
+    const XLSX = await loadXLSXLibrary();
+    const wb = XLSX.utils.book_new();
+    sheets.forEach(({
+      name,
+      rows
+    }) => {
+      const ws = XLSX.utils.json_to_sheet(rows);
+      XLSX.utils.book_append_sheet(wb, ws, name);
+    });
+    XLSX.writeFile(wb, filename.endsWith(".xlsx") ? filename : filename + ".xlsx");
+  } catch (e) {
+    alert("Gagal export: " + e.message);
+  }
+}
+
+// Read every sheet of an uploaded .xlsx/.csv File object, keyed by sheet name.
+function readExcelFileMultiSheet(file) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const XLSX = await loadXLSXLibrary();
+      const reader = new FileReader();
+      reader.onload = e => {
+        try {
+          const wb = XLSX.read(e.target.result, {
+            type: "array"
+          });
+          const sheets = {};
+          wb.SheetNames.forEach(sheetName => {
+            sheets[sheetName] = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {
+              defval: ""
+            });
+          });
+          resolve(sheets);
+        } catch (err) {
+          reject(err);
+        }
+      };
+      reader.onerror = () => reject(new Error("Gagal membaca file"));
+      reader.readAsArrayBuffer(file);
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
 // Parse a raw weekly fingerprint-machine export ("LAP REKAPITULASI - [tgl] - [tgl].xls") into a
 // {periode, karyawan[]} structure. The machine's layout is fixed by row/column position (not
 // named headers), so this reads in array mode (header:1) instead of the object-mode
@@ -656,6 +706,52 @@ function ExportExcelBtn({
     size: "sm",
     onClick: onClick
   }, label);
+}
+// Same as ImportExcelButton but hands the parser every sheet of the workbook (keyed by sheet
+// name) instead of just the first one — for multi-sheet round-trip imports like Data Karyawan
+// Lengkap (Karyawan + Keluarga sheets together).
+function ImportExcelMultiSheetButton({
+  onParsed,
+  label = "📥 Import Excel"
+}) {
+  const inputRef = useRef(null);
+  const [loading, setLoading] = useState(false);
+  const handleFile = async e => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setLoading(true);
+    try {
+      const sheets = await readExcelFileMultiSheet(file);
+      onParsed(sheets);
+    } catch (err) {
+      alert("Gagal membaca file: " + err.message);
+    }
+    setLoading(false);
+    e.target.value = "";
+  };
+  return /*#__PURE__*/React.createElement("label", {
+    style: {
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "file",
+    accept: ".xlsx,.xls,.csv",
+    onChange: handleFile,
+    style: {
+      display: "none"
+    },
+    ref: inputRef
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      background: theme.purple,
+      color: "#fff",
+      padding: "10px 20px",
+      borderRadius: 8,
+      fontSize: 14,
+      fontWeight: 600,
+      display: "inline-block"
+    }
+  }, loading ? "Memuat..." : label));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -21571,7 +21667,7 @@ function PayrollModule({
     return new Set(Object.keys(counts).filter(k => counts[k] > 1));
   })();
   const hasDuplicateNama = employees.some(e => duplicateNamaSet.has(String(e.nama || "").toLowerCase().trim()));
-  const PAYROLL_TEMPLATE_HEADERS = ["username", "nama", "jabatan", "gajiPokok", "tunjangan", "bpjsTkPct", "bpjsKesPct", "uangKerajinanRate", "ktp", "kk", "alamat", "noTelp"];
+  const PAYROLL_TEMPLATE_HEADERS = ["username", "nama", "jabatan", "gajiPokok", "tunjangan", "bpjsTkPct", "bpjsKesPct", "uangHarianRate", "uangDinasRate", "uangKerajinanRate", "ktp", "kk", "alamat", "noTelp"];
   const KARYAWAN_TEMPLATE_HEADERS = ["username", "nama", "jabatan", "alamat", "noTelp", "ktp", "kk", "statusKaryawan"];
   const FAMILY_TEMPLATE_HEADERS = ["username", "namaAnggota", "hubungan", "tanggalLahir", "ktp", "alamat", "noTelp"];
   const handleImportRows = rows => {
@@ -21594,6 +21690,8 @@ function PayrollModule({
             tunjangan: parseFloat(r.tunjangan) || arr[idx].tunjangan,
             bpjsTkPct: r.bpjsTkPct !== undefined && r.bpjsTkPct !== "" ? parseFloat(r.bpjsTkPct) : arr[idx].bpjsTkPct ?? 2,
             bpjsKesPct: r.bpjsKesPct !== undefined && r.bpjsKesPct !== "" ? parseFloat(r.bpjsKesPct) : arr[idx].bpjsKesPct ?? 1,
+            uangHarianRate: r.uangHarianRate !== undefined && r.uangHarianRate !== "" ? parseFloat(r.uangHarianRate) : arr[idx].uangHarianRate ?? 50000,
+            uangDinasRate: r.uangDinasRate !== undefined && r.uangDinasRate !== "" ? parseFloat(r.uangDinasRate) : arr[idx].uangDinasRate ?? 100000,
             uangKerajinanRate: r.uangKerajinanRate !== undefined && r.uangKerajinanRate !== "" ? parseFloat(r.uangKerajinanRate) : arr[idx].uangKerajinanRate ?? 0,
             ktp: r.ktp || arr[idx].ktp || "",
             kk: r.kk || arr[idx].kk || "",
@@ -21631,6 +21729,60 @@ function PayrollModule({
             ktp: r.ktp || arr[idx].ktp || "",
             kk: r.kk || arr[idx].kk || "",
             statusKaryawan: r.statusKaryawan || arr[idx].statusKaryawan || "Tetap"
+          };
+          updated++;
+        } else notFound++;
+      });
+      return arr;
+    });
+    setImportSummary({
+      updated,
+      notFound
+    });
+  };
+  // Full round-trip import for "Data Karyawan Lengkap": reads BOTH sheets from the file produced
+  // by the matching multi-sheet export ("Karyawan" + "Keluarga"), updates each employee's bio
+  // fields, and REPLACES (not appends) their keluarga array with whatever rows are present for
+  // their username in the Keluarga sheet — so editing/removing a family member in Excel and
+  // re-importing actually reflects that change, unlike the additive-only "Import Data Keluarga".
+  const handleImportKaryawanLengkap = sheets => {
+    const karyawanRows = sheets["Karyawan"] || sheets[Object.keys(sheets)[0]] || [];
+    const keluargaRows = sheets["Keluarga"] || [];
+    const keluargaByUsername = {};
+    keluargaRows.forEach(r => {
+      const username = String(r.username || "").trim().toLowerCase();
+      if (!username) return;
+      if (!keluargaByUsername[username]) keluargaByUsername[username] = [];
+      const namaAnggota = String(r.namaAnggota || "").trim();
+      if (!namaAnggota) return;
+      keluargaByUsername[username].push({
+        nama: namaAnggota,
+        hubungan: r.hubungan || "",
+        tanggalLahir: r.tanggalLahir || "",
+        ktp: r.ktp || "",
+        alamat: r.alamat || "",
+        noTelp: r.noTelp || ""
+      });
+    });
+    let updated = 0,
+      notFound = 0;
+    setEmployees(prev => {
+      const arr = [...(prev || [])];
+      karyawanRows.forEach(r => {
+        const username = String(r.username || "").trim().toLowerCase();
+        if (!username) return;
+        const idx = arr.findIndex(e => e.username === username);
+        if (idx >= 0) {
+          arr[idx] = {
+            ...arr[idx],
+            nama: r.nama || arr[idx].nama,
+            jabatan: r.jabatan || arr[idx].jabatan || "",
+            alamat: r.alamat || arr[idx].alamat || "",
+            noTelp: r.noTelp || arr[idx].noTelp || "",
+            ktp: r.ktp || arr[idx].ktp || "",
+            kk: r.kk || arr[idx].kk || "",
+            statusKaryawan: r.statusKaryawan || arr[idx].statusKaryawan || "Tetap",
+            keluarga: keluargaByUsername[username] !== undefined ? keluargaByUsername[username] : arr[idx].keluarga || []
           };
           updated++;
         } else notFound++;
@@ -21981,6 +22133,8 @@ function PayrollModule({
       tunjangan: e.tunjangan || 0,
       bpjsTkPct: e.bpjsTkPct || 0,
       bpjsKesPct: e.bpjsKesPct || 0,
+      uangHarianRate: e.uangHarianRate || 0,
+      uangDinasRate: e.uangDinasRate || 0,
       uangKerajinanRate: e.uangKerajinanRate || 0
     })), "Gaji_BPJS.xlsx", "Gaji & BPJS"),
     label: "📊 Export Excel"
@@ -21990,17 +22144,17 @@ function PayrollModule({
       color: theme.muted,
       margin: "0 0 6px"
     }
-  }, "💡 File hasil Export bisa diedit lalu di-Import kembali (kolom \"username\" wajib tidak diubah) untuk update massal Gaji Pokok, Tunjangan, BPJS %, dan Uang Kerajinan."), /*#__PURE__*/React.createElement("p", {
+  }, "💡 File hasil Export bisa diedit lalu di-Import kembali (kolom \"username\" wajib tidak diubah) untuk update massal Gaji Pokok, Tunjangan, BPJS %, Uang Harian, Uang Dinas, dan Uang Kerajinan."), /*#__PURE__*/React.createElement("p", {
     style: {
       fontSize: 11,
       color: theme.muted,
       margin: "0 0 10px"
     }
-  }, "Gaji Pokok, Tunjangan, BPJS %, dan Uang Kerajinan bisa langsung diedit di tabel (klik sel, ubah, klik di luar untuk simpan). Untuk data lengkap (KTP/KK/Keluarga/dll) gunakan tombol Edit."), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Nama", "Jabatan", "Role", "Gaji Pokok", "Tunjangan", "BPJS TK %", "BPJS Kes %", "Uang Kerajinan (Rp/mgg)"],
+  }, "Gaji Pokok, Tunjangan, BPJS %, Uang Harian, Uang Dinas, dan Uang Kerajinan bisa langsung diedit di tabel (klik sel, ubah, klik di luar untuk simpan). Untuk data lengkap (KTP/KK/Keluarga/dll) gunakan tombol Edit."), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Nama", "Jabatan", "Role", "Gaji Pokok", "Tunjangan", "BPJS TK %", "BPJS Kes %", "Uang Harian (Rp)", "Uang Dinas (Rp/hari)", "Uang Kerajinan (Rp/mgg)"],
     rows: empFiltered.map(e => [e.nama, e.jabatan || "-", /*#__PURE__*/React.createElement(Badge, {
       color: ROLE_DEFS[e.role]?.color
-    }, ROLE_DEFS[e.role]?.label), inlineNumCell(e, "gajiPokok"), inlineNumCell(e, "tunjangan"), inlineNumCell(e, "bpjsTkPct"), inlineNumCell(e, "bpjsKesPct"), inlineNumCell(e, "uangKerajinanRate")]),
+    }, ROLE_DEFS[e.role]?.label), inlineNumCell(e, "gajiPokok"), inlineNumCell(e, "tunjangan"), inlineNumCell(e, "bpjsTkPct"), inlineNumCell(e, "bpjsKesPct"), inlineNumCell(e, "uangHarianRate"), inlineNumCell(e, "uangDinasRate"), inlineNumCell(e, "uangKerajinanRate")]),
     onEdit: i => {
       const emp = empFiltered[i];
       setEditEmp(emp);
@@ -22045,23 +22199,38 @@ function PayrollModule({
       flexWrap: "wrap"
     }
   }, /*#__PURE__*/React.createElement(ExportExcelBtn, {
-    onClick: () => exportToExcel(empFiltered.map(e => ({
-      username: e.username,
-      nama: e.nama,
-      jabatan: e.jabatan || "-",
-      alamat: e.alamat || "-",
-      noTelp: e.noTelp || "-",
-      ktp: e.ktp || "-",
-      kk: e.kk || "-",
-      statusKaryawan: e.statusKaryawan || "Tetap"
-    })), "Data_Karyawan.xlsx", "Data Karyawan"),
-    label: "📊 Export Excel"
-  }), /*#__PURE__*/React.createElement(ImportExcelButton, {
-    onParsed: handleImportKaryawanBio,
+    onClick: () => exportToExcelMultiSheet([{
+      name: "Karyawan",
+      rows: empFiltered.map(e => ({
+        username: e.username,
+        nama: e.nama,
+        jabatan: e.jabatan || "-",
+        alamat: e.alamat || "-",
+        noTelp: e.noTelp || "-",
+        ktp: e.ktp || "-",
+        kk: e.kk || "-",
+        statusKaryawan: e.statusKaryawan || "Tetap"
+      }))
+    }, {
+      name: "Keluarga",
+      rows: empFiltered.flatMap(e => (e.keluarga || []).map(k => ({
+        username: e.username,
+        namaKaryawan: e.nama,
+        namaAnggota: k.nama || "",
+        hubungan: k.hubungan || "",
+        tanggalLahir: k.tanggalLahir || "",
+        ktp: k.ktp || "",
+        alamat: k.alamat || "",
+        noTelp: k.noTelp || ""
+      })))
+    }], "Data_Karyawan_Lengkap.xlsx"),
+    label: "📊 Export Excel (Karyawan + Keluarga)"
+  }), /*#__PURE__*/React.createElement(ImportExcelMultiSheetButton, {
+    onParsed: handleImportKaryawanLengkap,
     label: "📥 Import Update Data Karyawan"
   }), /*#__PURE__*/React.createElement(ImportExcelButton, {
     onParsed: handleImportKeluarga,
-    label: "📥 Import Data Keluarga"
+    label: "📥 Tambah Data Keluarga"
   }), /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
     size: "sm",
@@ -22076,7 +22245,7 @@ function PayrollModule({
       color: theme.muted,
       margin: "0 0 10px"
     }
-  }, "💡 File hasil Export bisa diedit lalu di-Import kembali via \"Import Update Data Karyawan\" (kolom \"username\" wajib tidak diubah) untuk update massal Nama, Jabatan, Alamat, No. Telp, KTP, KK, dan Status Karyawan."), importSummary && /*#__PURE__*/React.createElement("div", {
+  }, "💡 \"Export Excel\" menghasilkan 1 file berisi 2 sheet: \"Karyawan\" (data pokok) dan \"Keluarga\" (semua anggota keluarga, 1 baris per anggota). Edit sebebasnya (termasuk tambah/hapus baris keluarga) lalu Import kembali via \"Import Update Data Karyawan\" (kolom \"username\" wajib tidak diubah) — akan meng-update data pokok DAN mengganti seluruh daftar keluarga sesuai isi file. \"Tambah Data Keluarga\" terpisah hanya untuk menambah anggota baru tanpa menghapus yang sudah ada."), importSummary && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 13,
       color: theme.green,
