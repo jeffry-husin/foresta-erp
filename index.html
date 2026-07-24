@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-25.1";
+const APP_BUILD = "2026-07-25.2";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -21571,7 +21571,8 @@ function PayrollModule({
     return new Set(Object.keys(counts).filter(k => counts[k] > 1));
   })();
   const hasDuplicateNama = employees.some(e => duplicateNamaSet.has(String(e.nama || "").toLowerCase().trim()));
-  const PAYROLL_TEMPLATE_HEADERS = ["username", "nama", "jabatan", "gajiPokok", "tunjangan", "bpjsTkPct", "bpjsKesPct", "ktp", "kk", "alamat", "noTelp"];
+  const PAYROLL_TEMPLATE_HEADERS = ["username", "nama", "jabatan", "gajiPokok", "tunjangan", "bpjsTkPct", "bpjsKesPct", "uangKerajinanRate", "ktp", "kk", "alamat", "noTelp"];
+  const KARYAWAN_TEMPLATE_HEADERS = ["username", "nama", "jabatan", "alamat", "noTelp", "ktp", "kk", "statusKaryawan"];
   const FAMILY_TEMPLATE_HEADERS = ["username", "namaAnggota", "hubungan", "tanggalLahir", "ktp", "alamat", "noTelp"];
   const handleImportRows = rows => {
     let updated = 0,
@@ -21593,10 +21594,43 @@ function PayrollModule({
             tunjangan: parseFloat(r.tunjangan) || arr[idx].tunjangan,
             bpjsTkPct: r.bpjsTkPct !== undefined && r.bpjsTkPct !== "" ? parseFloat(r.bpjsTkPct) : arr[idx].bpjsTkPct ?? 2,
             bpjsKesPct: r.bpjsKesPct !== undefined && r.bpjsKesPct !== "" ? parseFloat(r.bpjsKesPct) : arr[idx].bpjsKesPct ?? 1,
+            uangKerajinanRate: r.uangKerajinanRate !== undefined && r.uangKerajinanRate !== "" ? parseFloat(r.uangKerajinanRate) : arr[idx].uangKerajinanRate ?? 0,
             ktp: r.ktp || arr[idx].ktp || "",
             kk: r.kk || arr[idx].kk || "",
             alamat: r.alamat || arr[idx].alamat || "",
             noTelp: r.noTelp || arr[idx].noTelp || ""
+          };
+          updated++;
+        } else notFound++;
+      });
+      return arr;
+    });
+    setImportSummary({
+      updated,
+      notFound
+    });
+  };
+  const handleImportKaryawanBio = rows => {
+    let updated = 0,
+      notFound = 0;
+    // Same functional-update safeguard as handleImportRows: re-reads the freshest employees
+    // list right before applying so this can't clobber a concurrent edit to a different employee.
+    setEmployees(prev => {
+      const arr = [...(prev || [])];
+      rows.forEach(r => {
+        const username = String(r.username || "").trim().toLowerCase();
+        if (!username) return;
+        const idx = arr.findIndex(e => e.username === username);
+        if (idx >= 0) {
+          arr[idx] = {
+            ...arr[idx],
+            nama: r.nama || arr[idx].nama,
+            jabatan: r.jabatan || arr[idx].jabatan || "",
+            alamat: r.alamat || arr[idx].alamat || "",
+            noTelp: r.noTelp || arr[idx].noTelp || "",
+            ktp: r.ktp || arr[idx].ktp || "",
+            kk: r.kk || arr[idx].kk || "",
+            statusKaryawan: r.statusKaryawan || arr[idx].statusKaryawan || "Tetap"
           };
           updated++;
         } else notFound++;
@@ -21939,16 +21973,24 @@ function PayrollModule({
     }
   }), /*#__PURE__*/React.createElement(ExportExcelBtn, {
     onClick: () => exportToExcel(empFiltered.map(e => ({
+      username: e.username,
       nama: e.nama,
       jabatan: e.jabatan || "-",
       role: ROLE_DEFS[e.role]?.label || e.role,
       gajiPokok: e.gajiPokok || 0,
       tunjangan: e.tunjangan || 0,
-      bpjsTkPersen: e.bpjsTkPct || 0,
-      bpjsKesPersen: e.bpjsKesPct || 0,
-      uangKerajinanPerMinggu: e.uangKerajinanRate || 0
-    })), "Gaji_BPJS.xlsx", "Gaji & BPJS")
+      bpjsTkPct: e.bpjsTkPct || 0,
+      bpjsKesPct: e.bpjsKesPct || 0,
+      uangKerajinanRate: e.uangKerajinanRate || 0
+    })), "Gaji_BPJS.xlsx", "Gaji & BPJS"),
+    label: "📊 Export Excel"
   })), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 11,
+      color: theme.muted,
+      margin: "0 0 6px"
+    }
+  }, "💡 File hasil Export bisa diedit lalu di-Import kembali (kolom \"username\" wajib tidak diubah) untuk update massal Gaji Pokok, Tunjangan, BPJS %, dan Uang Kerajinan."), /*#__PURE__*/React.createElement("p", {
     style: {
       fontSize: 11,
       color: theme.muted,
@@ -21999,16 +22041,42 @@ function PayrollModule({
   }, "Data Karyawan Lengkap"), isOwnerLike && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
-      gap: 10
+      gap: 10,
+      flexWrap: "wrap"
     }
-  }, /*#__PURE__*/React.createElement(ImportExcelButton, {
+  }, /*#__PURE__*/React.createElement(ExportExcelBtn, {
+    onClick: () => exportToExcel(empFiltered.map(e => ({
+      username: e.username,
+      nama: e.nama,
+      jabatan: e.jabatan || "-",
+      alamat: e.alamat || "-",
+      noTelp: e.noTelp || "-",
+      ktp: e.ktp || "-",
+      kk: e.kk || "-",
+      statusKaryawan: e.statusKaryawan || "Tetap"
+    })), "Data_Karyawan.xlsx", "Data Karyawan"),
+    label: "📊 Export Excel"
+  }), /*#__PURE__*/React.createElement(ImportExcelButton, {
+    onParsed: handleImportKaryawanBio,
+    label: "📥 Import Update Data Karyawan"
+  }), /*#__PURE__*/React.createElement(ImportExcelButton, {
     onParsed: handleImportKeluarga,
     label: "📥 Import Data Keluarga"
   }), /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
     size: "sm",
+    onClick: () => downloadTemplate(KARYAWAN_TEMPLATE_HEADERS, "Template_Data_Karyawan.xlsx")
+  }, "📄 Template Karyawan"), /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    size: "sm",
     onClick: () => downloadTemplate(FAMILY_TEMPLATE_HEADERS, "Template_Data_Keluarga.xlsx")
-  }, "📄 Template"))), importSummary && /*#__PURE__*/React.createElement("div", {
+  }, "📄 Template Keluarga"))), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 11,
+      color: theme.muted,
+      margin: "0 0 10px"
+    }
+  }, "💡 File hasil Export bisa diedit lalu di-Import kembali via \"Import Update Data Karyawan\" (kolom \"username\" wajib tidak diubah) untuk update massal Nama, Jabatan, Alamat, No. Telp, KTP, KK, dan Status Karyawan."), importSummary && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 13,
       color: theme.green,
@@ -25928,18 +25996,33 @@ function DashboardAbsensiPanel({
   rowsYTD.forEach(r => {
     const key = r.namaKaryawan;
     if (!ytdPerStaff[key]) ytdPerStaff[key] = {
+      nama: key,
+      normal: 0,
+      riil: 0,
       absen: 0,
       dinasLuar: 0,
+      terlambat: 0,
       lembur: 0,
-      uangMakan: 0
+      cuti: 0,
+      ijin: 0,
+      sakit: 0,
+      uangMakan: 0,
+      periodeCount: 0
     };
     const s = ytdPerStaff[key];
+    s.normal += Number(r.normalHari) || 0;
+    s.riil += Number(r.riilHari) || 0;
     s.absen += Number(r.absenHari) || 0;
     s.dinasLuar += Number(r.dLuarHari) || 0;
+    s.terlambat += Number(r.terlambatJam) || 0;
     s.lembur += Number(r.lemburJam) || 0;
+    s.cuti += Number(r.cutiHari) || 0;
+    s.ijin += Number(r.ijinHari) || 0;
+    s.sakit += Number(r.sakitHari) || 0;
     s.uangMakan += Number(r.uangMakan) || (Number(r.riilHari) || 0) * ((employees.find(e => e.nama === r.namaKaryawan) || {}).uangHarianRate || 0);
+    s.periodeCount += 1;
   });
-  const ytdStaffList = Object.values(ytdPerStaff);
+  const ytdStaffList = Object.values(ytdPerStaff).sort((a, b) => a.nama.localeCompare(b.nama));
   const ytdTotalAbsen = ytdStaffList.reduce((s, x) => s + x.absen, 0);
   const ytdTotalDinasLuar = ytdStaffList.reduce((s, x) => s + x.dinasLuar, 0);
   const ytdTotalLembur = ytdStaffList.reduce((s, x) => s + x.lembur, 0);
@@ -26015,7 +26098,28 @@ function DashboardAbsensiPanel({
       gridTemplateColumns: "repeat(auto-fill,minmax(180px,1fr))",
       gap: 16
     }
-  }, ytdStatCard("Staff Tercatat (YTD)", ytdStaffList.length, theme.text), ytdStatCard("Total Hari Absen (YTD)", ytdTotalAbsen, theme.red), ytdStatCard("Total Hari Dinas Luar (YTD)", ytdTotalDinasLuar, theme.cyan), ytdStatCard("Total Jam Lembur (YTD)", ytdTotalLembur + " jam", theme.yellow), ytdStatCard("Total Uang Makan (YTD)", fmt(ytdTotalUangMakan), theme.green))), /*#__PURE__*/React.createElement("div", {
+  }, ytdStatCard("Staff Tercatat (YTD)", ytdStaffList.length, theme.text), ytdStatCard("Total Hari Absen (YTD)", ytdTotalAbsen, theme.red), ytdStatCard("Total Hari Dinas Luar (YTD)", ytdTotalDinasLuar, theme.cyan), ytdStatCard("Total Jam Lembur (YTD)", ytdTotalLembur + " jam", theme.yellow), ytdStatCard("Total Uang Makan (YTD)", fmt(ytdTotalUangMakan), theme.green))), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: `Rekap & Performa per Karyawan — YTD (1 Jan ${currentYear} s/d ${fmtDateRev(today())})`,
+    count: ytdStaffList.length,
+    badgeColor: theme.accent,
+    storageKey: "absensi_ytd_per_staff",
+    defaultOpen: false
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      overflowX: "auto"
+    }
+  }, /*#__PURE__*/React.createElement(Table, {
+    headers: ["Nama", "Normal", "Riil", "Dinas Luar", "Absen", "Terlambat(j)", "Lembur(j)", "Cuti", "Sisa Cuti", "Ijin", "Sakit", "Uang Makan", "Performa"],
+    rows: ytdStaffList.map(s => {
+      const sisa = sisaCutiForNama(s.nama);
+      return [s.nama, s.normal, s.riil, s.dinasLuar, s.absen, s.terlambat.toFixed(1), s.lembur.toFixed(1), s.cuti, sisa === null ? "-" : /*#__PURE__*/React.createElement(Badge, {
+        color: sisa > 3 ? theme.green : sisa > 0 ? theme.yellow : theme.red
+      }, sisa, " hari"), s.ijin, s.sakit, fmt(s.uangMakan), /*#__PURE__*/React.createElement(Badge, {
+        color: performaColor(s)
+      }, s.normal > 0 ? `${Math.round(performaRasio(s) * 100)}%` : "-")];
+    }),
+    emptyMsg: "Belum ada rekap absensi tersimpan untuk tahun berjalan"
+  }))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
       gridTemplateColumns: "repeat(auto-fill,minmax(200px,1fr))",
@@ -26081,13 +26185,13 @@ function DashboardAbsensiPanel({
       color: theme.green,
       marginTop: 6
     }
-  }, fmt(totalUangMakanSemua)))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
-    style: {
-      margin: "0 0 12px",
-      color: theme.text,
-      fontSize: 15
-    }
-  }, "Performa per Staff", bulanFilter ? ` — ${bulanFilter}` : ""), /*#__PURE__*/React.createElement("div", {
+  }, fmt(totalUangMakanSemua)))), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: `Performa per Staff${bulanFilter ? ` — ${bulanFilter}` : ""}`,
+    count: staffList.length,
+    badgeColor: theme.accent,
+    storageKey: "absensi_performa_bulanan",
+    defaultOpen: true
+  }, /*#__PURE__*/React.createElement("div", {
     style: {
       overflowX: "auto"
     }
