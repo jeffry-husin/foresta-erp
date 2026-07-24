@@ -4568,6 +4568,55 @@ function MasterUnit({
     }));
     exportToExcel(rows, `Master_Unit_${u.unitCode}.xlsx`, "Master Unit");
   };
+  // Import BOM lines into a single, already-existing unit (counterpart to doExportOne above) —
+  // reads the same flattened bomPartNumber/bomQty columns. Rows whose unitCode column doesn't match
+  // this unit are ignored (so re-uploading the bulk export file only affects this one unit); if the
+  // file has no unitCode column at all (e.g. a hand-built partNumber/qty sheet), every row is used.
+  // Existing part numbers get their qty updated; new part numbers are appended to the BOM.
+  const doImportOne = (u, rows) => {
+    const relevant = rows.filter(r => !r.unitCode || String(r.unitCode).trim() === u.unitCode);
+    const useRows = relevant.length > 0 ? relevant : rows;
+    let added = 0,
+      updated = 0;
+    const bom = u.bom.map(b => ({
+      ...b
+    }));
+    useRows.forEach(r => {
+      const partNumber = String(r.bomPartNumber || r.partNumber || "").trim();
+      if (!partNumber) return;
+      const qty = parseInt(r.bomQty || r.qty) || 1;
+      const idx = bom.findIndex(b => b.partNumber === partNumber);
+      if (idx >= 0) {
+        bom[idx] = {
+          ...bom[idx],
+          qty
+        };
+        updated++;
+      } else {
+        const part = parts.find(p => p.partNumber === partNumber);
+        bom.push({
+          partNumber,
+          partName: part?.partName || partNumber,
+          qty
+        });
+        added++;
+      }
+    });
+    const updatedUnit = {
+      ...u,
+      bom,
+      bomUpdatedAt: new Date().toISOString()
+    };
+    setUnits(prev => prev.map(x => x.unitCode === u.unitCode ? updatedUnit : x));
+    setDetail(updatedUnit);
+    logAudit(store, session, {
+      module: "Master Unit (BOM)",
+      docNomor: u.unitCode,
+      action: "Import BOM",
+      detail: `${added} part baru, ${updated} part diupdate qty`
+    });
+    alert(`Import selesai: ${added} part baru ditambahkan, ${updated} part diupdate qty-nya.`);
+  };
   // Duplicate: pre-fill the create form with an existing unit's data (fresh unit code,
   // "(Copy)" suffix on the name) and open the editor so the user only tweaks what's
   // different instead of re-entering the whole BOM from scratch.
@@ -4751,6 +4800,9 @@ function MasterUnit({
   }, /*#__PURE__*/React.createElement(ExportExcelBtn, {
     label: "📊 Export BOM Ini",
     onClick: () => doExportOne(detail)
+  }), /*#__PURE__*/React.createElement(ImportExcelButton, {
+    label: "📥 Import BOM Ini",
+    onParsed: rows => doImportOne(detail, rows)
   }), /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
     size: "sm",
@@ -6620,8 +6672,14 @@ function MekanikReport({
     deliveryOrders,
     inspectionReports,
     setInspectionReports,
-    employees
+    employees,
+    authUsers
   } = store;
+  // Canonical, deduped list of active login names — sourced from Manajemen User (Supabase profiles)
+  // rather than the local `employees` array, which can drift out of sync/gain duplicate entries.
+  // Used for the Surat Tugas "Dibuat Oleh"/"Menugaskan Kepada" name pickers so they never show
+  // duplicate or stale names. Falls back to `employees` if authUsers hasn't loaded yet.
+  const activeUserNames = Array.from(new Set(((authUsers && authUsers.length ? authUsers.filter(u => u.aktif !== false) : employees) || []).map(u => u.nama).filter(Boolean)));
   const partRecs = normalizePartRecs(partRecsRaw);
   const isMekanik = session.role === "mekanik";
   // HO1 (owner), HO2 (gm), HO3 (finance_director) all get delete/full-access rights here, per company hierarchy.
@@ -6640,7 +6698,8 @@ function MekanikReport({
     jenisBeritaAcara: "Pemasangan",
     soNomor: "",
     millId: "",
-    mekanikTambahan: [] // usernames of additional mekanik who went along on this visit (besides the creator) — they get full access to fill Mekanik Report forms for this Kunjungan
+    mekanikUtama: "", // username of the primary field mekanik — only used/required when the creator is NOT a mekanik (e.g. WORKSHOP2/Septi creating the Kunjungan on behalf of the team); when the creator IS a mekanik, they are automatically the primary mekanik as before
+    mekanikTambahan: [] // usernames of additional mekanik who went along on this visit (besides the primary) — they get full access to fill Mekanik Report forms for this Kunjungan
   };
   const [visitForm, setVisitForm] = useState(emptyVisitForm);
   const [detailVisit, setDetailVisit] = useState(null);
@@ -6798,17 +6857,26 @@ function MekanikReport({
   };
   const saveVisit = () => {
     if (!visitForm.customerId) return alert("Pilih client");
+    // When the creator is NOT a mekanik (e.g. WORKSHOP2/Septi creating a Kunjungan on behalf of the
+    // team), they must explicitly pick who the primary field mekanik is — previously this silently
+    // defaulted to the creator's own name, which corrupted "Detail Kunjungan" and every document
+    // that reads visit.mekanikNama (DAR, Surat Tugas, dsb.) with the wrong person.
+    if (!isMekanik && !visitForm.mekanikUtama) return alert("Pilih Mekanik yang Ditugaskan (Utama)");
     const cust = customers.find(c => c.id === visitForm.customerId);
     // If the mekanik chose to pull from a Sales Order and/or Master Mill, resolve and freeze that
     // data onto the visit record now — this is what lets the BAPP auto-fill later, independent of
     // whether the SO/Mill master data changes afterward.
     const so = visitForm.soNomor ? salesOrders.find(s => s.nomor === visitForm.soNomor) : null;
     const mill = visitForm.millId ? mills.find(m => m.millName === visitForm.millId) : null;
-    // Additional mekanik who went on this visit (besides the creator, who is always included) —
-    // each listed username gets the same access as the creator to fill Mekanik Report forms
+    // Primary mekanik: the creator themself if they are a mekanik (unchanged behavior), otherwise
+    // whoever was explicitly picked in "Mekanik yang Ditugaskan (Utama)".
+    const primaryUsername = isMekanik ? session.username : visitForm.mekanikUtama;
+    const primaryNama = isMekanik ? session.nama : (employees.find(e => e.username === primaryUsername) || {}).nama || primaryUsername;
+    // Additional mekanik who went on this visit (besides the primary, who is always included) —
+    // each listed username gets the same access as the primary to fill Mekanik Report forms
     // (DAR, Part Recommendation, BAPP, dsb.) for this Kunjungan.
-    const tambahanUsernames = (visitForm.mekanikTambahan || []).filter(u => u && u !== session.username);
-    const mekanikUsernames = [session.username, ...tambahanUsernames];
+    const tambahanUsernames = (visitForm.mekanikTambahan || []).filter(u => u && u !== primaryUsername);
+    const mekanikUsernames = [primaryUsername, ...tambahanUsernames];
     const mekanikNamaList = mekanikUsernames.map(u => (employees.find(e => e.username === u) || {}).nama || u);
     const v = {
       id: "VS-" + uid(),
@@ -6821,10 +6889,12 @@ function MekanikReport({
       snCrane: mill ? mill.snCrane || "" : "",
       grapple: mill ? mill.grapple || "" : "",
       snGrapple: mill ? mill.snGrapple || "" : "",
-      mekanikUsername: session.username,
-      mekanikNama: session.nama,
+      mekanikUsername: primaryUsername,
+      mekanikNama: primaryNama,
       mekanikUsernames,
-      mekanikNamaList
+      mekanikNamaList,
+      createdByUsername: session.username,
+      createdByNama: session.nama
     };
     setVisits([...visits, v]);
     setVisitModal(false);
@@ -6837,6 +6907,7 @@ function MekanikReport({
       jenisBeritaAcara: "Pemasangan",
       soNomor: "",
       millId: "",
+      mekanikUtama: "",
       mekanikTambahan: []
     });
   };
@@ -6916,9 +6987,21 @@ function MekanikReport({
     if (type === "surattugas") {
       const editingST = editingRecord;
       setEditingSTId(editingST ? editingST.id : null);
+      // For a brand-new Surat Tugas, pre-fill "Menugaskan Kepada" with the mekanik already assigned
+      // to this Kunjungan (mekanikNamaList — the primary + any tambahan picked when the visit was
+      // created), so the manager/creator doesn't have to re-type names that are already known. They
+      // can still remove/add more manually via the existing cart UI below.
       setSTAssigneeCart(editingST ? editingST.assignees.map(a => ({
         ...a
-      })) : []);
+      })) : (visit.mekanikUsernames || [visit.mekanikUsername]).filter(Boolean).map(u => {
+        const emp = employees.find(e => e.username === u);
+        return {
+          ...emptySTAssignee,
+          nama: emp ? emp.nama : (visit.mekanikNamaList || []).find(Boolean) || visit.mekanikNama || u,
+          jabatan: emp ? emp.jabatan || "" : "",
+          jenisPekerjaan: visit.jenisBeritaAcara || ""
+        };
+      }));
       setSTAssigneeForm({
         ...emptySTAssignee,
         // Jenis Pekerjaan auto-pulled from this visit's Jenis Berita Acara — mekanik/manager can still
@@ -9041,9 +9124,9 @@ function MekanikReport({
     }
   }, /*#__PURE__*/React.createElement("datalist", {
     id: "stEmployeeNames"
-  }, employees.map(e => /*#__PURE__*/React.createElement("option", {
-    key: e.username,
-    value: e.nama
+  }, activeUserNames.map(nama => /*#__PURE__*/React.createElement("option", {
+    key: nama,
+    value: nama
   }))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
@@ -9375,6 +9458,20 @@ function MekanikReport({
       ...visitForm,
       keterangan: v
     })
+  }), !isMekanik && /*#__PURE__*/React.createElement(Select, {
+    label: "Mekanik yang Ditugaskan (Utama)",
+    value: visitForm.mekanikUtama,
+    onChange: v => setVisitForm({
+      ...visitForm,
+      mekanikUtama: v,
+      // Dropping the same person from "Mekanik Lain" if they were checked there, to avoid duplicates.
+      mekanikTambahan: (visitForm.mekanikTambahan || []).filter(u => u !== v)
+    }),
+    options: employees.filter(e => e.role === "mekanik").map(e => ({
+      value: e.username,
+      label: e.nama
+    })),
+    required: true
   }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
     style: {
       display: "block",
@@ -9382,7 +9479,7 @@ function MekanikReport({
       color: theme.muted,
       marginBottom: 6
     }
-  }, "Mekanik Lain yang Ikut (opsional — selain Anda sendiri)"), /*#__PURE__*/React.createElement("div", {
+  }, isMekanik ? "Mekanik Lain yang Ikut (opsional — selain Anda sendiri)" : "Mekanik Lain yang Ikut (opsional — selain yang ditugaskan di atas)"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       flexWrap: "wrap",
@@ -9394,7 +9491,7 @@ function MekanikReport({
       maxHeight: 160,
       overflowY: "auto"
     }
-  }, employees.filter(e => e.role === "mekanik" && e.username !== session.username).map(e => {
+  }, employees.filter(e => e.role === "mekanik" && e.username !== (isMekanik ? session.username : visitForm.mekanikUtama)).map(e => {
     const checked = (visitForm.mekanikTambahan || []).includes(e.username);
     return /*#__PURE__*/React.createElement("label", {
       key: e.username,
@@ -18044,7 +18141,8 @@ function PartsUseModule({
     salesOrders,
     units,
     parts,
-    setParts
+    setParts,
+    employees
   } = store;
   const isStefanus = session.role === "logistic";
   const isMekanik = session.role === "mekanik";
@@ -18636,13 +18734,17 @@ function PartsUseModule({
     style: {
       color: theme.text
     }
-  }, form.soNomor), " — ", form.soCustomerNama), /*#__PURE__*/React.createElement(Input, {
+  }, form.soNomor), " — ", form.soCustomerNama), /*#__PURE__*/React.createElement(Select, {
     label: "Nama Mekanik Penerima",
     value: form.mekanikNama,
     onChange: v => setForm({
       ...form,
       mekanikNama: v
     }),
+    options: (employees || []).filter(e => e.role === "mekanik").map(e => ({
+      value: e.nama,
+      label: e.nama
+    })),
     required: true
   }), /*#__PURE__*/React.createElement("p", {
     style: {
@@ -25859,7 +25961,7 @@ function RekapMesinPanel({
     key: i,
     style: {
       display: "grid",
-      gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr 1fr 1fr auto",
+      gridTemplateColumns: "2fr 0.7fr 1fr 1fr 1fr 1fr 1fr 1fr auto",
       gap: 8,
       alignItems: "end",
       marginBottom: 8,
@@ -25875,7 +25977,23 @@ function RekapMesinPanel({
       value: k.nama,
       label: k.nama
     }))
-  }), /*#__PURE__*/React.createElement(Input, {
+  }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "block",
+      fontSize: 12,
+      color: theme.muted,
+      marginBottom: 6
+    }
+  }, "Riil (mesin)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "9px 12px",
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8,
+      fontSize: 14,
+      color: theme.text
+    }
+  }, (rawParsed.karyawan.find(k => k.nama === p.nama) || {}).riil ?? "-")), /*#__PURE__*/React.createElement(Input, {
     label: "D.Luar (hari)",
     type: "number",
     value: p.dLuar,
