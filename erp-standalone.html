@@ -6628,6 +6628,22 @@ function MekanikReport({
   const [visitSearch, setVisitSearch] = useState("");
   const myVisitsAll = isMekanik ? visits.filter(v => v.mekanikUsername === session.username) : visits;
   const myVisits = (visitSearch.trim() ? myVisitsAll.filter(v => [v.id, v.customerNama, v.unitTerkait, v.lokasi, v.mekanikNama].filter(Boolean).some(x => String(x).toLowerCase().includes(visitSearch.trim().toLowerCase()))) : myVisitsAll).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  // "MR On Going": SOs flagged by Item Requisition's "Buat MR" (so.mrDiminta === true, sisa item
+  // Jasa yang tidak lewat Purchasing) that haven't been turned into a Kunjungan yet. Drops off this
+  // list automatically once a visit referencing that SO exists (see openVisitFromSO below).
+  const [mrSearch, setMrSearch] = useState("");
+  const mrOngoingAll = (salesOrders || []).filter(so => so.mrDiminta && !visits.some(v => v.soNomor === so.nomor));
+  const mrOngoingList = (mrSearch.trim() ? mrOngoingAll.filter(so => [so.nomor, so.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(mrSearch.trim().toLowerCase()))) : mrOngoingAll).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  // Clicking an "MR On Going" entry behaves exactly like "+ Kunjungan Baru", just pre-filled with
+  // that SO's client/SO number so the mekanik doesn't have to re-pick them.
+  const openVisitFromSO = so => {
+    setVisitForm({
+      ...emptyVisitForm,
+      customerId: so.customerId || "",
+      soNomor: so.nomor
+    });
+    setVisitModal(true);
+  };
   const saveVisit = () => {
     if (!visitForm.customerId) return alert("Pilih client");
     const cust = customers.find(c => c.id === visitForm.customerId);
@@ -7609,7 +7625,67 @@ function MekanikReport({
       approveRec(viewRec);
       setViewRec(null);
     }
-  }, "✓ Approve")))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+  }, "✓ Approve")))), (isMekanik || isOwnerLike || isSepti) && /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "MR On Going (SO Sisa Jasa, Belum Jadi Kunjungan)",
+    count: mrOngoingList.length,
+    badgeColor: theme.cyan,
+    storageKey: "mr_ongoing"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "SO di sini sudah ditandai Purchasing/Workshop lewat tombol \"Buat MR\" di Item Requisition — klik ", /*#__PURE__*/React.createElement("strong", null, "Buat Kunjungan"), " untuk mengerjakannya, sama seperti + Kunjungan Baru."), /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari no. SO / nama client...",
+    value: mrSearch,
+    onChange: setMrSearch
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+      maxHeight: 420,
+      overflowY: "auto"
+    }
+  }, mrOngoingList.length === 0 && /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: theme.muted,
+      fontSize: 13,
+      margin: 0
+    }
+  }, "Tidak ada SO yang menunggu Mekanik Report."), mrOngoingList.map(so => /*#__PURE__*/React.createElement("div", {
+    key: so.nomor,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8,
+      padding: "10px 14px",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 600,
+      color: theme.text,
+      fontSize: 14
+    }
+  }, so.nomor), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, so.customerNama, " · ", so.tanggal)), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    onClick: () => openVisitFromSO(so)
+  }, "Buat Kunjungan")))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
     style: {
       margin: "0 0 14px",
       color: theme.text,
@@ -9883,7 +9959,10 @@ function QuotationUnit({
         qty,
         harga,
         subtotal: qty * harga,
-        sumber: "Master Part"
+        sumber: "Master Part",
+        // Carried through to SO/IR so Jasa/Service lines can be routed to Mekanik Report
+        // instead of Item Requisition/Purchase Order (see ItemRequisitionModule.explodeSOItems).
+        kategori: part.kategori || "Parts"
       }]
     }));
     setPartItemForm({
@@ -11109,7 +11188,10 @@ function QuotationPS({
         partDescription: part.description || "",
         qty,
         harga,
-        subtotal: qty * harga
+        subtotal: qty * harga,
+        // Carried through to SO/IR so Jasa/Service lines can be routed to Mekanik Report
+        // instead of Item Requisition/Purchase Order (see ItemRequisitionModule.explodeSOItems).
+        kategori: part.kategori || "Parts"
       }]
     }));
     setItemForm({
@@ -13234,6 +13316,7 @@ function ItemRequisitionModule({
     itemRequisitions,
     setItemRequisitions,
     salesOrders,
+    setSalesOrders,
     parts,
     units,
     poLocal,
@@ -13355,6 +13438,9 @@ function ItemRequisitionModule({
   const explodeSOItems = so => {
     const exploded = [];
     (so.items || []).forEach(it => {
+      // Jasa/Service line items are never stock-purchasable — they belong to Mekanik Report
+      // (see soJasaItems/requestMR below), not Item Requisition/Purchase Order.
+      if (it.kategori === "Service") return;
       const isUnitSourced = it.sumber === "Master Unit" || !!(!it.partNumber && it.unitCode && (units || []).find(u => u.unitCode === it.unitCode));
       if (isUnitSourced) {
         const unit = (units || []).find(u => u.unitCode === it.unitCode);
@@ -13426,6 +13512,31 @@ function ItemRequisitionModule({
   // requisitioned at all), it keeps showing so HRD/Purchasing can still pull the remaining items.
   const soPickerEligible = activeSO.filter(so => checkStockForSO(so.nomor).length > 0);
   const soPickerList = soPickerSearch.trim() ? soPickerEligible.filter(so => [so.nomor, so.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(soPickerSearch.trim().toLowerCase()))) : soPickerEligible;
+  // "BUAT MR" picker: once every Part-kategori item on an SO no longer has a stock shortfall
+  // (checkStockForSO returns none — either there were no parts at all, or they're already fully
+  // covered by an existing IR), any remaining Jasa/Service-kategori items on that SO can't go
+  // through Item Requisition/PO at all — they need a Mekanik Report job instead. This list lets
+  // Purchasing/Workshop flag that SO as ready, which then surfaces it in Mekanik Report's own
+  // "MR On Going" picker (see MekanikReport module) for a mekanik to turn into a Kunjungan.
+  const [soMrSearch, setSoMrSearch] = useState("");
+  const soJasaItems = so => (so.items || []).filter(it => it.kategori === "Service");
+  const soMrEligible = activeSO.filter(so => !so.mrDiminta && soJasaItems(so).length > 0 && checkStockForSO(so.nomor).length === 0);
+  const soMrList = soMrSearch.trim() ? soMrEligible.filter(so => [so.nomor, so.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(soMrSearch.trim().toLowerCase()))) : soMrEligible;
+  const requestMR = so => {
+    if (!confirm(`Tandai SO ${so.nomor} siap untuk Mekanik Report (sisa item Jasa: ${soJasaItems(so).map(it => it.partName || it.unitName).join(", ")})?`)) return;
+    setSalesOrders(prev => prev.map(s => s.nomor === so.nomor ? {
+      ...s,
+      mrDiminta: true,
+      mrDimintaOleh: session.nama,
+      mrDimintaTanggal: today()
+    } : s));
+    logAudit(store, session, {
+      module: "Item Requisition",
+      docNomor: so.nomor,
+      action: "Buat MR",
+      detail: `Sisa item Jasa ditandai untuk Mekanik Report: ${soJasaItems(so).map(it => it.partName || it.unitName).join(", ")}`
+    });
+  };
   // Traces IR -> PO (Lokal/Overseas, matched via po.irNomors) -> per-part received qty
   // (summed from po.receivedMap, which Goods Receipt maintains as items get received at
   // Office/Workshop). Lets the IR view show which requested parts have actually arrived.
@@ -13767,7 +13878,67 @@ function ItemRequisitionModule({
   }, so.customerNama, " · ", so.tanggal)), React.createElement(Btn, {
     size: "sm",
     onClick: () => loadFromSO(so.nomor)
-  }, "Buat IR")))))), React.createElement(Card, null, React.createElement(Input, {
+  }, "Buat IR")))))), canManage && React.createElement(CollapsibleSection, {
+    title: "SO SIAP MR (Parts Sudah di-IR, Sisa Jasa)",
+    count: soMrList.length,
+    badgeColor: theme.cyan,
+    storageKey: "ir_so_siap_mr"
+  }, React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 12
+    }
+  }, React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "SO di sini sudah tidak punya kekurangan stock part (atau memang tidak ada part sama sekali) — sisanya hanya item Jasa yang tidak melalui Purchasing, melainkan dikerjakan lewat Mekanik Report."), React.createElement(Input, {
+    placeholder: "Cari no. SO / nama client...",
+    value: soMrSearch,
+    onChange: setSoMrSearch
+  }), React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+      maxHeight: 420,
+      overflowY: "auto"
+    }
+  }, soMrList.length === 0 && React.createElement("p", {
+    style: {
+      color: theme.muted,
+      fontSize: 13,
+      margin: 0
+    }
+  }, "Tidak ada SO yang siap dijadikan MR."), soMrList.map(so => React.createElement("div", {
+    key: so.nomor,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8,
+      padding: "10px 14px",
+      gap: 12
+    }
+  }, React.createElement("div", null, React.createElement("div", {
+    style: {
+      fontWeight: 600,
+      color: theme.text,
+      fontSize: 14
+    }
+  }, so.nomor), React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, so.customerNama, " · Jasa: ", soJasaItems(so).map(it => it.partName || it.unitName).join(", "))), React.createElement(Btn, {
+    size: "sm",
+    onClick: () => requestMR(so)
+  }, "Buat MR")))))), React.createElement(Card, null, React.createElement(Input, {
     placeholder: "Cari no. requisition / no. SO / nama client...",
     value: irSearch,
     onChange: setIrSearch,
@@ -18963,6 +19134,22 @@ function InvoiceModule({
     const used = invoicedItemKeySet(so.nomor);
     return (so.items || []).filter(it => !used.has(itemKey(it)));
   };
+  // SO discount (so.diskon) is a single SO-level nominal amount derived from the Quotation's
+  // client-visible Discount — it is never stored per item (see SalesOrderModule.createSO). When
+  // an invoice is built by picking individual SO items (no Term of Payment), we must apply that
+  // same discount ratio to the picked items' price so the invoice nominal matches the SO's actual
+  // post-discount total, instead of billing at the pre-discount list price.
+  const soDiskonRatioOf = so => so && so.subtotal ? (so.diskon || 0) / so.subtotal : 0;
+  const applySoDiskon = (items, so) => {
+    const ratio = soDiskonRatioOf(so);
+    if (!ratio) return items;
+    return items.map(it => {
+      const rawSubtotal = it.subtotal ?? (it.qty || 0) * (it.harga || 0);
+      const discSubtotal = rawSubtotal - rawSubtotal * ratio;
+      const discHarga = it.qty ? discSubtotal / it.qty : it.harga;
+      return { ...it, harga: discHarga, subtotal: discSubtotal, hargaSebelumDiskonSO: it.harga, subtotalSebelumDiskonSO: rawSubtotal };
+    });
+  };
   const availableSO = salesOrders.filter(so => {
     const rem = remainingTermin(so);
     if (rem === null) return soUninvoicedItems(so).length > 0; // legacy: keep offering until all items invoiced
@@ -19028,8 +19215,11 @@ function InvoiceModule({
       }
     }
     const uninvoicedItems = !hasTop && so ? soUninvoicedItems(so) : [];
-    const chosenItems = !hasTop && so ? (form.selectedItemKeys.length > 0 ? uninvoicedItems.filter(it => form.selectedItemKeys.includes(itemKey(it))) : uninvoicedItems) : [];
-    if (!hasTop && chosenItems.length === 0) return alert("Pilih minimal satu item SO untuk dijadikan invoice ini.");
+    const chosenItemsRaw = !hasTop && so ? (form.selectedItemKeys.length > 0 ? uninvoicedItems.filter(it => form.selectedItemKeys.includes(itemKey(it))) : uninvoicedItems) : [];
+    if (!hasTop && chosenItemsRaw.length === 0) return alert("Pilih minimal satu item SO untuk dijadikan invoice ini.");
+    // Bill at the SO's actual post-discount price — not the pre-discount list price the items
+    // were originally added at (see applySoDiskon above).
+    const chosenItems = !hasTop ? applySoDiskon(chosenItemsRaw, so) : [];
     const terminAmount = hasTop ? computeTerminAmount(so, form.terminLabel) : chosenItems.reduce((s, it) => s + (it.subtotal ?? (it.qty || 0) * (it.harga || 0)), 0);
     const termin = hasTop ? so.termOfPayment.find(t => t.label === form.terminLabel) : null;
     // Invoice-level Discount + PPN (11%) + Uang Muka (DP) are entered independently at invoice
@@ -20205,14 +20395,14 @@ function InvoiceModule({
         style: {
           flex: 1
         }
-      }, it.partName, it.partNumber && it.partNumber !== "-" ? ` (${it.partNumber})` : "", " — Qty ", it.qty), /*#__PURE__*/React.createElement("span", null, fmt(it.subtotal ?? (it.qty || 0) * (it.harga || 0))));
+      }, it.partName, it.partNumber && it.partNumber !== "-" ? ` (${it.partNumber})` : "", " — Qty ", it.qty), /*#__PURE__*/React.createElement("span", null, fmt(applySoDiskon([it], selectedSO)[0].subtotal)));
     }), /*#__PURE__*/React.createElement("p", {
       style: {
         margin: "4px 0 0",
         fontSize: 11,
         color: theme.muted
       }
-    }, "Tidak dicentang satupun = semua item di atas akan dijadikan invoice ini."));
+    }, "Tidak dicentang satupun = semua item di atas akan dijadikan invoice ini.", soDiskonRatioOf(selectedSO) > 0 ? ` Harga sudah termasuk Discount SO (${(soDiskonRatioOf(selectedSO) * 100).toFixed(1)}%).` : ""));
   })()), /*#__PURE__*/React.createElement(Select, {
     label: "Tipe Pembayaran",
     value: form.tipePembayaran,
