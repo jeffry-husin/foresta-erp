@@ -2723,13 +2723,19 @@ function tableCellSortValue(node) {
   const text = tableCellText(node).trim();
   // Money/qty cells ("Rp 22.422.000", "150") are formatted with "." as a thousands separator (no
   // decimals) — stripping every non-digit/non-leading-minus character and parsing as an integer
-  // sorts these numerically instead of lexicographically. Anything that doesn't collapse to a
-  // single clean digit run (dates like "2026-07-14", mixed doc numbers like "PO-005-FRT-VII-2026")
-  // falls through to a case-insensitive string compare, which is already correct for those formats.
-  const digits = text.replace(/[^0-9-]/g, "");
-  if (digits && /^-?\d+$/.test(digits)) {
-    const n = parseInt(digits, 10);
-    if (!isNaN(n)) return n;
+  // sorts these numerically instead of lexicographically.
+  // IMPORTANT: only do this when the text contains NO letters at all. Previously the digit-only
+  // check ran even on alphanumeric text (usernames like "workshop1"/"ho2", doc numbers like
+  // "PO-005-FRT-VII-2026"), stripping the letters and comparing just the leftover digits — so
+  // sorting by Username looked scrambled (e.g. "workshop1" and "ho1" both collapsed to just "1")
+  // instead of alphabetical. Anything containing a letter now always falls through to a
+  // case-insensitive string compare, which is what alphanumeric IDs need.
+  if (text && !/[a-zA-Z]/.test(text)) {
+    const digits = text.replace(/[^0-9-]/g, "");
+    if (digits && /^-?\d+$/.test(digits)) {
+      const n = parseInt(digits, 10);
+      if (!isNaN(n)) return n;
+    }
   }
   return text.toLowerCase();
 }
@@ -6624,7 +6630,8 @@ function MekanikReport({
     keterangan: "",
     jenisBeritaAcara: "Pemasangan",
     soNomor: "",
-    millId: ""
+    millId: "",
+    mekanikTambahan: [] // usernames of additional mekanik who went along on this visit (besides the creator) — they get full access to fill Mekanik Report forms for this Kunjungan
   };
   const [visitForm, setVisitForm] = useState(emptyVisitForm);
   const [detailVisit, setDetailVisit] = useState(null);
@@ -6760,7 +6767,7 @@ function MekanikReport({
 
   // Visible visits: mekanik sees own, reviewer sees all
   const [visitSearch, setVisitSearch] = useState("");
-  const myVisitsAll = isMekanik ? visits.filter(v => v.mekanikUsername === session.username) : visits;
+  const myVisitsAll = isMekanik ? visits.filter(v => v.mekanikUsername === session.username || (v.mekanikUsernames || []).includes(session.username)) : visits;
   const myVisits = (visitSearch.trim() ? myVisitsAll.filter(v => [v.id, v.customerNama, v.unitTerkait, v.lokasi, v.mekanikNama].filter(Boolean).some(x => String(x).toLowerCase().includes(visitSearch.trim().toLowerCase()))) : myVisitsAll).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   // "MR On Going": SOs explicitly routed to Workshop at creation time (so.fulfillmentType ===
   // "MR", chosen via the "Buat SO – MR" button on Sales Order) that haven't been turned into a
@@ -6787,6 +6794,12 @@ function MekanikReport({
     // whether the SO/Mill master data changes afterward.
     const so = visitForm.soNomor ? salesOrders.find(s => s.nomor === visitForm.soNomor) : null;
     const mill = visitForm.millId ? mills.find(m => m.millName === visitForm.millId) : null;
+    // Additional mekanik who went on this visit (besides the creator, who is always included) —
+    // each listed username gets the same access as the creator to fill Mekanik Report forms
+    // (DAR, Part Recommendation, BAPP, dsb.) for this Kunjungan.
+    const tambahanUsernames = (visitForm.mekanikTambahan || []).filter(u => u && u !== session.username);
+    const mekanikUsernames = [session.username, ...tambahanUsernames];
+    const mekanikNamaList = mekanikUsernames.map(u => (employees.find(e => e.username === u) || {}).nama || u);
     const v = {
       id: "VS-" + uid(),
       ...visitForm,
@@ -6799,7 +6812,9 @@ function MekanikReport({
       grapple: mill ? mill.grapple || "" : "",
       snGrapple: mill ? mill.snGrapple || "" : "",
       mekanikUsername: session.username,
-      mekanikNama: session.nama
+      mekanikNama: session.nama,
+      mekanikUsernames,
+      mekanikNamaList
     };
     setVisits([...visits, v]);
     setVisitModal(false);
@@ -6811,7 +6826,8 @@ function MekanikReport({
       keterangan: "",
       jenisBeritaAcara: "Pemasangan",
       soNomor: "",
-      millId: ""
+      millId: "",
+      mekanikTambahan: []
     });
   };
   const [editingDarId, setEditingDarId] = useState(null);
@@ -7917,7 +7933,7 @@ function MekanikReport({
     }
   }, /*#__PURE__*/React.createElement(PrintBtn, {
     onClick: () => printVisitDetail(detailVisit)
-  })), (isOwnerLike || isSepti || isMekanik && session.username === detailVisit.mekanikUsername) && /*#__PURE__*/React.createElement("div", {
+  })), (isOwnerLike || isSepti || isMekanik && (session.username === detailVisit.mekanikUsername || (detailVisit.mekanikUsernames || []).includes(session.username))) && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
@@ -7963,7 +7979,7 @@ function MekanikReport({
       }
     }, /*#__PURE__*/React.createElement(PrintBtn, {
       onClick: () => printDAR(d)
-    }), (isOwnerLike || isSepti || isMekanik && session.username === detailVisit.mekanikUsername) && /*#__PURE__*/React.createElement(Btn, {
+    }), (isOwnerLike || isSepti || isMekanik && (session.username === detailVisit.mekanikUsername || (detailVisit.mekanikUsernames || []).includes(session.username))) && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "ghost",
       onClick: () => openForm(detailVisit, "dar", d)
@@ -8016,7 +8032,7 @@ function MekanikReport({
       }
     }, /*#__PURE__*/React.createElement(PrintBtn, {
       onClick: () => printPartRec(recDoc)
-    }), (isOwnerLike || isSepti || isMekanik && session.username === detailVisit.mekanikUsername) && /*#__PURE__*/React.createElement(Btn, {
+    }), (isOwnerLike || isSepti || isMekanik && (session.username === detailVisit.mekanikUsername || (detailVisit.mekanikUsernames || []).includes(session.username))) && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "ghost",
       onClick: () => openForm(detailVisit, "partrec")
@@ -8067,7 +8083,7 @@ function MekanikReport({
         display: "flex",
         gap: 6
       }
-    }, (isOwnerLike || isSepti || isMekanik && session.username === detailVisit.mekanikUsername) && /*#__PURE__*/React.createElement(Btn, {
+    }, (isOwnerLike || isSepti || isMekanik && (session.username === detailVisit.mekanikUsername || (detailVisit.mekanikUsernames || []).includes(session.username))) && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "ghost",
       onClick: () => openForm(detailVisit, "bast", b)
@@ -8119,7 +8135,7 @@ function MekanikReport({
         display: "flex",
         gap: 6
       }
-    }, (isOwnerLike || isSepti || isMekanik && session.username === detailVisit.mekanikUsername) && /*#__PURE__*/React.createElement(Btn, {
+    }, (isOwnerLike || isSepti || isMekanik && (session.username === detailVisit.mekanikUsername || (detailVisit.mekanikUsernames || []).includes(session.username))) && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "ghost",
       onClick: () => openForm(detailVisit, "surattugas", s)
@@ -9274,7 +9290,55 @@ function MekanikReport({
       ...visitForm,
       keterangan: v
     })
-  }), /*#__PURE__*/React.createElement("div", {
+  }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "block",
+      fontSize: 12,
+      color: theme.muted,
+      marginBottom: 6
+    }
+  }, "Mekanik Lain yang Ikut (opsional — selain Anda sendiri)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 8,
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8,
+      padding: 10,
+      maxHeight: 160,
+      overflowY: "auto"
+    }
+  }, employees.filter(e => e.role === "mekanik" && e.username !== session.username).map(e => {
+    const checked = (visitForm.mekanikTambahan || []).includes(e.username);
+    return /*#__PURE__*/React.createElement("label", {
+      key: e.username,
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        fontSize: 13,
+        cursor: "pointer",
+        color: theme.text,
+        border: `1px solid ${checked ? theme.accentLight : theme.border}`,
+        borderRadius: 6,
+        padding: "4px 8px"
+      }
+    }, /*#__PURE__*/React.createElement("input", {
+      type: "checkbox",
+      checked,
+      onChange: () => setVisitForm({
+        ...visitForm,
+        mekanikTambahan: checked ? (visitForm.mekanikTambahan || []).filter(u => u !== e.username) : [...(visitForm.mekanikTambahan || []), e.username]
+      })
+    }), e.nama);
+  })), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "6px 0 0",
+      fontSize: 11,
+      color: theme.muted
+    }
+  }, "Mekanik yang dicentang akan mendapat akses untuk mengisi DAR, Part Recommendation, dan dokumen Mekanik Report lain untuk kunjungan ini.")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
@@ -28181,7 +28245,8 @@ function UserManagement({
     nama: "",
     username: "",
     role: "mekanik",
-    aktif: true
+    aktif: true,
+    password: ""
   });
   const [editIdx, setEditIdx] = useState(null);
   const [search, setSearch] = useState("");
@@ -28189,6 +28254,7 @@ function UserManagement({
   const [resetTempPass, setResetTempPass] = useState("");
   const [accessModal, setAccessModal] = useState(null);
   const [accessList, setAccessList] = useState([]);
+  const [creating, setCreating] = useState(false);
   const loadUsers = async () => {
     const {
       data,
@@ -28209,10 +28275,63 @@ function UserManagement({
   const filtered = users.filter(u => u.nama.toLowerCase().includes(search.toLowerCase()) || u.username.includes(search.toLowerCase()));
   const save = async () => {
     if (editIdx === null) {
-      // Creating a brand-new login requires the Supabase service_role key,
-      // which must never be shipped in client-side code. New employees are
-      // added by the technical admin directly via the Supabase dashboard.
-      alert("Membuat login baru harus dilakukan lewat Supabase dashboard oleh admin teknis (butuh service_role key, tidak aman dilakukan dari browser). Hubungi developer untuk menambah user baru.");
+      // Creating a brand-new login (auth.users row) requires the Supabase service_role key, which
+      // must never be shipped in client-side code — so this calls a server-side Edge Function
+      // ("create-user") that holds that key securely and does the privileged work on our behalf.
+      // The Edge Function itself re-checks that the caller is a Super User before doing anything.
+      if (!form.nama || !form.username || !form.password) return alert("Nama, Username, dan Password wajib diisi");
+      if (form.password.length < 4) return alert("Password minimal 4 karakter");
+      if (!/^[a-z0-9_]+$/.test(form.username)) return alert("Username hanya boleh huruf kecil, angka, dan underscore (tanpa spasi)");
+      setCreating(true);
+      try {
+        const {
+          data: sessionData
+        } = await sb.auth.getSession();
+        const accessToken = sessionData?.session?.access_token;
+        if (!accessToken) {
+          setCreating(false);
+          return alert("Sesi login tidak valid, silakan login ulang.");
+        }
+        const res = await fetch(`${SUPABASE_URL}/functions/v1/create-user`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+            apikey: SUPABASE_ANON_KEY
+          },
+          body: JSON.stringify({
+            nama: form.nama,
+            username: form.username.toLowerCase(),
+            password: form.password,
+            role: form.role
+          })
+        });
+        const result = await res.json().catch(() => ({}));
+        setCreating(false);
+        if (!res.ok) {
+          return alert("Gagal membuat user: " + (result.error || res.statusText));
+        }
+        if (store) logAudit(store, currentUser, {
+          module: "Manajemen User",
+          docNomor: form.username,
+          action: "Tambah User",
+          detail: `${form.nama} (${ROLE_DEFS[form.role]?.label || form.role})`
+        });
+        await loadUsers();
+        setModal(false);
+        setForm({
+          nama: "",
+          username: "",
+          role: "mekanik",
+          aktif: true,
+          password: ""
+        });
+        setEditIdx(null);
+        alert(`User ${form.nama} berhasil dibuat. Username: ${form.username.toLowerCase()}`);
+      } catch (e) {
+        setCreating(false);
+        alert("Terjadi kesalahan sistem: " + e.message);
+      }
       return;
     }
     if (!form.nama) return alert("Nama wajib diisi");
@@ -28249,15 +28368,28 @@ function UserManagement({
       nama: "",
       username: "",
       role: "mekanik",
-      aktif: true
+      aktif: true,
+      password: ""
     });
     setEditIdx(null);
   };
   const onEdit = i => {
     setForm({
-      ...filtered[i]
+      ...filtered[i],
+      password: ""
     });
     setEditIdx(i);
+    setModal(true);
+  };
+  const openCreateModal = () => {
+    setForm({
+      nama: "",
+      username: "",
+      role: "mekanik",
+      aktif: true,
+      password: ""
+    });
+    setEditIdx(null);
     setModal(true);
   };
   const toggleAktif = async i => {
@@ -28363,8 +28495,8 @@ function UserManagement({
     style: {
       width: 200
     }
-  }), /*#__PURE__*/React.createElement(Btn, {
-    onClick: () => alert("Membuat login baru harus dilakukan lewat Supabase dashboard oleh admin teknis (butuh service_role key, tidak aman dilakukan dari browser). Hubungi developer untuk menambah user baru.")
+  }), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+    onClick: openCreateModal
   }, "+ Tambah User"))), isOwnerLike && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
@@ -28553,7 +28685,15 @@ function UserManagement({
       nama: v
     }),
     required: true
-  }), /*#__PURE__*/React.createElement(Input, {
+  }), editIdx === null ? /*#__PURE__*/React.createElement(Input, {
+    label: "Username (huruf kecil, angka, underscore — tanpa spasi)",
+    value: form.username,
+    onChange: v => setForm({
+      ...form,
+      username: v.toLowerCase().replace(/[^a-z0-9_]/g, "")
+    }),
+    required: true
+  }) : /*#__PURE__*/React.createElement(Input, {
     label: "Username (tidak bisa diubah)",
     value: form.username,
     onChange: () => {}
@@ -28568,6 +28708,16 @@ function UserManagement({
       value: v,
       label: d.label
     }))
+  }), editIdx === null && /*#__PURE__*/React.createElement(Input, {
+    label: "Password Awal",
+    value: form.password,
+    onChange: v => setForm({
+      ...form,
+      password: v
+    }),
+    type: "text",
+    required: true,
+    placeholder: "Minimal 4 karakter — sampaikan ke user, bisa diganti sendiri setelah login"
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -28578,8 +28728,9 @@ function UserManagement({
     variant: "ghost",
     onClick: () => setModal(false)
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
-    onClick: save
-  }, "Simpan")))));
+    onClick: save,
+    disabled: creating
+  }, creating ? "Membuat..." : "Simpan")))));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
