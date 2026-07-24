@@ -1736,6 +1736,7 @@ function useStore() {
   const [inspectionReports, setInspectionReports] = usePersisted("erp_inspection_reports", []); // Inspection Report entries, per visit (component checklist)
   const [leaveRequests, setLeaveRequests] = usePersisted("erp_leave_requests", []); // Form Cuti: leave requests, approved by HRD, deducts from 12-day/year quota via Absensi "Cuti" entries
   const [mingguanMekanikRoster, setMingguanMekanikRoster] = usePersisted("erp_mingguan_mekanik_roster", []); // Laporan Mingguan: manageable list of mekanik names to include (addable/removable, independent of role)
+  const [goodsReceiptReceivers, setGoodsReceiptReceivers] = usePersisted("erp_gr_receivers", ["workshop1", "inventory1"]); // Penerimaan Barang: usernames authorized to receive goods at Head Office/Workshop — GM-editable (was previously hardcoded)
   const [kpiSalesRoster, setKpiSalesRoster] = usePersisted("erp_kpi_sales_roster", {
     extra: [],
     excluded: []
@@ -1819,6 +1820,12 @@ function useStore() {
     setPayrollRuns(prev => rename(prev));
     setTickets(prev => rename(prev));
     setMaintenanceSchedules(prev => rename(prev));
+    // These two rosters store plain mekanik/sales-manager NAME strings directly (not full records),
+    // used to build Absensi's Laporan Mingguan and KPI Sales lists — they were missed by the original
+    // cascade above, so a rename in Manajemen User would leave these lists (and anything looked up by
+    // matching against them) stuck showing the old name even though every other module updated.
+    setMingguanMekanikRoster(prev => rename(prev));
+    setKpiSalesRoster(prev => rename(prev));
   };
   return {
     cascadeRenameEmployee,
@@ -1902,6 +1909,8 @@ function useStore() {
     setKpiSalesRoster,
     mingguanMekanikRoster,
     setMingguanMekanikRoster,
+    goodsReceiptReceivers,
+    setGoodsReceiptReceivers,
     companySettings,
     setCompanySettings,
     authUsers,
@@ -6774,6 +6783,7 @@ function MekanikReport({
   // Kunjungan yet. Drops off this list automatically once a visit referencing that SO exists (see
   // openVisitFromSO below).
   const [mrSearch, setMrSearch] = useState("");
+  const [soPreview, setSoPreview] = useState(null); // SO clicked from MR ON GOING list, to preview jenis pekerjaan before starting a visit
   const mrOngoingAll = (salesOrders || []).filter(so => so.fulfillmentType === "MR" && !visits.some(v => v.soNomor === so.nomor));
   const mrOngoingList = (mrSearch.trim() ? mrOngoingAll.filter(so => [so.nomor, so.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(mrSearch.trim().toLowerCase()))) : mrOngoingAll).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   // Clicking an "MR On Going" entry behaves exactly like "+ Kunjungan Baru", just pre-filled with
@@ -7825,9 +7835,13 @@ function MekanikReport({
   }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
     style: {
       fontWeight: 600,
-      color: theme.text,
-      fontSize: 14
-    }
+      color: theme.accentLight,
+      fontSize: 14,
+      cursor: "pointer",
+      textDecoration: "underline"
+    },
+    onClick: () => setSoPreview(so),
+    title: "Klik untuk preview jenis pekerjaan"
   }, so.nomor), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
@@ -7836,7 +7850,78 @@ function MekanikReport({
   }, so.customerNama, " · ", so.tanggal)), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     onClick: () => openVisitFromSO(so)
-  }, "Buat Kunjungan")))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+  }, "Buat Kunjungan")))))), /*#__PURE__*/React.createElement(Modal, {
+    open: !!soPreview,
+    title: `Preview SO: ${soPreview?.nomor}`,
+    onClose: () => setSoPreview(null),
+    width: 620
+  }, soPreview && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 10,
+      fontSize: 13
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+    style: { color: theme.muted }
+  }, "Client:"), " ", /*#__PURE__*/React.createElement("strong", {
+    style: { color: theme.text }
+  }, soPreview.customerNama)), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+    style: { color: theme.muted }
+  }, "Tanggal:"), " ", /*#__PURE__*/React.createElement("strong", {
+    style: { color: theme.text }
+  }, soPreview.tanggal)), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+    style: { color: theme.muted }
+  }, "Tipe:"), " ", /*#__PURE__*/React.createElement(Badge, {
+    color: theme.purple
+  }, soPreview.tipe)), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+    style: { color: theme.muted }
+  }, "No. PO Client:"), " ", /*#__PURE__*/React.createElement("strong", {
+    style: { color: theme.text }
+  }, soPreview.noPoClient || "-"))), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Jenis pekerjaan / item yang perlu dikerjakan pada SO ini:"), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Part/Unit Number", "Nama", "Qty"],
+    rows: (soPreview.items || []).map(it => [it.partNumber || it.unitCode || "-", it.partName || it.namaUnit || it.nama || "-", fmtNum(it.qty || 0)]),
+    emptyMsg: "Tidak ada item"
+  }), soPreview.catatan && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Catatan:"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "4px 0 0",
+      fontSize: 13,
+      color: theme.text,
+      whiteSpace: "pre-wrap"
+    }
+  }, soPreview.catatan)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setSoPreview(null)
+  }, "Tutup"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: () => {
+      const so = soPreview;
+      setSoPreview(null);
+      openVisitFromSO(so);
+    }
+  }, "Buat Kunjungan")))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
     style: {
       margin: "0 0 14px",
       color: theme.text,
@@ -16729,8 +16814,11 @@ function GoodsReceiptModule({
     employees,
     editRequests,
     setEditRequests,
-    itemRequisitions
+    itemRequisitions,
+    goodsReceiptReceivers,
+    setGoodsReceiptReceivers
   } = store;
+  const [receiverSettingsOpen, setReceiverSettingsOpen] = useState(false);
   const [detailGR, setDetailGR] = useState(null);
   const [detailIDO, setDetailIDO] = useState(null);
   const [editIDO, setEditIDO] = useState(null); // Internal DO record currently being edited
@@ -16931,11 +17019,11 @@ function GoodsReceiptModule({
   });
   const [namaManual, setNamaManual] = useState(false);
   const [confirmItems, setConfirmItems] = useState([]);
-  // Receiver name list: restricted to only INVENTORY 1 (Stefanus) and WORKSHOP 1 (Johnson) — these
-  // are the only two staff authorized to formally receive goods, per company policy. Matched by
-  // username rather than role since other workshop_manager accounts (workshop2/workshop3) must NOT
-  // be selectable here.
-  const mekanikList = employees.filter(e => ["workshop1", "inventory1"].includes(e.username)).map(e => e.nama);
+  // Receiver name list: GM-configurable (store.goodsReceiptReceivers, an array of usernames) so the
+  // GM can decide who at Head Office/Workshop is authorized to formally receive goods, instead of a
+  // hardcoded pair. Falls back to the original workshop1/inventory1 default if the setting is empty.
+  const activeReceiverUsernames = (goodsReceiptReceivers && goodsReceiptReceivers.length ? goodsReceiptReceivers : ["workshop1", "inventory1"]);
+  const mekanikList = employees.filter(e => activeReceiverUsernames.includes(e.username)).map(e => e.nama);
   const remainingQty = (po, partNumber, qty) => qty - (po.receivedMap?.[partNumber] || 0);
   const approvedPOs = [...poLocal.filter(p => (p.status === "Disetujui GM - Kirim ke Supplier" || p.status === "Diterima Sebagian") && p.items.some(it => remainingQty(p, it.partNumber, it.qty) > 0)).map(p => ({
     ...p,
@@ -17152,7 +17240,11 @@ function GoodsReceiptModule({
       margin: 0,
       color: theme.text
     }
-  }, "Penerimaan Barang")), /*#__PURE__*/React.createElement("p", {
+  }, "Penerimaan Barang"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    size: "sm",
+    onClick: () => setReceiverSettingsOpen(true)
+  }, "⚙ Atur Penerima")), /*#__PURE__*/React.createElement("p", {
     style: {
       margin: 0,
       fontSize: 12,
@@ -17884,7 +17976,59 @@ function GoodsReceiptModule({
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     variant: "success",
     onClick: confirmWorkshopReceipt
-  }, "✓ Konfirmasi & Update Stock")))));
+  }, "✓ Konfirmasi & Update Stock")))), /*#__PURE__*/React.createElement(Modal, {
+    open: receiverSettingsOpen,
+    title: "Atur Penerima Barang (Head Office / Workshop)",
+    onClose: () => setReceiverSettingsOpen(false),
+    width: 480
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Pilih staff yang berwenang menerima barang di Head Office atau Workshop. Hanya nama yang dicentang yang akan muncul di pilihan \"Nama Penerima\" saat mencatat Penerimaan Barang."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+      maxHeight: 320,
+      overflowY: "auto"
+    }
+  }, employees.filter(e => e.aktif !== false).map(e => {
+    const checked = activeReceiverUsernames.includes(e.username);
+    return /*#__PURE__*/React.createElement("label", {
+      key: e.username,
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        fontSize: 13,
+        cursor: "pointer",
+        color: theme.text,
+        border: `1px solid ${checked ? theme.accentLight : theme.border}`,
+        borderRadius: 6,
+        padding: "6px 10px"
+      }
+    }, /*#__PURE__*/React.createElement("input", {
+      type: "checkbox",
+      checked,
+      onChange: () => setGoodsReceiptReceivers(checked ? activeReceiverUsernames.filter(u => u !== e.username) : [...activeReceiverUsernames, e.username])
+    }), `${e.nama} (${e.username})`);
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    onClick: () => setReceiverSettingsOpen(false)
+  }, "Selesai")))));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
