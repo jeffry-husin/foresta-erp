@@ -1771,7 +1771,57 @@ function useStore() {
   useEffect(() => {
     authReadyPromise.then(refreshAuthUsers);
   }, []);
+  // Cascade an employee name correction (from Manajemen User) into every historical record
+  // app-wide that snapshotted the old name at creation time (dibuat oleh, disetujui oleh, mekanik
+  // penerima, PIC, dsb.) — so past documents follow the corrected name instead of staying frozen.
+  // Generic + recursive: any string field anywhere that EXACTLY equals the old name is replaced.
+  // Exact-match only (not substring) so this can't accidentally corrupt an unrelated string that
+  // merely contains the name (e.g. a company name).
+  const cascadeRenameEmployee = (oldNama, newNama) => {
+    if (!oldNama || !newNama || oldNama === newNama) return;
+    const rename = val => {
+      if (typeof val === "string") return val === oldNama ? newNama : val;
+      if (Array.isArray(val)) return val.map(rename);
+      if (val && typeof val === "object") {
+        const out = {};
+        for (const k in val) out[k] = rename(val[k]);
+        return out;
+      }
+      return val;
+    };
+    setSalesOrders(prev => rename(prev));
+    setPoLocal(prev => rename(prev));
+    setPoOverseas(prev => rename(prev));
+    setInvoices(prev => rename(prev));
+    setItemRequisitions(prev => rename(prev));
+    setGoodsReceipts(prev => rename(prev));
+    setDeliveryOrders(prev => rename(prev));
+    setPartsUse(prev => rename(prev));
+    setDars(prev => rename(prev));
+    setPartRecs(prev => rename(prev));
+    setStatusReports(prev => rename(prev));
+    setPartRequests(prev => rename(prev));
+    setQuotationsUnit(prev => rename(prev));
+    setQuotationsPS(prev => rename(prev));
+    setAuditLog(prev => rename(prev));
+    setEditRequests(prev => rename(prev));
+    setSalesActivities(prev => rename(prev));
+    setAttendance(prev => rename(prev));
+    setRekapAbsensi(prev => rename(prev));
+    setJurnal(prev => rename(prev));
+    setInternalDOs(prev => rename(prev));
+    setWorkshopOpsExpenses(prev => rename(prev));
+    setBasts(prev => rename(prev));
+    setSuratTugas(prev => rename(prev));
+    setInspectionReports(prev => rename(prev));
+    setLeaveRequests(prev => rename(prev));
+    setVisits(prev => rename(prev));
+    setPayrollRuns(prev => rename(prev));
+    setTickets(prev => rename(prev));
+    setMaintenanceSchedules(prev => rename(prev));
+  };
   return {
+    cascadeRenameEmployee,
     parts,
     setParts,
     units,
@@ -2658,13 +2708,39 @@ function PartPicker({
     }
   }, p.description)))));
 }
+// Pulls a comparable/searchable plain-text (or numeric) value out of a table cell, whether the
+// cell is a plain string/number or a nested tree of React.createElement(...) calls (Badge, spans,
+// icons, etc). Used by Table's built-in sort and search so BOTH work generically on every table in
+// the app without each module having to hand the raw underlying value alongside its rendered JSX.
+function tableCellText(node) {
+  if (node === null || node === undefined || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(tableCellText).join(" ");
+  if (node && node.props && node.props.children !== undefined) return tableCellText(node.props.children);
+  return "";
+}
+function tableCellSortValue(node) {
+  const text = tableCellText(node).trim();
+  // Money/qty cells ("Rp 22.422.000", "150") are formatted with "." as a thousands separator (no
+  // decimals) — stripping every non-digit/non-leading-minus character and parsing as an integer
+  // sorts these numerically instead of lexicographically. Anything that doesn't collapse to a
+  // single clean digit run (dates like "2026-07-14", mixed doc numbers like "PO-005-FRT-VII-2026")
+  // falls through to a case-insensitive string compare, which is already correct for those formats.
+  const digits = text.replace(/[^0-9-]/g, "");
+  if (digits && /^-?\d+$/.test(digits)) {
+    const n = parseInt(digits, 10);
+    if (!isNaN(n)) return n;
+  }
+  return text.toLowerCase();
+}
 function Table({
   headers,
   rows,
   onEdit,
   onDelete,
   emptyMsg = "Tidak ada data",
-  pageSize = 100
+  pageSize = 100,
+  search = false
 }) {
   // Pagination guard: rendering thousands of <tr> nodes in one synchronous React
   // commit (e.g. Master Part with 2700+ items, Database Client with 900+) can
@@ -2672,14 +2748,61 @@ function Table({
   // modules intermittently "not show up" for some users. Windowing the rendered
   // rows keeps the DOM small regardless of how much data exists.
   const [page, setPage] = useState(0);
-  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  // Universal column sort — click any header to cycle none → ascending → descending → none.
+  // Works on every Table instance app-wide with no per-module changes since it sorts via
+  // tableCellSortValue() extracted from the already-rendered row cells.
+  const [sortCol, setSortCol] = useState(null);
+  const [sortDir, setSortDir] = useState("asc");
+  // Optional built-in quick-filter search box (opt in via `search: true`), for lists that don't
+  // already sit under a page-level search Input.
+  const [quickSearch, setQuickSearch] = useState("");
+  // Carry each row's ORIGINAL index through filter/sort — onEdit/onDelete callbacks index into the
+  // caller's underlying data array (e.g. salesOrdersFiltered[i]), so once search/sort reorder what's
+  // displayed, the row's on-screen position no longer matches its real index. origIdx fixes that.
+  const indexedRows = rows.map((row, idx) => ({
+    row,
+    origIdx: idx
+  }));
+  const searchedRows = search && quickSearch.trim() ? indexedRows.filter(({
+    row
+  }) => row.some(cell => tableCellText(cell).toLowerCase().includes(quickSearch.trim().toLowerCase()))) : indexedRows;
+  const sortedRows = sortCol === null ? searchedRows : searchedRows.slice().sort((a, b) => {
+    const va = tableCellSortValue(a.row[sortCol]);
+    const vb = tableCellSortValue(b.row[sortCol]);
+    if (va < vb) return sortDir === "asc" ? -1 : 1;
+    if (va > vb) return sortDir === "asc" ? 1 : -1;
+    return 0;
+  });
+  const totalPages = Math.max(1, Math.ceil(sortedRows.length / pageSize));
   const safePage = Math.min(page, totalPages - 1);
   useEffect(() => {
     if (page > totalPages - 1) setPage(Math.max(0, totalPages - 1));
   }, [totalPages]);
   const startIdx = safePage * pageSize;
-  const pageRows = rows.slice(startIdx, startIdx + pageSize);
-  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+  const pageRows = sortedRows.slice(startIdx, startIdx + pageSize);
+  const toggleSort = colIdx => {
+    if (sortCol !== colIdx) {
+      setSortCol(colIdx);
+      setSortDir("asc");
+    } else if (sortDir === "asc") {
+      setSortDir("desc");
+    } else {
+      setSortCol(null);
+      setSortDir("asc");
+    }
+    setPage(0);
+  };
+  return /*#__PURE__*/React.createElement("div", null, search && /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari di tabel ini...",
+    value: quickSearch,
+    onChange: v => {
+      setQuickSearch(v);
+      setPage(0);
+    },
+    style: {
+      marginBottom: 10
+    }
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
       overflowX: "auto"
     }
@@ -2693,16 +2816,24 @@ function Table({
     style: {
       borderBottom: `1px solid ${theme.border}`
     }
-  }, headers.map(h => /*#__PURE__*/React.createElement("th", {
+  }, headers.map((h, hIdx) => /*#__PURE__*/React.createElement("th", {
     key: h,
+    onClick: () => toggleSort(hIdx),
+    title: "Klik untuk sort",
     style: {
       padding: "10px 12px",
       textAlign: "left",
-      color: theme.muted,
+      color: sortCol === hIdx ? theme.accentLight : theme.muted,
       fontWeight: 600,
-      whiteSpace: "nowrap"
+      whiteSpace: "nowrap",
+      cursor: "pointer",
+      userSelect: "none"
     }
-  }, h)), (onEdit || onDelete) && /*#__PURE__*/React.createElement("th", {
+  }, h, " ", sortCol === hIdx ? sortDir === "asc" ? "▲" : "▼" : /*#__PURE__*/React.createElement("span", {
+    style: {
+      opacity: 0.3
+    }
+  }, "↕"))), (onEdit || onDelete) && /*#__PURE__*/React.createElement("th", {
     style: {
       padding: "10px 12px",
       color: theme.muted,
@@ -2711,15 +2842,18 @@ function Table({
       background: theme.bg,
       boxShadow: "-4px 0 6px -4px rgba(0,0,0,0.3)"
     }
-  }, "Aksi"))), /*#__PURE__*/React.createElement("tbody", null, rows.length === 0 ? /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
+  }, "Aksi"))), /*#__PURE__*/React.createElement("tbody", null, sortedRows.length === 0 ? /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
     colSpan: headers.length + 1,
     style: {
       padding: 32,
       textAlign: "center",
       color: theme.muted
     }
-  }, emptyMsg)) : pageRows.map((row, i) => {
-    const absIdx = startIdx + i;
+  }, emptyMsg)) : pageRows.map(({
+    row,
+    origIdx
+  }) => {
+    const absIdx = origIdx;
     return /*#__PURE__*/React.createElement("tr", {
       key: absIdx,
       style: {
@@ -2753,7 +2887,7 @@ function Table({
       variant: "danger",
       onClick: () => onDelete(absIdx)
     }, "Hapus")));
-  })))), rows.length > pageSize && /*#__PURE__*/React.createElement("div", {
+  })))), sortedRows.length > pageSize && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
@@ -2762,7 +2896,7 @@ function Table({
       fontSize: 12,
       color: theme.muted
     }
-  }, /*#__PURE__*/React.createElement("span", null, `Menampilkan ${startIdx + 1}–${Math.min(startIdx + pageSize, rows.length)} dari ${rows.length} baris`), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("span", null, `Menampilkan ${startIdx + 1}–${Math.min(startIdx + pageSize, sortedRows.length)} dari ${sortedRows.length} baris`), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 8,
@@ -12749,6 +12883,7 @@ function SalesOrderModule({
     badgeColor: theme.accent,
     storageKey: "so_ongoing"
   }, /*#__PURE__*/React.createElement(Table, {
+    search: true,
     headers: ["No. SO", "Tipe", "Rute", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Status", "Selesai"],
     rows: salesOrdersFiltered.filter(so => !soHasBecomePO(so) && !soIsCompleted(so)).map(so => [/*#__PURE__*/React.createElement("span", {
       style: {
@@ -12781,6 +12916,7 @@ function SalesOrderModule({
     badgeColor: theme.cyan,
     storageKey: "so_to_po"
   }, /*#__PURE__*/React.createElement(Table, {
+    search: true,
     headers: ["No. SO", "Tipe", "Rute", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Status", "Selesai"],
     rows: salesOrdersFiltered.filter(so => soHasBecomePO(so) && !soIsCompleted(so)).map(so => [/*#__PURE__*/React.createElement("span", {
       style: {
@@ -12813,7 +12949,8 @@ function SalesOrderModule({
     badgeColor: theme.green,
     storageKey: "so_completed"
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. SO", "Tipe", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Selesai Via"],
+    search: true,
+    headers: ["No. SO", "Tipe", "Rute", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Selesai Via"],
     rows: salesOrdersFiltered.filter(so => soIsCompleted(so)).map(so => [/*#__PURE__*/React.createElement("span", {
       style: {
         color: theme.accentLight,
@@ -12823,7 +12960,13 @@ function SalesOrderModule({
       onClick: () => setDetail(so)
     }, soLabel(so)), /*#__PURE__*/React.createElement(Badge, {
       color: so.tipe === "Unit" ? theme.purple : theme.cyan
-    }, so.tipe), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
+    }, so.tipe), /*#__PURE__*/React.createElement("span", {
+      style: (isEpy || isOwnerLike) ? { cursor: "pointer" } : undefined,
+      onClick: (isEpy || isOwnerLike) ? () => changeFulfillmentType(so) : undefined,
+      title: (isEpy || isOwnerLike) ? "Klik untuk ubah rute IR/MR" : undefined
+    }, /*#__PURE__*/React.createElement(Badge, {
+      color: (so.fulfillmentType || "IR") === "MR" ? theme.purple : theme.cyan
+    }, so.fulfillmentType || "IR")), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
       color: theme.green
     }, soSelesaiVia(so))]),
     onDelete: isOwnerLike ? i => deleteSO(salesOrdersFiltered.filter(so => soIsCompleted(so))[i]) : undefined,
@@ -14351,7 +14494,7 @@ function PurchaseOrderModule({
   const suppliers = isLocal ? suppliersLocal : suppliersOverseas;
   const isHandler = session.role === (isLocal ? "purchasing" : "purchasing_overseas") || session.role === "purchasing"; // Erni (purchasing) can act on both per requirement
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
-  const canMarkPaid = ["purchasing", "finance_director", "owner", "gm"].includes(session.role); // Erni or Christine (Finance Director)
+  const canMarkPaid = ["purchasing", "purchasing_overseas", "finance_director", "owner", "gm"].includes(session.role); // Erni, Maria (Overseas), or Christine (Finance Director)
   const isMaria = session.role === "purchasing_overseas";
   const [poSearch, setPoSearch] = useState("");
   const [irOngoingSearch, setIrOngoingSearch] = useState("");
@@ -14390,6 +14533,9 @@ function PurchaseOrderModule({
   const [payMethod, setPayMethod] = useState("BCA");
   const [payDate, setPayDate] = useState("");
   const [payAmount, setPayAmount] = useState("");
+  // true = correcting an already-recorded payment (payAmount REPLACES jumlahDibayar); false = the
+  // normal "Tandai Dibayar"/"+Tambah Pembayaran" flow (payAmount is ADDED on top of jumlahDibayar).
+  const [payEditMode, setPayEditMode] = useState(false);
   const [reviseModal, setReviseModal] = useState(null);
   const [reviseItems, setReviseItems] = useState([]);
   const [revisePakaiPpn, setRevisePakaiPpn] = useState(false);
@@ -14700,16 +14846,46 @@ function PurchaseOrderModule({
     });
   };
   const openPayMethod = p => {
+    setPayEditMode(false);
     setPayMethodModal(p);
     setPayMethod(p.metodeBayar || "BCA");
     setPayDate(today());
     const sisa = p.total - (p.jumlahDibayar || 0);
     setPayAmount(String(sisa > 0 ? sisa : p.total));
   };
+  const openEditPayment = p => {
+    setPayEditMode(true);
+    setPayMethodModal(p);
+    setPayMethod(p.metodeBayar || "BCA");
+    setPayDate(p.tanggalBayar || today());
+    setPayAmount(String(p.jumlahDibayar || 0));
+  };
   const confirmMarkPaid = () => {
     const arr = [...po];
-    const jumlahBaru = parseFloat(payAmount) || 0;
-    const totalDibayar = (payMethodModal.jumlahDibayar || 0) + jumlahBaru;
+    const jumlahInput = parseFloat(payAmount) || 0;
+    if (payEditMode) {
+      // Correcting an already-recorded payment: the entered amount REPLACES jumlahDibayar
+      // (does not add on top), and metodeBayar/tanggalBayar are overwritten to the corrected values.
+      arr[po.indexOf(payMethodModal)] = {
+        ...payMethodModal,
+        statusBayar: jumlahInput <= 0 ? "Belum Dibayar" : (jumlahInput >= payMethodModal.total ? "Sudah Dibayar" : "Dibayar Sebagian"),
+        paidBy: session.nama,
+        paidDate: today(),
+        tanggalBayar: payDate,
+        jumlahDibayar: jumlahInput,
+        metodeBayar: payMethod
+      };
+      setPo(arr);
+      logAudit(store, session, {
+        module: `Purchase Order ${isLocal ? "Lokal" : "Overseas"}`,
+        docNomor: payMethodModal.nomor,
+        action: "Edit Pembayaran",
+        detail: `dikoreksi oleh ${session.nama} via ${payMethod} — total dibayar diubah menjadi ${fmt(jumlahInput)} pada ${payDate} (dari sebelumnya ${fmt(payMethodModal.jumlahDibayar || 0)} / total PO ${fmt(payMethodModal.total)})`
+      });
+      setPayMethodModal(null);
+      return;
+    }
+    const totalDibayar = (payMethodModal.jumlahDibayar || 0) + jumlahInput;
     arr[po.indexOf(payMethodModal)] = {
       ...payMethodModal,
       statusBayar: totalDibayar >= payMethodModal.total ? "Sudah Dibayar" : "Dibayar Sebagian",
@@ -14724,7 +14900,7 @@ function PurchaseOrderModule({
       module: `Purchase Order ${isLocal ? "Lokal" : "Overseas"}`,
       docNomor: payMethodModal.nomor,
       action: "Input Pembayaran",
-      detail: `oleh ${session.nama} via ${payMethod} — ${fmt(jumlahBaru)} pada ${payDate} (total dibayar: ${fmt(totalDibayar)} / ${fmt(payMethodModal.total)})`
+      detail: `oleh ${session.nama} via ${payMethod} — ${fmt(jumlahInput)} pada ${payDate} (total dibayar: ${fmt(totalDibayar)} / ${fmt(payMethodModal.total)})`
     });
     setPayMethodModal(null);
   };
@@ -15077,57 +15253,7 @@ function PurchaseOrderModule({
     size: "sm",
     variant: "danger",
     onClick: () => gmReject(p)
-  }, "✗ Tolak"))))), /*#__PURE__*/React.createElement(CollapsibleSection, {
-    title: "Recap Pembayaran",
-    count: po.filter(p => p.status === "Disetujui GM - Kirim ke Supplier" || p.status === "Sudah Diterima").length,
-    badgeColor: theme.accent,
-    storageKey: `po_recap_bayar_${mode}`
-  }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. PO", "Supplier", "Total", "Tipe", "Jatuh Tempo", "No. Invoice Supplier", "No. Faktur Pajak", "Status Bayar", "Aksi"],
-    rows: po.filter(p => p.status === "Disetujui GM - Kirim ke Supplier" || p.status === "Sudah Diterima").map(p => {
-      const due = getDueStatus(p.tipePembayaran, p.tanggalJatuhTempo);
-      return [p.nomor, p.supplierNama, fmtMoney(p.total, p.currency), /*#__PURE__*/React.createElement(Badge, {
-        color: p.tipePembayaran === "COD" ? theme.cyan : theme.purple
-      }, payLabel(p.tipePembayaran)), p.tipePembayaran === "TEMPO" ? /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement(Badge, {
-        color: due.color
-      }, due.label), " ", /*#__PURE__*/React.createElement("span", {
-        style: {
-          fontSize: 11,
-          color: theme.muted
-        }
-      }, fmtDateRev(p.tanggalJatuhTempo))) : "-", p.noInvoiceSupplier ? /*#__PURE__*/React.createElement("span", {
-        style: {
-          color: theme.text
-        }
-      }, p.noInvoiceSupplier) : canMarkPaid ? /*#__PURE__*/React.createElement(Btn, {
-        size: "sm",
-        variant: "ghost",
-        onClick: () => openSupplierDoc(p)
-      }, "+ Input") : "-", p.noFakturPajak || "-", /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(Badge, {
-        color: p.statusBayar === "Sudah Dibayar" ? theme.green : p.statusBayar === "Dibayar Sebagian" ? theme.yellow : theme.red
-      }, p.statusBayar, p.metodeBayar ? ` (${p.metodeBayar})` : ""), p.statusBayar === "Dibayar Sebagian" && /*#__PURE__*/React.createElement("div", {
-        style: {
-          fontSize: 11,
-          color: theme.red,
-          marginTop: 4
-        }
-      }, "Sisa: ", p.currency, " ", fmtCur(p.total - (p.jumlahDibayar || 0), p.currency))), /*#__PURE__*/React.createElement("div", {
-        style: {
-          display: "flex",
-          gap: 6
-        }
-      }, p.statusBayar !== "Sudah Dibayar" && canMarkPaid && /*#__PURE__*/React.createElement(Btn, {
-        size: "sm",
-        variant: "success",
-        onClick: () => openPayMethod(p)
-      }, p.statusBayar === "Dibayar Sebagian" ? "+ Tambah Pembayaran" : "✓ Tandai Dibayar"), p.noInvoiceSupplier && canMarkPaid && /*#__PURE__*/React.createElement(Btn, {
-        size: "sm",
-        variant: "ghost",
-        onClick: () => openSupplierDoc(p)
-      }, "Edit Dok."))];
-    }),
-    emptyMsg: "Belum ada PO yang disetujui"
-  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
+  }, "✗ Tolak"))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari no. PO / supplier / nama atau nomor part...",
     value: poSearch,
     onChange: setPoSearch,
@@ -15135,14 +15261,21 @@ function PurchaseOrderModule({
       marginBottom: 12
     }
   })), /*#__PURE__*/React.createElement(CollapsibleSection, {
-    title: `Daftar Purchase Order ${isLocal ? "Lokal" : "Overseas"}`,
-    count: poFiltered.length,
+    title: "PO ON GOING",
+    count: po.filter(p => p.status !== "Sudah Diterima").length,
     badgeColor: theme.accent,
-    storageKey: `po_list_${mode}`,
+    storageKey: `po_ongoing_${mode}`,
     defaultOpen: true
-  }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. PO", "Tanggal", "Supplier", "Tipe Bayar", "Jatuh Tempo", "Total", "Status", "Status Bayar", "Aksi"],
-    rows: poFiltered.map(p => {
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 10px",
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Semua PO yang belum diterima — input No. Invoice Supplier, edit item/Biaya Tambahan, dan tandai pembayaran di sini."), /*#__PURE__*/React.createElement(Table, {
+    search: true,
+    headers: ["No. PO", "Tanggal", "Supplier", "Tipe Bayar", "Jatuh Tempo", "Total", "Status", "No. Invoice Supplier", "No. Faktur Pajak", "Status Bayar", "Aksi"],
+    rows: poFiltered.filter(p => p.status !== "Sudah Diterima").map(p => {
       const due = getDueStatus(p.tipePembayaran, p.tanggalJatuhTempo);
       return [/*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("span", {
         style: {
@@ -15168,25 +15301,52 @@ function PurchaseOrderModule({
         }
       }, fmtDateRev(p.tanggalJatuhTempo))) : "-", fmtMoney(p.total, p.currency), /*#__PURE__*/React.createElement(Badge, {
         color: statusColor[p.status]
-      }, p.status), /*#__PURE__*/React.createElement(Badge, {
+      }, p.status), p.noInvoiceSupplier ? /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: theme.text
+        }
+      }, p.noInvoiceSupplier) : canMarkPaid ? /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "ghost",
+        onClick: () => openSupplierDoc(p)
+      }, "+ Input") : "-", p.noFakturPajak || "-", /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(Badge, {
         color: p.statusBayar === "Sudah Dibayar" ? theme.green : p.statusBayar === "Dibayar Sebagian" ? theme.yellow : theme.red
-      }, p.statusBayar), (isHandler || isMaria || isOwnerLike) ? /*#__PURE__*/React.createElement("div", {
+      }, p.statusBayar, p.metodeBayar ? ` (${p.metodeBayar})` : ""), p.statusBayar === "Dibayar Sebagian" && /*#__PURE__*/React.createElement("div", {
+        style: {
+          fontSize: 11,
+          color: theme.red,
+          marginTop: 4
+        }
+      }, "Sisa: ", p.currency, " ", fmtCur(p.total - (p.jumlahDibayar || 0), p.currency))), /*#__PURE__*/React.createElement("div", {
         style: {
           display: "flex",
+          flexWrap: "wrap",
           gap: 6
         }
-      }, p.status !== "Sudah Diterima" && /*#__PURE__*/React.createElement(Btn, {
+      }, (isHandler || isMaria || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
         size: "sm",
         variant: "ghost",
         onClick: () => openRevise(p)
-      }, "Edit"), /*#__PURE__*/React.createElement(Btn, {
+      }, "✏️ Edit"), (isHandler || isMaria || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
         size: "sm",
         variant: "ghost",
         onClick: () => openEditTanggalPO(p)
-      }, "📅 Tanggal")) : "-"];
+      }, "📅 Tanggal"), p.statusBayar !== "Sudah Dibayar" && canMarkPaid && /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "success",
+        onClick: () => openPayMethod(p)
+      }, p.statusBayar === "Dibayar Sebagian" ? "+ Tambah Pembayaran" : "✓ Tandai Dibayar"), p.statusBayar !== "Belum Dibayar" && canMarkPaid && /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "ghost",
+        onClick: () => openEditPayment(p)
+      }, "✏️ Edit Pembayaran"), p.noInvoiceSupplier && canMarkPaid && /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "ghost",
+        onClick: () => openSupplierDoc(p)
+      }, "Edit Dok."))];
     }),
     onDelete: isOwnerLike || isHandler || isMaria ? i => {
-      const target = po[i];
+      const target = poFiltered.filter(p => p.status !== "Sudah Diterima")[i];
       if (!isOwnerLike && target.status !== "Menunggu Approval GM") {
         return alert("PO yang sudah diproses (disetujui/ditolak GM) hanya dapat dihapus oleh Owner/GM/Finance Director.");
       }
@@ -15222,7 +15382,41 @@ function PurchaseOrderModule({
         detail: target.supplierNama
       });
     } : undefined,
-    emptyMsg: `Belum ada PO ${isLocal ? "Lokal" : "Overseas"}`
+    emptyMsg: `Belum ada PO ${isLocal ? "Lokal" : "Overseas"} on going`
+  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "PO CLOSED",
+    count: po.filter(p => p.status === "Sudah Diterima").length,
+    badgeColor: theme.green,
+    storageKey: `po_closed_${mode}`
+  }, /*#__PURE__*/React.createElement(Table, {
+    search: true,
+    headers: ["No. PO", "Tanggal", "Supplier", "Total", "No. Invoice Supplier", "Status Bayar", "Aksi"],
+    rows: poFiltered.filter(p => p.status === "Sudah Diterima").map(p => [/*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.accentLight,
+        fontWeight: 600,
+        cursor: "pointer"
+      },
+      onClick: () => setDetail(p)
+    }, p.nomor), fmtDateRev(p.tanggal), p.supplierNama, fmtMoney(p.total, p.currency), p.noInvoiceSupplier || "-", /*#__PURE__*/React.createElement(Badge, {
+      color: p.statusBayar === "Sudah Dibayar" ? theme.green : p.statusBayar === "Dibayar Sebagian" ? theme.yellow : theme.red
+    }, p.statusBayar), p.statusBayar !== "Belum Dibayar" && canMarkPaid ? /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => openEditPayment(p)
+    }, "✏️ Edit Pembayaran") : "-"]),
+    onDelete: isOwnerLike ? i => {
+      const target = poFiltered.filter(p => p.status === "Sudah Diterima")[i];
+      if (!confirm(`Hapus PO ${target.nomor}?`)) return;
+      setPo(po.filter(x => x !== target));
+      logAudit(store, session, {
+        module: isLocal ? "Purchase Order Lokal" : "Purchase Order Overseas",
+        docNomor: target.nomor,
+        action: "Hapus",
+        detail: target.supplierNama
+      });
+    } : undefined,
+    emptyMsg: `Belum ada PO ${isLocal ? "Lokal" : "Overseas"} yang closed`
   })), !isLocal && /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "Import Cost (Bea Masuk, PPN/PPH Import, Ekspedisi)",
     count: po.filter(p => p.status === "Sudah Diterima" || p.status === "Disetujui GM - Kirim ke Supplier").length,
@@ -16020,7 +16214,7 @@ function PurchaseOrderModule({
     onClick: saveImportCost
   }, "Simpan")))), /*#__PURE__*/React.createElement(Modal, {
     open: !!payMethodModal,
-    title: "Pilih Metode Pembayaran",
+    title: payEditMode ? "Edit Pembayaran" : "Pilih Metode Pembayaran",
     onClose: () => setPayMethodModal(null),
     width: 420
   }, /*#__PURE__*/React.createElement("div", {
@@ -16049,7 +16243,16 @@ function PurchaseOrderModule({
     style: {
       color: theme.red
     }
-  }, fmtMoney(payMethodModal.total - payMethodModal.jumlahDibayar, payMethodModal.currency))), /*#__PURE__*/React.createElement(Select, {
+  }, fmtMoney(payMethodModal.total - payMethodModal.jumlahDibayar, payMethodModal.currency))), payEditMode && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.yellow,
+      background: `${theme.yellow}18`,
+      padding: "8px 12px",
+      borderRadius: 8
+    }
+  }, "✏️ Mode koreksi: nilai di bawah akan MENGGANTIKAN total pembayaran yang tercatat saat ini, bukan menambahkannya."), /*#__PURE__*/React.createElement(Select, {
     label: "Metode Pembayaran",
     value: payMethod,
     onChange: setPayMethod,
@@ -16064,7 +16267,7 @@ function PurchaseOrderModule({
     type: "date",
     required: true
   }), /*#__PURE__*/React.createElement(Input, {
-    label: "Jumlah Pembayaran (kali ini)",
+    label: payEditMode ? "Total Jumlah Dibayar (koreksi)" : "Jumlah Pembayaran (kali ini)",
     value: payAmount,
     onChange: setPayAmount,
     type: "number",
@@ -16081,7 +16284,7 @@ function PurchaseOrderModule({
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     variant: "success",
     onClick: confirmMarkPaid
-  }, "✓ Konfirmasi Pembayaran")))), /*#__PURE__*/React.createElement(Modal, {
+  }, payEditMode ? "✏️ Simpan Koreksi" : "✓ Konfirmasi Pembayaran")))), /*#__PURE__*/React.createElement(Modal, {
     open: !!reviseModal,
     title: `Edit PO — ${reviseModal?.nomor}`,
     onClose: () => setReviseModal(null),
@@ -16664,10 +16867,11 @@ function GoodsReceiptModule({
   });
   const [namaManual, setNamaManual] = useState(false);
   const [confirmItems, setConfirmItems] = useState([]);
-  // Receiver name list: mechanics (who receive directly at Workshop) PLUS Purchasing staff (who
-  // are the ones actually receiving goods at the Head Office when diterimaOleh === "Head Office" —
-  // previously only mechanics were selectable here, which didn't match how goods actually arrive.
-  const mekanikList = employees.filter(e => ["mekanik", "purchasing", "purchasing_overseas"].includes(e.role)).map(e => e.nama);
+  // Receiver name list: restricted to only INVENTORY 1 (Stefanus) and WORKSHOP 1 (Johnson) — these
+  // are the only two staff authorized to formally receive goods, per company policy. Matched by
+  // username rather than role since other workshop_manager accounts (workshop2/workshop3) must NOT
+  // be selectable here.
+  const mekanikList = employees.filter(e => ["workshop1", "inventory1"].includes(e.username)).map(e => e.nama);
   const remainingQty = (po, partNumber, qty) => qty - (po.receivedMap?.[partNumber] || 0);
   const approvedPOs = [...poLocal.filter(p => (p.status === "Disetujui GM - Kirim ke Supplier" || p.status === "Diterima Sebagian") && p.items.some(it => remainingQty(p, it.partNumber, it.qty) > 0)).map(p => ({
     ...p,
@@ -28020,6 +28224,25 @@ function UserManagement({
       role: form.role
     }).eq("id", target.id);
     if (error) return alert("Gagal menyimpan: " + error.message);
+    // CRITICAL: keep store.employees (the localStorage-persisted employee master used by every
+    // other module — dropdowns, mekanikList, Payroll, Absensi, signatures, etc.) in sync with this
+    // Supabase profiles update. Previously only "profiles" was updated, so a name change here never
+    // propagated anywhere else in the app (e.g. Maria/Erni renames staying stale everywhere).
+    if (store && store.setEmployees) {
+      const oldNama = target.nama;
+      const newNama = form.nama;
+      store.setEmployees(prev => (prev || []).map(e => e.username === target.username ? {
+        ...e,
+        nama: newNama,
+        role: form.role
+      } : e));
+      // Cascade the rename into historical records app-wide so names displayed on already-created
+      // documents (dibuat oleh, disetujui oleh, mekanik penerima, dsb.) also follow the corrected
+      // name, per company request that all user data should follow Manajemen User as source of truth.
+      if (store.cascadeRenameEmployee && oldNama && newNama && oldNama !== newNama) {
+        store.cascadeRenameEmployee(oldNama, newNama);
+      }
+    }
     await loadUsers();
     setModal(false);
     setForm({
@@ -28046,6 +28269,12 @@ function UserManagement({
       aktif: !u.aktif
     }).eq("id", u.id);
     if (error) return alert("Gagal mengubah status: " + error.message);
+    if (store && store.setEmployees) {
+      store.setEmployees(prev => (prev || []).map(e => e.username === u.username ? {
+        ...e,
+        aktif: !u.aktif
+      } : e));
+    }
     await loadUsers();
   };
   const deleteUser = async i => {
