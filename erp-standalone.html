@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-15.1";
+const APP_BUILD = "2026-07-25.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -742,7 +742,7 @@ const ROLE_DEFS = {
   mekanik: {
     label: "Mekanik",
     color: "#64748b",
-    modules: ["dashboard", "mekanik_report", "part_request", "parts_use", "master_mill", "kpi_mekanik", "attendance"]
+    modules: ["dashboard", "mekanik_report", "part_request", "parts_use", "master_mill", "kpi_mekanik", "attendance", "uang_dinas"]
   },
   workshop_manager: {
     label: "Workshop Manager",
@@ -959,6 +959,10 @@ const ALL_MODULES = [{
   icon: "💵",
   label: "Payroll (Akses Terbatas)"
 }, {
+  id: "uang_dinas",
+  icon: "🧳",
+  label: "Uang Dinas"
+}, {
   id: "jurnal",
   icon: "📒",
   label: "Jurnal"
@@ -995,6 +999,19 @@ function getAllowedModules(role, customModules) {
 // Payroll hard rule: only owner/gm regardless of role list
 function hasPayrollAccess(role) {
   return role === "owner" || role === "gm" || role === "hrd_payroll";
+}
+// Uang Dinas hard rule: Super User (owner/gm/finance_director = HO1/HO2/HO3) sees + pays everyone;
+// WORKSHOP1/WORKSHOP2 (by username, not a shared role) see + edit every mekanik's records;
+// every other user (mekanik) only ever sees their OWN Uang Dinas rows — enforced both at the
+// module-visibility level (this function) and again inside UangDinasModule's own row filter.
+function hasUangDinasAccess(session) {
+  if (!session) return false;
+  if (session.role === "owner" || session.role === "gm" || session.role === "finance_director") return true;
+  if (session.username === "workshop1" || session.username === "workshop2") return true;
+  return session.role === "mekanik";
+}
+function isUangDinasSuperUser(session) {
+  return !!session && (session.role === "owner" || session.role === "gm" || session.role === "finance_director");
 }
 // FULL/ADMIN ACCESS PER MODULE — many modules distinguish between "can see this module at all"
 // (customModules / role default list) and "can see everyone's data + do admin actions within it"
@@ -1179,17 +1196,17 @@ const USER_DAN_AKSES_SEED = [{
   username: "ho1",
   nama: "Effendi Husin",
   role: "owner",
-  customModules: ["dashboard", "master_part", "master_unit", "master_coa", "customer", "supplier", "part_request", "quotation_unit", "quotation_ps", "sales_order", "item_requisition", "po_local", "po_overseas", "goods_receipt", "parts_use", "delivery_order", "invoice", "mekanik_report", "ticketing", "maintenance_schedule", "workshop_dashboard", "workshop_ops", "attendance", "payroll", "client_history", "kpi_mekanik", "kpi_sales", "audit_trail", "financial_dashboard", "users"]
+  customModules: ["dashboard", "master_part", "master_unit", "master_coa", "customer", "supplier", "part_request", "quotation_unit", "quotation_ps", "sales_order", "item_requisition", "po_local", "po_overseas", "goods_receipt", "parts_use", "delivery_order", "invoice", "mekanik_report", "ticketing", "maintenance_schedule", "workshop_dashboard", "workshop_ops", "attendance", "payroll", "uang_dinas", "client_history", "kpi_mekanik", "kpi_sales", "audit_trail", "financial_dashboard", "users"]
 }, {
   username: "ho2",
   nama: "Jeffry Husin",
   role: "gm",
-  customModules: ["dashboard", "master_part", "master_unit", "master_coa", "customer", "supplier", "part_request", "quotation_unit", "quotation_ps", "sales_order", "item_requisition", "po_local", "po_overseas", "goods_receipt", "parts_use", "delivery_order", "invoice", "mekanik_report", "ticketing", "maintenance_schedule", "workshop_dashboard", "workshop_ops", "attendance", "payroll", "client_history", "kpi_mekanik", "kpi_sales", "audit_trail", "financial_dashboard", "users"]
+  customModules: ["dashboard", "master_part", "master_unit", "master_coa", "customer", "supplier", "part_request", "quotation_unit", "quotation_ps", "sales_order", "item_requisition", "po_local", "po_overseas", "goods_receipt", "parts_use", "delivery_order", "invoice", "mekanik_report", "ticketing", "maintenance_schedule", "workshop_dashboard", "workshop_ops", "attendance", "payroll", "uang_dinas", "client_history", "kpi_mekanik", "kpi_sales", "audit_trail", "financial_dashboard", "users"]
 }, {
   username: "ho3",
   nama: "Christine Husin",
   role: "finance_director",
-  customModules: ["dashboard", "master_part", "master_unit", "master_coa", "customer", "supplier", "part_request", "quotation_unit", "quotation_ps", "sales_order", "item_requisition", "po_local", "po_overseas", "goods_receipt", "parts_use", "delivery_order", "invoice", "mekanik_report", "ticketing", "maintenance_schedule", "workshop_dashboard", "workshop_ops", "attendance", "payroll", "client_history", "kpi_mekanik", "kpi_sales", "audit_trail", "financial_dashboard", "users"]
+  customModules: ["dashboard", "master_part", "master_unit", "master_coa", "customer", "supplier", "part_request", "quotation_unit", "quotation_ps", "sales_order", "item_requisition", "po_local", "po_overseas", "goods_receipt", "parts_use", "delivery_order", "invoice", "mekanik_report", "ticketing", "maintenance_schedule", "workshop_dashboard", "workshop_ops", "attendance", "payroll", "uang_dinas", "client_history", "kpi_mekanik", "kpi_sales", "audit_trail", "financial_dashboard", "users"]
 }, {
   username: "hrd1",
   nama: "Laurentius Tabrani",
@@ -1254,12 +1271,12 @@ const USER_DAN_AKSES_SEED = [{
   username: "workshop1",
   nama: "Johnson",
   role: "workshop_manager",
-  customModules: ["dashboard", "master_part", "master_unit", "master_mill", "customer", "supplier", "part_request", "quotation_ps", "sales_order", "item_requisition", "delivery_order", "mekanik_report", "workshop_dashboard", "workshop_ops", "attendance", "client_history", "kpi_mekanik", "goods_receipt"]
+  customModules: ["dashboard", "master_part", "master_unit", "master_mill", "customer", "supplier", "part_request", "quotation_ps", "sales_order", "item_requisition", "delivery_order", "mekanik_report", "workshop_dashboard", "workshop_ops", "attendance", "uang_dinas", "client_history", "kpi_mekanik", "goods_receipt"]
 }, {
   username: "workshop2",
   nama: "Septi",
   role: "workshop_manager",
-  customModules: ["dashboard", "master_part", "master_unit", "master_mill", "customer", "part_request", "quotation_ps", "sales_order", "item_requisition", "delivery_order", "mekanik_report", "ticketing", "maintenance_schedule", "workshop_dashboard", "attendance", "client_history", "kpi_mekanik"]
+  customModules: ["dashboard", "master_part", "master_unit", "master_mill", "customer", "part_request", "quotation_ps", "sales_order", "item_requisition", "delivery_order", "mekanik_report", "ticketing", "maintenance_schedule", "workshop_dashboard", "attendance", "uang_dinas", "client_history", "kpi_mekanik"]
 }, {
   username: "workshop3",
   nama: "Sumanto",
@@ -1559,6 +1576,13 @@ const seedEmployees = [...DEFAULT_USER_SEED, ...USER_DAN_AKSES_SEED].map(u => ({
   // Sisa jam akumulasi (absen*8 + terlambat) yang belum genap 8 jam — dipakai untuk auto-potong cuti; direset tiap kali genap 8 jam
   hariKerjaSeminggu: 5 // 5 atau 6 — dipakai untuk pilih tabel pengali lembur hari libur/istirahat mingguan (PP 35/2021 Pasal 31)
 }));
+// Employee/payroll/HR fields now merged into `profiles` (Manajemen User) — a single source
+// of truth instead of a separate erp_employees blob. EMPLOYEE_FIELD_MAP lists every merged
+// camelCase field (as used throughout the app, e.g. emp.gajiPokok) and its snake_case column
+// name in Supabase `profiles`, plus a default value used until the DB migration (see
+// sql/01_schema_alter_profiles.sql) actually adds these columns — so the app keeps working
+// even before the schema change is applied.
+const EMPLOYEE_FIELD_MAP = [["jabatan", "jabatan", ""], ["gajiPokok", "gaji_pokok", 5000000], ["tunjangan", "tunjangan", 500000], ["bpjsTkPct", "bpjs_tk_pct", 2], ["bpjsKesPct", "bpjs_kes_pct", 1], ["ktp", "ktp", ""], ["signature", "signature", null], ["uangHarianRate", "uang_harian_rate", 50000], ["uangDinasRate", "uang_dinas_rate", 100000], ["lemburDibayarJam", "lembur_dibayar_jam", 0], ["absenTerlambatJamSisa", "absen_terlambat_jam_sisa", 0], ["hariKerjaSeminggu", "hari_kerja_seminggu", 5], ["status", "status_kepegawaian", ""], ["jenisKelamin", "jenis_kelamin", ""], ["tanggalLahir", "tanggal_lahir", ""], ["alamat", "alamat", ""], ["rtRw", "rt_rw", ""], ["kelDesa", "kel_desa", ""], ["kecamatan", "kecamatan", ""], ["kabupaten", "kabupaten", ""], ["provinsi", "provinsi", ""], ["noTelp", "no_telp", ""], ["keluarga", "keluarga", []], ["kontakDarurat", "kontak_darurat", []], ["jknPekerja", "jkn_pekerja", ""], ["jknPeserta", "jkn_peserta", ""], ["npp", "npp", ""]];
 const seedCOA = [{
   kode: "OPS-001",
   nama: "Listrik",
@@ -1721,7 +1745,6 @@ function useStore() {
   const [partsUse, setPartsUse] = usePersisted("erp_parts_use", []); // Parts Use to mekanik (from SO), with return tracking
   const [deliveryOrders, setDeliveryOrders] = usePersisted("erp_delivery_orders", []); // Delivery Order (Stefanus, manual)
   const [invoices, setInvoices] = usePersisted("erp_invoices", []); // Invoice (Finance, from SO, COD/TEMPO)
-  const [employees, setEmployees] = usePersisted("erp_employees", seedEmployees); // Employee master for payroll (gaji pokok, etc)
   const [payrollRuns, setPayrollRuns] = usePersisted("erp_payroll_runs", []); // Monthly payroll records
   const [tickets, setTickets] = usePersisted("erp_tickets", []); // Travel tickets (pesawat/kapal/kereta-bus) for mekanik to client sites
   const [maintenanceSchedules, setMaintenanceSchedules] = usePersisted("erp_maintenance", []); // Maintenance schedule per sold unit, 3-month interval
@@ -1736,6 +1759,7 @@ function useStore() {
   const [workshopOpsExpenses, setWorkshopOpsExpenses] = usePersisted("erp_workshop_ops", []); // Workshop operational expenses (Epy inputs, from Master COA)
   const [basts, setBasts] = usePersisted("erp_basts", []); // BAPP (Berita Acara Penyelesaian Pekerjaan) entries, per visit
   const [suratTugas, setSuratTugas] = usePersisted("erp_surat_tugas", []); // Surat Perintah Tugas entries, per visit
+  const [dinasCatatan, setDinasCatatan] = usePersisted("erp_uang_dinas", []); // Uang Dinas: per-mekanik-per-perjalanan cost record, auto-created when a Kunjungan (visit) is marked Selesai, or as a project-level placeholder when a SO becomes fulfillmentType "MR"
   const [mills, setMills] = usePersisted("erp_mills", []); // Master Mill: mill/site location database (Mill Name, Company, Alamat, Provinsi, Kabupaten)
   const [inspectionReports, setInspectionReports] = usePersisted("erp_inspection_reports", []); // Inspection Report entries, per visit (component checklist)
   const [leaveRequests, setLeaveRequests] = usePersisted("erp_leave_requests", []); // Form Cuti: leave requests, approved by HRD, deducts from 12-day/year quota via Absensi "Cuti" entries
@@ -1764,18 +1788,64 @@ function useStore() {
     data,
     error
   }) => {
-    if (!error) setAuthUsers((data || []).map(p => ({
-      id: p.id,
-      nama: p.nama,
-      username: p.username,
-      role: p.role,
-      aktif: p.aktif,
-      customModules: p.custom_modules
-    })));
+    if (!error) setAuthUsers((data || []).map(p => {
+      const row = {
+        id: p.id,
+        nama: p.nama,
+        username: p.username,
+        role: p.role,
+        aktif: p.aktif,
+        customModules: p.custom_modules
+      };
+      // Merge in payroll/HR fields from `profiles` (see sql/01_schema_alter_profiles.sql).
+      // Falls back to the default value if the column doesn't exist in the DB yet, so the
+      // app doesn't break before the migration is actually run.
+      EMPLOYEE_FIELD_MAP.forEach(([camel, snake, def]) => {
+        row[camel] = p[snake] !== undefined && p[snake] !== null ? p[snake] : def;
+      });
+      return row;
+    }));
   });
   useEffect(() => {
     authReadyPromise.then(refreshAuthUsers);
   }, []);
+  // `employees` (Payroll master, mekanik pickers, etc.) is now just `authUsers` enriched with
+  // the payroll/HR fields above — ONE source of truth instead of a separate erp_employees
+  // array, so a new user created in Manajemen User immediately has an (empty/default) payroll
+  // record, and deactivating a user (see deleteUser) removes them from pickers app-wide too.
+  const employees = authUsers;
+  // Drop-in replacement for the old `usePersisted`-backed setEmployees. Every existing call
+  // site in the app calls this the same way it always did — either
+  // `setEmployees(prevArray => prevArray.map(...))` or `setEmployees(newArray)` — so none of
+  // those call sites needed to change. Internally: compute the hypothetical next array, diff
+  // each row's payroll fields against the current authUsers row (unchanged rows keep the same
+  // object reference from map(), so the diff is cheap), optimistically update local state
+  // immediately, then push only the changed fields to `profiles` per changed employee.
+  const setEmployees = updater => {
+    setAuthUsers(prev => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      (next || []).forEach(row => {
+        const before = (prev || []).find(p => p.username === row.username);
+        if (!before || before === row) return; // no matching prior row, or genuinely unchanged
+        const patch = {};
+        let changed = false;
+        EMPLOYEE_FIELD_MAP.forEach(([camel, snake]) => {
+          if (row[camel] !== before[camel]) {
+            patch[snake] = row[camel];
+            changed = true;
+          }
+        });
+        if (changed) {
+          sb.from("profiles").update(patch).eq("username", row.username).then(({
+            error
+          }) => {
+            if (error) console.error("Gagal menyimpan data karyawan " + row.username + ":", error);
+          });
+        }
+      });
+      return next;
+    });
+  };
   // Cascade an employee name correction (from Manajemen User) into every historical record
   // app-wide that snapshotted the old name at creation time (dibuat oleh, disetujui oleh, mekanik
   // penerima, PIC, dsb.) — so past documents follow the corrected name instead of staying frozen.
@@ -1903,6 +1973,8 @@ function useStore() {
     setBasts,
     suratTugas,
     setSuratTugas,
+    dinasCatatan,
+    setDinasCatatan,
     mills,
     setMills,
     inspectionReports,
@@ -3371,7 +3443,7 @@ function Dashboard({
       flexWrap: "wrap",
       gap: 8
     }
-  }, getAllowedModules(session.role, session.customModules).filter(m => m !== "payroll" || hasPayrollAccess(session.role)).map(mid => {
+  }, getAllowedModules(session.role, session.customModules).filter(m => m !== "payroll" || hasPayrollAccess(session.role)).filter(m => m !== "uang_dinas" || hasUangDinasAccess(session)).map(mid => {
     const m = ALL_MODULES.find(x => x.id === mid);
     if (!m) return null;
     const pending = computeBadgeCount(store, session, mid);
@@ -6677,7 +6749,11 @@ function MekanikReport({
     inspectionReports,
     setInspectionReports,
     employees,
-    authUsers
+    authUsers,
+    attendance,
+    setAttendance,
+    dinasCatatan,
+    setDinasCatatan
   } = store;
   // Canonical, deduped list of active login names — sourced from Manajemen User (Supabase profiles)
   // rather than the local `employees` array, which can drift out of sync/gain duplicate entries.
@@ -6864,6 +6940,8 @@ function MekanikReport({
   const [visitSearch, setVisitSearch] = useState("");
   const myVisitsAll = isMekanik ? visits.filter(v => v.mekanikUsername === session.username || (v.mekanikUsernames || []).includes(session.username)) : visits;
   const myVisits = (visitSearch.trim() ? myVisitsAll.filter(v => [v.id, v.customerNama, v.unitTerkait, v.lokasi, v.mekanikNama].filter(Boolean).some(x => String(x).toLowerCase().includes(visitSearch.trim().toLowerCase()))) : myVisitsAll).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  const myVisitsOngoing = myVisits.filter(v => !v.selesai);
+  const myVisitsSelesai = myVisits.filter(v => v.selesai);
   // "MR On Going": SOs explicitly routed to Workshop at creation time (so.fulfillmentType ===
   // "MR", chosen via the "Buat SO – MR" button on Sales Order) that haven't been turned into a
   // Kunjungan yet. Drops off this list automatically once a visit referencing that SO exists (see
@@ -7241,6 +7319,80 @@ function MekanikReport({
       docNomor: v.id,
       action: "Hapus",
       detail: `Kunjungan ${v.customerNama} (${v.tanggal})`
+    });
+  };
+  // Tandai Selesai: closes out a Kunjungan's field-work window and, per Jef's request, auto-feeds
+  // two downstream systems so admin doesn't have to manually reconcile them afterward —
+  // (1) Absensi gets "Dinas Luar" rows for every day of the trip for every mekanik involved, so
+  //     the fingerprint-machine import no longer wrongly marks them Alpha while they were on-site;
+  // (2) Uang Dinas gets/updates a per-mekanik record (jumlahHari x rate from Payroll), which stays
+  //     editable afterward (jumlahHari, uang saku) even once a finance report has been built from it.
+  const markVisitSelesai = v => {
+    const tanggalSelesai = prompt(`Tandai Kunjungan ${v.id} selesai.\n\nTanggal mulai: ${v.tanggal}\nMasukkan tanggal selesai (YYYY-MM-DD):`, v.tanggalSelesai || today());
+    if (!tanggalSelesai) return;
+    if (tanggalSelesai < v.tanggal) return alert("Tanggal selesai tidak boleh sebelum tanggal mulai.");
+    setVisits(prev => prev.map(x => x.id === v.id ? {
+      ...x,
+      selesai: true,
+      tanggalSelesai
+    } : x));
+    const usernames = (v.mekanikUsernames && v.mekanikUsernames.length ? v.mekanikUsernames : [v.mekanikUsername]).filter(Boolean);
+    const dates = [];
+    let d = new Date(v.tanggal);
+    const end = new Date(tanggalSelesai);
+    while (d <= end) {
+      dates.push(d.toISOString().slice(0, 10));
+      d.setDate(d.getDate() + 1);
+    }
+    const newAttendance = [];
+    usernames.forEach(username => {
+      dates.forEach(tanggal => {
+        const exists = (attendance || []).some(a => a.username === username && a.tanggal === tanggal);
+        if (!exists) newAttendance.push({
+          id: "ABS-" + uid(),
+          tanggal,
+          username,
+          jamMasuk: "",
+          jamKeluar: "",
+          lembur: 0,
+          uangHarian: 0,
+          status: "Dinas Luar",
+          catatan: `Auto dari Kunjungan ${v.id}`
+        });
+      });
+    });
+    if (newAttendance.length) setAttendance(prev => [...(prev || []), ...newAttendance]);
+    const jumlahHari = dates.length;
+    setDinasCatatan(prev => {
+      const next = [...(prev || [])];
+      usernames.forEach(username => {
+        const emp = (employees || []).find(e => e.username === username) || {};
+        const idx = next.findIndex(r => r.kind === "mekanik" && r.visitId === v.id && r.username === username);
+        const rec = {
+          id: idx >= 0 ? next[idx].id : "UD-" + uid(),
+          kind: "mekanik",
+          visitId: v.id,
+          soNomor: v.soNomor || null,
+          username,
+          nama: emp.nama || username,
+          tanggalMulai: v.tanggal,
+          tanggalSelesai,
+          jumlahHari,
+          uangDinasRate: emp.uangDinasRate || 0,
+          uangSaku: idx >= 0 ? next[idx].uangSaku : 0,
+          status: idx >= 0 ? next[idx].status : "Belum Dibayar",
+          tanggalDibayar: idx >= 0 ? next[idx].tanggalDibayar : null,
+          catatan: idx >= 0 ? next[idx].catatan : ""
+        };
+        if (idx >= 0) next[idx] = rec;else next.push(rec);
+      });
+      return next;
+    });
+    logAudit(store, session, {
+      module: "Mekanik Report",
+      docNomor: v.id,
+      action: "Tandai Selesai",
+      detail: `${v.tanggal} s/d ${tanggalSelesai} (${jumlahHari} hari) — ${usernames.length} mekanik`
     });
   };
   const deleteDar = d => {
@@ -8048,9 +8200,15 @@ function MekanikReport({
     style: {
       marginBottom: 12
     }
-  }), /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. Kunjungan", "Tanggal", "Jenis", "Client", "Unit/Lokasi", "Mekanik", "DAR", "Part Rec.", "Status", "BAPP"],
-    rows: myVisits.map(v => [/*#__PURE__*/React.createElement("span", {
+  }), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "KUNJUNGAN KERJA ON GOING",
+    count: myVisitsOngoing.length,
+    badgeColor: theme.cyan,
+    storageKey: "mr_visits_ongoing",
+    defaultOpen: true
+  }, /*#__PURE__*/React.createElement(Table, {
+    headers: ["No. Kunjungan", "Tanggal", "Jenis", "Client", "Unit/Lokasi", "Mekanik", "DAR", "Part Rec.", "Status", "BAPP", "Aksi"],
+    rows: myVisitsOngoing.map(v => [/*#__PURE__*/React.createElement("span", {
       style: {
         color: theme.accentLight,
         fontWeight: 600
@@ -8065,11 +8223,39 @@ function MekanikReport({
       color: visitStatus(v.id).length ? theme.cyan : theme.muted
     }, visitStatus(v.id).length, " entri"), /*#__PURE__*/React.createElement(Badge, {
       color: visitBasts(v.id).length ? theme.green : theme.muted
+    }, visitBasts(v.id).length), /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      onClick: () => markVisitSelesai(v)
+    }, "✓ Selesai")]),
+    onEdit: i => setDetailVisit(myVisitsOngoing[i]),
+    onDelete: isOwnerLike ? i => deleteVisit(myVisitsOngoing[i]) : undefined,
+    emptyMsg: "Belum ada kunjungan kerja on going"
+  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "KUNJUNGAN KERJA SELESAI",
+    count: myVisitsSelesai.length,
+    badgeColor: theme.green,
+    storageKey: "mr_visits_selesai",
+    defaultOpen: false
+  }, /*#__PURE__*/React.createElement(Table, {
+    headers: ["No. Kunjungan", "Tanggal", "Selesai", "Jenis", "Client", "Unit/Lokasi", "Mekanik", "DAR", "Part Rec.", "BAPP"],
+    rows: myVisitsSelesai.map(v => [/*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.accentLight,
+        fontWeight: 600
+      }
+    }, v.id), v.tanggal, v.tanggalSelesai || "-", /*#__PURE__*/React.createElement(Badge, {
+      color: theme.purple
+    }, v.jenisBeritaAcara), v.customerNama, v.unitTerkait || v.lokasi, (v.mekanikNamaList && v.mekanikNamaList.length ? v.mekanikNamaList.join(", ") : v.mekanikNama), /*#__PURE__*/React.createElement(Badge, {
+      color: visitDars(v.id).length ? theme.green : theme.muted
+    }, visitDars(v.id).length, " entri"), /*#__PURE__*/React.createElement(Badge, {
+      color: visitRecDoc(v.id) ? theme.purple : theme.muted
+    }, visitRecDoc(v.id)?.items.length || 0, " item"), /*#__PURE__*/React.createElement(Badge, {
+      color: visitBasts(v.id).length ? theme.green : theme.muted
     }, visitBasts(v.id).length)]),
-    onEdit: i => setDetailVisit(myVisits[i]),
-    onDelete: isOwnerLike ? i => deleteVisit(myVisits[i]) : undefined,
-    emptyMsg: "Belum ada kunjungan kerja"
-  })), /*#__PURE__*/React.createElement(Modal, {
+    onEdit: i => setDetailVisit(myVisitsSelesai[i]),
+    onDelete: isOwnerLike ? i => deleteVisit(myVisitsSelesai[i]) : undefined,
+    emptyMsg: "Belum ada kunjungan kerja selesai"
+  }))), /*#__PURE__*/React.createElement(Modal, {
     open: !!detailVisit && !formType,
     title: `Detail Kunjungan: ${detailVisit?.id}`,
     onClose: () => setDetailVisit(null),
@@ -12736,8 +12922,26 @@ function SalesOrderModule({
     deliveryOrders,
     invoices,
     customers,
-    units
+    units,
+    dinasCatatan,
+    setDinasCatatan
   } = store;
+  // Auto-create the "kind:project" Uang Dinas placeholder for a SO the moment it becomes MR
+  // (fulfillmentType "MR") — either fresh via createSO("MR") or via changeFulfillmentType — per
+  // Jef's request so Finance/Workshop can start tracking Biaya Lain2 before any mekanik is even
+  // dispatched. Safe to call repeatedly: no-ops if a project record for that SO already exists.
+  const ensureUangDinasProject = (soNomor, customerNama) => {
+    setDinasCatatan(prev => (prev || []).some(r => r.kind === "project" && r.soNomor === soNomor) ? prev : [...(prev || []), {
+      id: "UD-" + uid(),
+      kind: "project",
+      soNomor,
+      customerNama,
+      biayaLain: [],
+      catatan: "",
+      createdAt: today(),
+      createdBy: session.nama
+    }]);
+  };
   const isEpy = session.role === "sales_admin";
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   // Label for the SO number cell: prefixes ⚠ for an existing cascade alert, and 🔧 when the
@@ -13037,10 +13241,12 @@ function SalesOrderModule({
         ...t
       }))
     };
+    const soNomor = newNomor(salesOrders);
     setSalesOrders(prev => [...prev, {
       ...so,
-      nomor: newNomor(prev)
+      nomor: soNomor
     }]);
+    if (fulfillmentType === "MR") ensureUangDinasProject(soNomor, so.customerNama);
     if (type === "Unit") {
       const arr = [...quotationsUnit];
       arr[quotationsUnit.indexOf(quot)] = {
@@ -13075,6 +13281,7 @@ function SalesOrderModule({
       ...s,
       fulfillmentType: next
     } : s));
+    if (next === "MR") ensureUangDinasProject(so.nomor, so.customerNama);
     logAudit(store, session, {
       module: "Sales Order",
       docNomor: so.nomor,
@@ -22302,6 +22509,251 @@ function PayrollModule({
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// UANG DINAS — per-mekanik dinas-luar-kota cost tracking, auto-fed from Mekanik Report
+// (Kunjungan ditandai Selesai) and from Sales Order (fulfillmentType -> "MR"). Two record
+// "kind"s share the same erp_uang_dinas array:
+//   kind:"project" — one per SO, holds Biaya Lain2 (manual line items) + is the anchor Jef asked
+//                     for ("ketika SO menjadi MR, otomatis muncul data di UANG DINAS")
+//   kind:"mekanik" — one per (visit, mekanik), created when that Kunjungan is marked Selesai;
+//                     jumlahHari/uangSaku are editable even after the fact (Jef's clarification)
+// Access: Super User (owner/gm/finance_director) + WORKSHOP1/WORKSHOP2 see & edit everything;
+// a mekanik only ever sees their own kind:"mekanik" rows. "Sudah Dibayar" is Super-User-only.
+// ════════════════════════════════════════════════════════════════════════════
+function ticketTotalFor(t) {
+  return t.totalHarga ?? (t.harga * ((t.mekanikNamaList || [t.mekanikNama]).length || 1));
+}
+function uangDinasSisaTransfer(r) {
+  return (Number(r.jumlahHari) || 0) * (Number(r.uangDinasRate) || 0) - (Number(r.uangSaku) || 0);
+}
+function UangDinasModule({
+  store,
+  session
+}) {
+  const {
+    dinasCatatan,
+    setDinasCatatan,
+    tickets,
+    salesOrders
+  } = store;
+  const isSuper = isUangDinasSuperUser(session);
+  const isWorkshopAdmin = isSuper || session.username === "workshop1" || session.username === "workshop2";
+  const [editRow, setEditRow] = useState(null);
+  const [editForm, setEditForm] = useState({});
+  const visibleRows = (dinasCatatan || []).filter(r => isWorkshopAdmin || r.username === session.username);
+  const mekanikRows = visibleRows.filter(r => r.kind === "mekanik").sort((a, b) => (b.tanggalMulai || "").localeCompare(a.tanggalMulai || ""));
+  const projectRows = isWorkshopAdmin ? (dinasCatatan || []).filter(r => r.kind === "project") : [];
+  const openEdit = r => {
+    setEditRow(r);
+    setEditForm({
+      jumlahHari: r.jumlahHari,
+      uangSaku: r.uangSaku,
+      catatan: r.catatan || ""
+    });
+  };
+  const saveEdit = () => {
+    setDinasCatatan(prev => (prev || []).map(r => r.id === editRow.id ? {
+      ...r,
+      jumlahHari: Number(editForm.jumlahHari) || 0,
+      uangSaku: Number(editForm.uangSaku) || 0,
+      catatan: editForm.catatan
+    } : r));
+    logAudit(store, session, {
+      module: "Uang Dinas",
+      docNomor: editRow.id,
+      action: "Edit",
+      detail: `${editRow.nama}: ${editForm.jumlahHari} hari, uang saku ${fmt(editForm.uangSaku)}`
+    });
+    setEditRow(null);
+  };
+  const togglePaid = r => {
+    if (!isSuper) return;
+    setDinasCatatan(prev => (prev || []).map(x => x.id === r.id ? {
+      ...x,
+      status: x.status === "Sudah Dibayar" ? "Belum Dibayar" : "Sudah Dibayar",
+      tanggalDibayar: x.status === "Sudah Dibayar" ? null : today()
+    } : x));
+    logAudit(store, session, {
+      module: "Uang Dinas",
+      docNomor: r.id,
+      action: r.status === "Sudah Dibayar" ? "Batal Sudah Dibayar" : "Tandai Sudah Dibayar",
+      detail: `${r.nama} · ${fmt(uangDinasSisaTransfer(r))}`
+    });
+  };
+  const addBiayaLain = proj => {
+    const ket = prompt("Keterangan biaya:");
+    if (!ket) return;
+    const jumlah = Number(prompt("Jumlah (Rp):", "0")) || 0;
+    setDinasCatatan(prev => (prev || []).map(p => p.id === proj.id ? {
+      ...p,
+      biayaLain: [...(p.biayaLain || []), {
+        keterangan: ket,
+        jumlah
+      }]
+    } : p));
+  };
+  const removeBiayaLain = (proj, i) => {
+    setDinasCatatan(prev => (prev || []).map(p => p.id === proj.id ? {
+      ...p,
+      biayaLain: (p.biayaLain || []).filter((_, x) => x !== i)
+    } : p));
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 20
+    }
+  }, /*#__PURE__*/React.createElement("h2", {
+    style: {
+      margin: 0,
+      color: theme.text
+    }
+  }, "🧳 Uang Dinas"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, isWorkshopAdmin ? "Menampilkan semua mekanik. Baris dibuat otomatis saat SO menjadi MR (ringkasan project) dan saat Kunjungan ditandai Selesai (per mekanik)." : "Menampilkan uang dinas Anda sendiri."), isWorkshopAdmin && projectRows.length > 0 && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.text
+    }
+  }, "Ringkasan Biaya per Project (SO)"), projectRows.map(p => {
+    const soMekanikRows = (dinasCatatan || []).filter(r => r.kind === "mekanik" && r.soNomor === p.soNomor);
+    const totalUangDinasSO = soMekanikRows.reduce((s, r) => s + (Number(r.jumlahHari) || 0) * (Number(r.uangDinasRate) || 0), 0);
+    const totalUangSakuSO = soMekanikRows.reduce((s, r) => s + (Number(r.uangSaku) || 0), 0);
+    const totalTiketSO = (tickets || []).filter(t => (t.soNomors || []).includes(p.soNomor)).reduce((s, t) => s + ticketTotalFor(t), 0);
+    const totalBiayaLainSO = (p.biayaLain || []).reduce((s, b) => s + (Number(b.jumlah) || 0), 0);
+    const grandTotal = totalUangDinasSO + totalTiketSO + totalBiayaLainSO;
+    return /*#__PURE__*/React.createElement("div", {
+      key: p.id,
+      style: {
+        borderTop: `1px solid ${theme.border}`,
+        paddingTop: 12,
+        marginTop: 12
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        justifyContent: "space-between",
+        flexWrap: "wrap",
+        gap: 8
+      }
+    }, /*#__PURE__*/React.createElement("strong", {
+      style: {
+        color: theme.accentLight
+      }
+    }, p.soNomor, " — ", p.customerNama || "-"), /*#__PURE__*/React.createElement("strong", {
+      style: {
+        color: theme.green
+      }
+    }, "Total Biaya Project: ", fmt(grandTotal))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 13,
+        color: theme.muted,
+        marginTop: 4
+      }
+    }, "Uang Dinas Mekanik: ", fmt(totalUangDinasSO), " (", soMekanikRows.length, " orang) · Uang Saku: ", fmt(totalUangSakuSO), " · Tiket: ", fmt(totalTiketSO), " · Biaya Lain2: ", fmt(totalBiayaLainSO)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 8,
+        display: "flex",
+        flexDirection: "column",
+        gap: 4
+      }
+    }, (p.biayaLain || []).map((b, i) => /*#__PURE__*/React.createElement("div", {
+      key: i,
+      style: {
+        display: "flex",
+        justifyContent: "space-between",
+        fontSize: 13,
+        color: theme.text
+      }
+    }, /*#__PURE__*/React.createElement("span", null, "• ", b.keterangan), /*#__PURE__*/React.createElement("span", null, fmt(b.jumlah), " ", isWorkshopAdmin && /*#__PURE__*/React.createElement("button", {
+      onClick: () => removeBiayaLain(p, i),
+      style: {
+        marginLeft: 8,
+        background: "none",
+        border: "none",
+        color: theme.red,
+        cursor: "pointer"
+      }
+    }, "✕")))), isWorkshopAdmin && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => addBiayaLain(p)
+    }, "+ Biaya Lain2")));
+  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.text
+    }
+  }, "Uang Dinas per Mekanik"), /*#__PURE__*/React.createElement(Table, {
+    headers: ["No SO", "Mekanik", "Tanggal", "Hari", "Rate/hari", "Total Uang Dinas", "Uang Saku", "Sisa Transfer", "Status", "Aksi"],
+    rows: mekanikRows.map(r => [r.soNomor || "-", r.nama, `${fmtDateRev(r.tanggalMulai)} s/d ${fmtDateRev(r.tanggalSelesai)}`, r.jumlahHari, fmt(r.uangDinasRate), fmt((Number(r.jumlahHari) || 0) * (Number(r.uangDinasRate) || 0)), fmt(r.uangSaku), /*#__PURE__*/React.createElement("strong", {
+      style: {
+        color: uangDinasSisaTransfer(r) >= 0 ? theme.green : theme.red
+      }
+    }, fmt(uangDinasSisaTransfer(r))), /*#__PURE__*/React.createElement(Badge, {
+      color: r.status === "Sudah Dibayar" ? theme.green : theme.yellow
+    }, r.status || "Belum Dibayar"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 6
+      }
+    }, isWorkshopAdmin && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => openEdit(r)
+    }, "✏️"), isSuper && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: r.status === "Sudah Dibayar" ? "ghost" : "primary",
+      onClick: () => togglePaid(r)
+    }, r.status === "Sudah Dibayar" ? "↩ Batal" : "💸 Sudah Dibayar"))])
+  }), mekanikRows.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: theme.muted,
+      padding: 12,
+      textAlign: "center"
+    }
+  }, "Belum ada data. Baris akan muncul otomatis saat Kunjungan Kerja mekanik ditandai Selesai.")), editRow && /*#__PURE__*/React.createElement(Modal, {
+    open: true,
+    onClose: () => setEditRow(null),
+    title: `Edit Uang Dinas — ${editRow.nama}`
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Jumlah Hari",
+    type: "number",
+    value: editForm.jumlahHari,
+    onChange: v => setEditForm({
+      ...editForm,
+      jumlahHari: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Uang Saku (sudah diberikan di awal)",
+    type: "number",
+    value: editForm.uangSaku,
+    onChange: v => setEditForm({
+      ...editForm,
+      uangSaku: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Catatan",
+    value: editForm.catatan,
+    onChange: v => setEditForm({
+      ...editForm,
+      catatan: v
+    })
+  }), /*#__PURE__*/React.createElement(Btn, {
+    onClick: saveEdit
+  }, "Simpan"))));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // SALES REPORT — performance per Sales Manager
 // ════════════════════════════════════════════════════════════════════════════
 function SalesReportModule({
@@ -25469,6 +25921,42 @@ function DashboardAbsensiPanel({
   const totalDinasLuarSemua = staffList.reduce((s, x) => s + x.dinasLuar, 0);
   const totalLemburSemua = staffList.reduce((s, x) => s + x.lembur, 0);
   const totalUangMakanSemua = staffList.reduce((s, x) => s + x.uangMakan, 0);
+  // Up to date periode: 1 Januari tahun berjalan s/d hari ini — ringkasan cepat di luar filter bulan
+  // di atas, supaya management bisa lihat performa kumulatif tahun berjalan tanpa ganti2 bulan.
+  const rowsYTD = (rekapAbsensi || []).filter(r => (r.periodeMulai || "") >= `${currentYear}-01-01`);
+  const ytdPerStaff = {};
+  rowsYTD.forEach(r => {
+    const key = r.namaKaryawan;
+    if (!ytdPerStaff[key]) ytdPerStaff[key] = {
+      absen: 0,
+      dinasLuar: 0,
+      lembur: 0,
+      uangMakan: 0
+    };
+    const s = ytdPerStaff[key];
+    s.absen += Number(r.absenHari) || 0;
+    s.dinasLuar += Number(r.dLuarHari) || 0;
+    s.lembur += Number(r.lemburJam) || 0;
+    s.uangMakan += Number(r.uangMakan) || (Number(r.riilHari) || 0) * ((employees.find(e => e.nama === r.namaKaryawan) || {}).uangHarianRate || 0);
+  });
+  const ytdStaffList = Object.values(ytdPerStaff);
+  const ytdTotalAbsen = ytdStaffList.reduce((s, x) => s + x.absen, 0);
+  const ytdTotalDinasLuar = ytdStaffList.reduce((s, x) => s + x.dinasLuar, 0);
+  const ytdTotalLembur = ytdStaffList.reduce((s, x) => s + x.lembur, 0);
+  const ytdTotalUangMakan = ytdStaffList.reduce((s, x) => s + x.uangMakan, 0);
+  const ytdStatCard = (label, value, color) => /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 20,
+      fontWeight: 700,
+      color,
+      marginTop: 6
+    }
+  }, value));
   // Performa ratio counts dinas luar (off-site duty) as productive time alongside Riil — an
   // employee fully out on dinas luar was still working, just not scanned at the office, so it
   // shouldn't drag their performance score down the way real Absen does.
@@ -25505,7 +25993,29 @@ function DashboardAbsensiPanel({
     style: {
       width: 180
     }
-  })), /*#__PURE__*/React.createElement("div", {
+  })), /*#__PURE__*/React.createElement(Card, {
+    style: {
+      background: theme.surfaceAlt || theme.surface,
+      border: `1px solid ${theme.accent}`
+    }
+  }, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 4px",
+      color: theme.text
+    }
+  }, "📅 Up to Date — 1 Jan ", currentYear, " s/d ", fmtDateRev(today())), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: theme.muted,
+      fontSize: 12,
+      marginBottom: 12
+    }
+  }, "Rekap kumulatif tahun berjalan (di luar filter bulan di bawah), dari ", rowsYTD.length, " periode Rekap Mesin tersimpan."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fill,minmax(180px,1fr))",
+      gap: 16
+    }
+  }, ytdStatCard("Staff Tercatat (YTD)", ytdStaffList.length, theme.text), ytdStatCard("Total Hari Absen (YTD)", ytdTotalAbsen, theme.red), ytdStatCard("Total Hari Dinas Luar (YTD)", ytdTotalDinasLuar, theme.cyan), ytdStatCard("Total Jam Lembur (YTD)", ytdTotalLembur + " jam", theme.yellow), ytdStatCard("Total Uang Makan (YTD)", fmt(ytdTotalUangMakan), theme.green))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
       gridTemplateColumns: "repeat(auto-fill,minmax(200px,1fr))",
@@ -28750,15 +29260,22 @@ function UserManagement({
   const deleteUser = async i => {
     const u = filtered[i];
     if (u.username === currentUser.username) return alert("Tidak bisa menghapus diri sendiri");
-    if (!confirm(`Hapus user ${u.nama} (${u.username}) dari ERP? Akun ini akan hilang dari daftar user & tidak bisa lagi mengakses aplikasi. Login Supabase Auth-nya perlu dihapus terpisah oleh admin teknis via Supabase Dashboard.`)) return;
+    // Soft-delete (deactivate) instead of hard delete: since employees/karyawan data (payroll,
+    // gaji, keluarga, BPJS, dsb.) now lives on this same profiles row (merged store), a hard
+    // delete would permanently wipe that history. Deactivating removes the user from login,
+    // module access, and every "pick a mekanik/employee" dropdown app-wide (they're filtered
+    // by aktif !== false), while keeping their payroll/family records intact for HRD/audit.
+    if (!confirm(`Nonaktifkan user ${u.nama} (${u.username})? Akun ini tidak bisa lagi login atau muncul di pilihan mekanik/karyawan, tapi data gaji/keluarga/riwayat tetap tersimpan. (Login Supabase Auth-nya tetap aktif kecuali dihapus terpisah oleh admin teknis via Supabase Dashboard.)`)) return;
     const {
       error
-    } = await sb.from("profiles").delete().eq("id", u.id);
-    if (error) return alert("Gagal menghapus user: " + error.message);
+    } = await sb.from("profiles").update({
+      aktif: false
+    }).eq("id", u.id);
+    if (error) return alert("Gagal menonaktifkan user: " + error.message);
     if (store) logAudit(store, currentUser, {
       module: "Manajemen User",
       docNomor: u.username,
-      action: "Hapus User",
+      action: "Nonaktifkan User",
       detail: `${u.nama} (${ROLE_DEFS[u.role]?.label || u.role})`
     });
     await loadUsers();
@@ -28880,7 +29397,7 @@ function UserManagement({
       size: "sm",
       variant: "danger",
       onClick: () => deleteUser(i)
-    }, "🗑 Hapus"))]),
+    }, "🚫 Nonaktifkan"))]),
     onEdit: onEdit
   })), /*#__PURE__*/React.createElement(Modal, {
     open: !!accessModal,
@@ -29346,6 +29863,7 @@ function App() {
   });
   let allowedModuleIds = getAllowedModules(session.role, session.customModules);
   if (!hasPayrollAccess(session.role)) allowedModuleIds = allowedModuleIds.filter(m => m !== "payroll");
+  if (!hasUangDinasAccess(session)) allowedModuleIds = allowedModuleIds.filter(m => m !== "uang_dinas");
   const allowedMenus = ALL_MODULES.filter(m => allowedModuleIds.includes(m.id));
   const activeMenu = allowedMenus.find(m => m.id === active) || allowedMenus[0];
   const def = ROLE_DEFS[session.role];
@@ -29542,6 +30060,13 @@ function App() {
           session: session
         }) : /*#__PURE__*/React.createElement(AccessDenied, {
           label: "Payroll"
+        });
+      case "uang_dinas":
+        return hasUangDinasAccess(session) ? /*#__PURE__*/React.createElement(UangDinasModule, {
+          store: store,
+          session: session
+        }) : /*#__PURE__*/React.createElement(AccessDenied, {
+          label: "Uang Dinas"
         });
       default:
         return /*#__PURE__*/React.createElement(ComingSoon, {
