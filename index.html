@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-25.4";
+const APP_BUILD = "2026-07-25.5";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -21649,7 +21649,13 @@ function PayrollModule({
   const [detailSlip, setDetailSlip] = useState(null);
   const [importSummary, setImportSummary] = useState(null);
   const [empSearch, setEmpSearch] = useState("");
-  const empFiltered = empSearch.trim() ? employees.filter(e => [e.nama, e.jabatan].filter(Boolean).some(x => String(x).toLowerCase().includes(empSearch.trim().toLowerCase()))) : employees;
+  // Payroll is a pure reflection of Manajemen User (`profiles`/authUsers) — there is intentionally
+  // no separate "add/remove" action here. To add someone to Payroll, create them as a user in
+  // Manajemen User (they appear here automatically); to remove someone, deactivate them there
+  // (aktif=false) rather than deleting, so their payroll/family history stays intact for HRD/audit.
+  const activeEmployees = employees.filter(e => e.aktif !== false);
+  const inactiveEmployeeCount = employees.length - activeEmployees.length;
+  const empFiltered = empSearch.trim() ? activeEmployees.filter(e => [e.nama, e.jabatan].filter(Boolean).some(x => String(x).toLowerCase().includes(empSearch.trim().toLowerCase()))) : activeEmployees;
   const isOwnerLike = session.role === "owner" || session.role === "gm";
   // Uang Makan Harian / Sisa Lembur / overtime-legal-estimate figures below are joined against
   // Rekap Absensi (mesin fingerprint import) by matching employee NAMA, because the machine export
@@ -21659,20 +21665,20 @@ function PayrollModule({
   // getting "data kecampur2".
   const duplicateNamaSet = (() => {
     const counts = {};
-    employees.forEach(e => {
+    activeEmployees.forEach(e => {
       const key = String(e.nama || "").toLowerCase().trim();
       if (!key) return;
       counts[key] = (counts[key] || 0) + 1;
     });
     return new Set(Object.keys(counts).filter(k => counts[k] > 1));
   })();
-  const hasDuplicateNama = employees.some(e => duplicateNamaSet.has(String(e.nama || "").toLowerCase().trim()));
+  const hasDuplicateNama = activeEmployees.some(e => duplicateNamaSet.has(String(e.nama || "").toLowerCase().trim()));
   const PAYROLL_TEMPLATE_HEADERS = ["username", "nama", "jabatan", "gajiPokok", "tunjangan", "bpjsTkPct", "bpjsKesPct", "uangHarianRate", "uangDinasRate", "uangKerajinanRate", "ktp", "kk", "alamat", "noTelp"];
   const KARYAWAN_TEMPLATE_HEADERS = ["username", "nama", "jabatan", "alamat", "noTelp", "ktp", "kk", "statusKaryawan"];
   const FAMILY_TEMPLATE_HEADERS = ["username", "namaAnggota", "hubungan", "tanggalLahir", "ktp", "alamat", "noTelp"];
   const handleImportRows = rows => {
-    let updated = 0,
-      notFound = 0;
+    let updated = 0;
+    const notFoundUsernames = [];
     // Functional update — re-reads the freshest employees list from the server right before
     // applying, so this import can't silently clobber another admin's concurrent edit to a
     // DIFFERENT employee (the exact "data payroll kecampur2 / revisi kecampur2" symptom reported).
@@ -21699,18 +21705,19 @@ function PayrollModule({
             noTelp: r.noTelp || arr[idx].noTelp || ""
           };
           updated++;
-        } else notFound++;
+        } else notFoundUsernames.push(r.username || username);
       });
       return arr;
     });
     setImportSummary({
       updated,
-      notFound
+      notFound: notFoundUsernames.length,
+      notFoundUsernames
     });
   };
   const handleImportKaryawanBio = rows => {
-    let updated = 0,
-      notFound = 0;
+    let updated = 0;
+    const notFoundUsernames = [];
     // Same functional-update safeguard as handleImportRows: re-reads the freshest employees
     // list right before applying so this can't clobber a concurrent edit to a different employee.
     setEmployees(prev => {
@@ -21731,13 +21738,14 @@ function PayrollModule({
             statusKaryawan: r.statusKaryawan || arr[idx].statusKaryawan || "Tetap"
           };
           updated++;
-        } else notFound++;
+        } else notFoundUsernames.push(r.username || username);
       });
       return arr;
     });
     setImportSummary({
       updated,
-      notFound
+      notFound: notFoundUsernames.length,
+      notFoundUsernames
     });
   };
   // Full round-trip import for "Data Karyawan Lengkap": reads BOTH sheets from the file produced
@@ -21764,8 +21772,8 @@ function PayrollModule({
         noTelp: r.noTelp || ""
       });
     });
-    let updated = 0,
-      notFound = 0;
+    let updated = 0;
+    const notFoundUsernames = [];
     setEmployees(prev => {
       const arr = [...(prev || [])];
       karyawanRows.forEach(r => {
@@ -21785,18 +21793,19 @@ function PayrollModule({
             keluarga: keluargaByUsername[username] !== undefined ? keluargaByUsername[username] : arr[idx].keluarga || []
           };
           updated++;
-        } else notFound++;
+        } else notFoundUsernames.push(r.username || username);
       });
       return arr;
     });
     setImportSummary({
       updated,
-      notFound
+      notFound: notFoundUsernames.length,
+      notFoundUsernames
     });
   };
   const handleImportKeluarga = rows => {
-    let added = 0,
-      notFound = 0;
+    let added = 0;
+    const notFoundUsernames = [];
     setEmployees(prev => {
       const arr = [...(prev || [])];
       rows.forEach(r => {
@@ -21805,7 +21814,7 @@ function PayrollModule({
         if (!username || !namaAnggota) return;
         const idx = arr.findIndex(e => e.username === username);
         if (idx < 0) {
-          notFound++;
+          notFoundUsernames.push(r.username || username);
           return;
         }
         const existingKeluarga = arr[idx].keluarga || [];
@@ -21830,7 +21839,8 @@ function PayrollModule({
     });
     setImportSummary({
       updated: added,
-      notFound,
+      notFound: notFoundUsernames.length,
+      notFoundUsernames,
       isKeluarga: true
     });
   };
@@ -21927,7 +21937,9 @@ function PayrollModule({
     keluarga: f.keluarga.filter((_, j) => j !== i)
   }));
   const generatePayroll = () => {
-    const runs = employees.map(emp => {
+    // Only active (aktif !== false) Manajemen User accounts are paid — a deactivated user's
+    // historical payroll runs stay intact, but Generate Payroll no longer creates new rows for them.
+    const runs = activeEmployees.map(emp => {
       const komisiData = emp.role === "sales_manager" ? calcKomisi(emp.username) : {
         total: 0,
         detail: []
@@ -22032,6 +22044,15 @@ function PayrollModule({
     }
   })), /*#__PURE__*/React.createElement("div", {
     style: {
+      fontSize: 12,
+      color: theme.muted,
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8,
+      padding: "8px 14px"
+    }
+  }, "ℹ️ Daftar Payroll mengikuti Manajemen User: setiap user yang dibuat di Manajemen User otomatis muncul di sini. Untuk menambah orang ke Payroll, buat usernya dulu di Manajemen User; untuk mengeluarkan seseorang dari Payroll, nonaktifkan usernya di Manajemen User (jangan hapus, agar riwayat gaji & data keluarga tetap tersimpan).", inactiveEmployeeCount > 0 && ` Saat ini ${inactiveEmployeeCount} user nonaktif disembunyikan dari daftar di bawah.`), /*#__PURE__*/React.createElement("div", {
+    style: {
       display: "flex",
       gap: 4,
       borderBottom: `1px solid ${theme.border}`,
@@ -22090,7 +22111,7 @@ function PayrollModule({
       display: "flex",
       justifyContent: "space-between"
     }
-  }, /*#__PURE__*/React.createElement("span", null, "✓ Import selesai: ", importSummary.updated, importSummary.isKeluarga ? " anggota keluarga ditambahkan" : " karyawan diupdate", importSummary.notFound ? `, ${importSummary.notFound} username tidak ditemukan` : "", "."), /*#__PURE__*/React.createElement("button", {
+  }, /*#__PURE__*/React.createElement("span", null, "✓ Import selesai: ", importSummary.updated, importSummary.isKeluarga ? " anggota keluarga ditambahkan" : " karyawan diupdate", importSummary.notFound ? `, ${importSummary.notFound} username tidak ditemukan di Manajemen User${(importSummary.notFoundUsernames || []).length ? ` (${importSummary.notFoundUsernames.join(", ")}) — buat usernya dulu di Manajemen User lalu import ulang` : ""}` : "", "."), /*#__PURE__*/React.createElement("button", {
     onClick: () => setImportSummary(null),
     style: {
       background: "none",
@@ -22257,7 +22278,7 @@ function PayrollModule({
       display: "flex",
       justifyContent: "space-between"
     }
-  }, /*#__PURE__*/React.createElement("span", null, "✓ Import selesai: ", importSummary.updated, importSummary.isKeluarga ? " anggota keluarga ditambahkan" : " karyawan diupdate", importSummary.notFound ? `, ${importSummary.notFound} username tidak ditemukan` : "", "."), /*#__PURE__*/React.createElement("button", {
+  }, /*#__PURE__*/React.createElement("span", null, "✓ Import selesai: ", importSummary.updated, importSummary.isKeluarga ? " anggota keluarga ditambahkan" : " karyawan diupdate", importSummary.notFound ? `, ${importSummary.notFound} username tidak ditemukan di Manajemen User${(importSummary.notFoundUsernames || []).length ? ` (${importSummary.notFoundUsernames.join(", ")}) — buat usernya dulu di Manajemen User lalu import ulang` : ""}` : "", "."), /*#__PURE__*/React.createElement("button", {
     onClick: () => setImportSummary(null),
     style: {
       background: "none",
