@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-25.3";
+const APP_BUILD = "2026-07-25.4";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -26101,9 +26101,11 @@ function DashboardAbsensiPanel({
 }) {
   const {
     rekapAbsensi,
+    setRekapAbsensi,
     employees,
     attendance
   } = store;
+  const isOwnerLikeAbsensi = ["owner", "gm", "hrd_payroll"].includes(session.role) || session.fullAccessModules?.includes("absensi");
   // Sisa Cuti: annual quota is 12 hari, resetting each calendar year (baseline confirmed: 12 hari
   // per 1 Jan 2026) — same convention already used by Form Cuti's own sisaCuti() calculation, just
   // surfaced here too so HRD/management can see it without opening Form Cuti.
@@ -26115,6 +26117,50 @@ function DashboardAbsensiPanel({
     return Math.max(0, 12 - cutiTerpakaiFor(emp.username));
   };
   const [bulanFilter, setBulanFilter] = useState(today().slice(0, 7));
+  const [editStaffNama, setEditStaffNama] = useState(null);
+  const [editDraft, setEditDraft] = useState([]);
+  const openEditStaff = nama => {
+    const editRows = (rekapAbsensi || []).filter(r => r.namaKaryawan === nama && (!bulanFilter || (r.periodeMulai || "").slice(0, 7) === bulanFilter));
+    setEditDraft(editRows.map(r => ({
+      ...r
+    })));
+    setEditStaffNama(nama);
+  };
+  const closeEditStaff = () => {
+    setEditStaffNama(null);
+    setEditDraft([]);
+  };
+  const updateEditDraftField = (id, field, val) => {
+    setEditDraft(prev => prev.map(r => r.id === id ? {
+      ...r,
+      [field]: val
+    } : r));
+  };
+  const saveEditDraft = () => {
+    setRekapAbsensi(prev => (prev || []).map(r => {
+      const edited = editDraft.find(e => e.id === r.id);
+      if (!edited) return r;
+      return {
+        ...r,
+        normalHari: Number(edited.normalHari) || 0,
+        riilHari: Number(edited.riilHari) || 0,
+        absenHari: Number(edited.absenHari) || 0,
+        dLuarHari: Number(edited.dLuarHari) || 0,
+        terlambatJam: Number(edited.terlambatJam) || 0,
+        lemburJam: Number(edited.lemburJam) || 0,
+        cutiHari: Number(edited.cutiHari) || 0,
+        ijinHari: Number(edited.ijinHari) || 0,
+        sakitHari: Number(edited.sakitHari) || 0
+      };
+    }));
+    logAudit(store, session, {
+      module: "Absensi - Performa Bulanan",
+      docNomor: editStaffNama,
+      action: "Revisi Manual",
+      detail: `Revisi ${editDraft.length} periode rekap untuk ${editStaffNama}`
+    });
+    closeEditStaff();
+  };
   const rows = (rekapAbsensi || []).filter(r => !bulanFilter || (r.periodeMulai || "").slice(0, 7) === bulanFilter);
   const perStaff = {};
   rows.forEach(r => {
@@ -26130,7 +26176,6 @@ function DashboardAbsensiPanel({
       cuti: 0,
       ijin: 0,
       sakit: 0,
-      uangMakan: 0,
       periodeCount: 0
     };
     const s = perStaff[key];
@@ -26143,7 +26188,6 @@ function DashboardAbsensiPanel({
     s.cuti += Number(r.cutiHari) || 0;
     s.ijin += Number(r.ijinHari) || 0;
     s.sakit += Number(r.sakitHari) || 0;
-    s.uangMakan += Number(r.uangMakan) || (Number(r.riilHari) || 0) * ((employees.find(e => e.nama === r.namaKaryawan) || {}).uangHarianRate || 0);
     s.periodeCount += 1;
   });
   // Sisa Lembur is a running balance across ALL saved periods (not just the filtered month) minus
@@ -26157,7 +26201,6 @@ function DashboardAbsensiPanel({
   const totalAbsenSemua = staffList.reduce((s, x) => s + x.absen, 0);
   const totalDinasLuarSemua = staffList.reduce((s, x) => s + x.dinasLuar, 0);
   const totalLemburSemua = staffList.reduce((s, x) => s + x.lembur, 0);
-  const totalUangMakanSemua = staffList.reduce((s, x) => s + x.uangMakan, 0);
   // Up to date periode: 1 Januari tahun berjalan s/d hari ini — ringkasan cepat di luar filter bulan
   // di atas, supaya management bisa lihat performa kumulatif tahun berjalan tanpa ganti2 bulan.
   const rowsYTD = (rekapAbsensi || []).filter(r => (r.periodeMulai || "") >= `${currentYear}-01-01`);
@@ -26175,7 +26218,6 @@ function DashboardAbsensiPanel({
       cuti: 0,
       ijin: 0,
       sakit: 0,
-      uangMakan: 0,
       periodeCount: 0
     };
     const s = ytdPerStaff[key];
@@ -26188,14 +26230,12 @@ function DashboardAbsensiPanel({
     s.cuti += Number(r.cutiHari) || 0;
     s.ijin += Number(r.ijinHari) || 0;
     s.sakit += Number(r.sakitHari) || 0;
-    s.uangMakan += Number(r.uangMakan) || (Number(r.riilHari) || 0) * ((employees.find(e => e.nama === r.namaKaryawan) || {}).uangHarianRate || 0);
     s.periodeCount += 1;
   });
   const ytdStaffList = Object.values(ytdPerStaff).sort((a, b) => a.nama.localeCompare(b.nama));
   const ytdTotalAbsen = ytdStaffList.reduce((s, x) => s + x.absen, 0);
   const ytdTotalDinasLuar = ytdStaffList.reduce((s, x) => s + x.dinasLuar, 0);
   const ytdTotalLembur = ytdStaffList.reduce((s, x) => s + x.lembur, 0);
-  const ytdTotalUangMakan = ytdStaffList.reduce((s, x) => s + x.uangMakan, 0);
   const ytdStatCard = (label, value, color) => /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.muted,
@@ -26267,7 +26307,7 @@ function DashboardAbsensiPanel({
       gridTemplateColumns: "repeat(auto-fill,minmax(180px,1fr))",
       gap: 16
     }
-  }, ytdStatCard("Staff Tercatat (YTD)", ytdStaffList.length, theme.text), ytdStatCard("Total Hari Absen (YTD)", ytdTotalAbsen, theme.red), ytdStatCard("Total Hari Dinas Luar (YTD)", ytdTotalDinasLuar, theme.cyan), ytdStatCard("Total Jam Lembur (YTD)", ytdTotalLembur + " jam", theme.yellow), ytdStatCard("Total Uang Makan (YTD)", fmt(ytdTotalUangMakan), theme.green))), /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, ytdStatCard("Staff Tercatat (YTD)", ytdStaffList.length, theme.text), ytdStatCard("Total Hari Absen (YTD)", ytdTotalAbsen, theme.red), ytdStatCard("Total Hari Dinas Luar (YTD)", ytdTotalDinasLuar, theme.cyan), ytdStatCard("Total Jam Lembur (YTD)", ytdTotalLembur + " jam", theme.yellow))), /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: `Rekap & Performa per Karyawan — YTD (1 Jan ${currentYear} s/d ${fmtDateRev(today())})`,
     count: ytdStaffList.length,
     badgeColor: theme.accent,
@@ -26278,12 +26318,12 @@ function DashboardAbsensiPanel({
       overflowX: "auto"
     }
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["Nama", "Normal", "Riil", "Dinas Luar", "Absen", "Terlambat(j)", "Lembur(j)", "Cuti", "Sisa Cuti", "Ijin", "Sakit", "Uang Makan", "Performa"],
+    headers: ["Nama", "Normal", "Riil", "Dinas Luar", "Absen", "Terlambat(j)", "Lembur(j)", "Cuti", "Sisa Cuti", "Ijin", "Sakit", "Performa"],
     rows: ytdStaffList.map(s => {
       const sisa = sisaCutiForNama(s.nama);
       return [s.nama, s.normal, s.riil, s.dinasLuar, s.absen, s.terlambat.toFixed(1), s.lembur.toFixed(1), s.cuti, sisa === null ? "-" : /*#__PURE__*/React.createElement(Badge, {
         color: sisa > 3 ? theme.green : sisa > 0 ? theme.yellow : theme.red
-      }, sisa, " hari"), s.ijin, s.sakit, fmt(s.uangMakan), /*#__PURE__*/React.createElement(Badge, {
+      }, sisa, " hari"), s.ijin, s.sakit, /*#__PURE__*/React.createElement(Badge, {
         color: performaColor(s)
       }, s.normal > 0 ? `${Math.round(performaRasio(s) * 100)}%` : "-")];
     }),
@@ -26342,19 +26382,7 @@ function DashboardAbsensiPanel({
       color: theme.yellow,
       marginTop: 6
     }
-  }, totalLemburSemua, " jam")), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: theme.muted,
-      fontSize: 13
-    }
-  }, "Total Uang Makan"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 20,
-      fontWeight: 700,
-      color: theme.green,
-      marginTop: 6
-    }
-  }, fmt(totalUangMakanSemua)))), /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, totalLemburSemua, " jam"))), /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: `Performa per Staff${bulanFilter ? ` — ${bulanFilter}` : ""}`,
     count: staffList.length,
     badgeColor: theme.accent,
@@ -26365,17 +26393,75 @@ function DashboardAbsensiPanel({
       overflowX: "auto"
     }
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["Nama", "Normal", "Riil", "Dinas Luar", "Absen", "Terlambat(j)", "Lembur(j)", "Sisa Lembur(j)", "Cuti", "Sisa Cuti", "Ijin", "Sakit", "Uang Makan", "Performa"],
+    headers: ["Nama", "Normal", "Riil", "Dinas Luar", "Absen", "Terlambat(j)", "Lembur(j)", "Sisa Lembur(j)", "Cuti", "Sisa Cuti", "Ijin", "Sakit", "Performa", "Aksi"],
     rows: staffList.map(s => {
       const sisa = sisaCutiForNama(s.nama);
       return [s.nama, s.normal, s.riil, s.dinasLuar, s.absen, s.terlambat.toFixed(1), s.lembur.toFixed(1), sisaLemburFor(s.nama).toFixed(1), s.cuti, sisa === null ? "-" : /*#__PURE__*/React.createElement(Badge, {
         color: sisa > 3 ? theme.green : sisa > 0 ? theme.yellow : theme.red
-      }, sisa, " hari"), s.ijin, s.sakit, fmt(s.uangMakan), /*#__PURE__*/React.createElement(Badge, {
+      }, sisa, " hari"), s.ijin, s.sakit, /*#__PURE__*/React.createElement(Badge, {
         color: performaColor(s)
-      }, s.normal > 0 ? `${Math.round(performaRasio(s) * 100)}%` : "-")];
+      }, s.normal > 0 ? `${Math.round(performaRasio(s) * 100)}%` : "-"), isOwnerLikeAbsensi && /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "ghost",
+        onClick: () => openEditStaff(s.nama)
+      }, "✏️ Edit")];
     }),
     emptyMsg: bulanFilter ? "Belum ada rekap absensi tersimpan untuk bulan ini" : "Belum ada rekap absensi tersimpan"
-  }))));
+  }))), /*#__PURE__*/React.createElement(Modal, {
+    open: !!editStaffNama,
+    title: `Revisi Rekap Absensi — ${editStaffNama || ""}${bulanFilter ? ` (${bulanFilter})` : ""}`,
+    onClose: closeEditStaff,
+    width: 760
+  }, editDraft.length === 0 ? /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13,
+      color: theme.muted
+    }
+  }, "Tidak ada periode Rekap Mesin tersimpan untuk karyawan ini pada bulan yang dipilih.") : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, editDraft.map(r => /*#__PURE__*/React.createElement("div", {
+    key: r.id,
+    style: {
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8,
+      padding: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      marginBottom: 8,
+      fontWeight: 600
+    }
+  }, "Periode ", r.periodeMulai, " s/d ", r.periodeSelesai), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fill,minmax(110px,1fr))",
+      gap: 10
+    }
+  }, [["normalHari", "Normal"], ["riilHari", "Riil"], ["dLuarHari", "Dinas Luar"], ["absenHari", "Absen"], ["terlambatJam", "Terlambat (j)"], ["lemburJam", "Lembur (j)"], ["cutiHari", "Cuti"], ["ijinHari", "Ijin"], ["sakitHari", "Sakit"]].map(([field, label]) => /*#__PURE__*/React.createElement(Input, {
+    key: field,
+    label: label,
+    type: "number",
+    value: r[field],
+    onChange: v => updateEditDraftField(r.id, field, v)
+  })))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      gap: 10,
+      marginTop: 4
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: closeEditStaff
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: saveEditDraft
+  }, "💾 Simpan Revisi"))));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -26408,6 +26494,17 @@ function RekapMesinPanel({
   const [hariLibur, setHariLibur] = useState(0);
   const [penyesuaian, setPenyesuaian] = useState([]); // [{nama, dLuar, normalOverride, ijin, cuti, sakit, absenManual}]
   const [preview, setPreview] = useState(null); // computed rows from hitungKoreksiAbsensi
+  // Machine-exported names don't always match Data Karyawan exactly (typos, capitalization,
+  // ex-staff still in the machine). nameOverrides lets HRD manually map a raw machine name to
+  // the correct app employee before saving, so every rekapAbsensi row is always canonically
+  // matched (username-based) instead of relying on loose free-text name matching downstream.
+  const [nameOverrides, setNameOverrides] = useState({});
+  const [addManualName, setAddManualName] = useState("");
+  const resolveEmpForName = nama => {
+    const override = nameOverrides[nama];
+    const target = override || nama;
+    return (employees || []).find(e => String(e.nama || "").toLowerCase().trim() === String(target || "").toLowerCase().trim()) || null;
+  };
   const blankPenyesuaian = () => ({
     nama: "",
     riilOverride: "",
@@ -26431,6 +26528,8 @@ function RekapMesinPanel({
     setPenyesuaian([]);
     setHariLibur(0);
     setParseError("");
+    setNameOverrides({});
+    setAddManualName("");
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
   const handleFile = async e => {
@@ -26457,10 +26556,53 @@ function RekapMesinPanel({
       setHariLibur(0);
       setPenyesuaian([]);
       setPreview(null);
+      setNameOverrides({});
     } catch (err) {
       setParseError("Gagal membaca file: " + err.message);
     }
     setParsing(false);
+  };
+  // "Tambah/Kurangi Karyawan" — insert a zero-baseline row for someone the machine has no scan
+  // for (e.g. full week dinas luar), or drop a row entirely (e.g. ex-staff still logged by the
+  // machine) before Step 2/3 correction & save.
+  const addKaryawanManual = () => {
+    const emp = (employees || []).find(e => e.username === addManualName);
+    if (!emp || !rawParsed) return;
+    if ((rawParsed.karyawan || []).some(k => String(k.nama || "").toLowerCase().trim() === emp.nama.toLowerCase().trim())) {
+      alert(`${emp.nama} sudah ada di daftar.`);
+      return;
+    }
+    const normalDefault = rawParsed.karyawan[0]?.normal || 5;
+    setRawParsed(prev => ({
+      ...prev,
+      karyawan: [...prev.karyawan, {
+        nama: emp.nama,
+        karyawanId: "",
+        normal: normalDefault,
+        riil: 0,
+        absen: 0,
+        terlambat: 0,
+        plgCpt: 0,
+        lembur: 0,
+        jmlIjin: 0,
+        dLuar: 0,
+        nIn: 0,
+        nOut: 0,
+        scan: 0,
+        sakit: 0,
+        cuti: 0,
+        ijin: 0,
+        jamKerja: 0
+      }]
+    }));
+    setAddManualName("");
+  };
+  const removeRawKaryawan = nama => {
+    setRawParsed(prev => ({
+      ...prev,
+      karyawan: (prev.karyawan || []).filter(k => k.nama !== nama)
+    }));
+    setPenyesuaian(prev => prev.filter(p => p.nama !== nama));
   };
   const addPenyesuaianRow = () => setPenyesuaian([...penyesuaian, blankPenyesuaian()]);
   const updatePenyesuaianRow = (i, field, val) => {
@@ -26482,12 +26624,32 @@ function RekapMesinPanel({
   };
   const doSimpan = () => {
     if (!preview) return;
+    // Resolve every preview row to an actual Data Karyawan record first — block the save
+    // entirely if any name still isn't mapped, so rekapAbsensi never stores a name that
+    // doesn't match Data Karyawan (this is what feeds Payroll/Dashboard by name-matching).
+    const unresolved = [];
+    const resolved = preview.map(k => {
+      const emp = resolveEmpForName(k.nama);
+      if (!emp) unresolved.push(k.nama);
+      return {
+        k,
+        emp
+      };
+    });
+    if (unresolved.length > 0) {
+      alert(`Nama berikut belum cocok dengan Data Karyawan. Pilih karyawan yang sesuai di tabel Step 1 (kolom "Karyawan (App)"), atau hapus baris tersebut, sebelum menyimpan:\n\n${unresolved.join("\n")}`);
+      return;
+    }
     const now = new Date().toISOString();
-    const rows = preview.map(k => ({
+    const rows = resolved.map(({
+      k,
+      emp
+    }) => ({
       id: "REKAP-" + uid(),
       periodeMulai: periodeEdit.mulai,
       periodeSelesai: periodeEdit.selesai,
-      namaKaryawan: k.nama,
+      namaKaryawan: emp.nama,
+      username: emp.username,
       karyawanId: k.karyawanId,
       normalHari: k.normalEdit,
       riilHari: k.riilEdit,
@@ -26503,7 +26665,7 @@ function RekapMesinPanel({
       ijinHari: k.ijinEdit,
       scanKali: k.scan,
       jamKerja: k.jamKerja,
-      uangMakan: uangMakanRow(k.nama, k.riilEdit),
+      uangMakan: (Number(k.riilEdit) || 0) * (emp.uangHarianRate || 0),
       dibuatOleh: session.nama,
       createdAt: now
     }));
@@ -26519,11 +26681,12 @@ function RekapMesinPanel({
     // melewati kelipatan 8 jam, otomatis catat 1 hari "Cuti" baru di Absensi (mengurangi kuota
     // cuti tahunan lewat mekanisme yang sudah ada) dan sisakan remainder-nya untuk periode berikut.
     const potonganLog = [];
-    (preview || []).forEach(k => {
+    resolved.forEach(({
+      k,
+      emp
+    }) => {
       const jamBaru = (Number(k.absenEdit) || 0) * 8 + (Number(k.terlambat) || 0);
       if (jamBaru <= 0) return;
-      const emp = (employees || []).find(e => e.nama === k.nama);
-      if (!emp) return;
       const totalJam = (emp.absenTerlambatJamSisa || 0) + jamBaru;
       const hariCuti = Math.floor(totalJam / 8);
       const remainder = totalJam % 8;
@@ -26618,6 +26781,26 @@ function RekapMesinPanel({
       action: "Hapus Periode Rekap",
       detail: ""
     });
+  };
+  // Full reset — wipes every saved Rekap Mesin period so HRD can re-upload/re-input cleanly
+  // from scratch. Double-confirmed since this cascades into Payroll (Uang Makan/Lembur) and
+  // the Absensi Dashboard, both of which read directly from rekapAbsensi.
+  const hapusSemuaRekap = () => {
+    const total = (rekapAbsensi || []).length;
+    if (total === 0) {
+      alert("Belum ada data Rekap Absensi tersimpan.");
+      return;
+    }
+    if (!confirm(`Hapus SEMUA data Rekap Absensi tersimpan (${total} baris, seluruh periode)? Tindakan ini tidak bisa dibatalkan. Payroll & Dashboard Absensi akan kosong sampai data baru diinput ulang.`)) return;
+    if (!confirm("Konfirmasi sekali lagi: benar-benar hapus SEMUA data Rekap Absensi?")) return;
+    setRekapAbsensi([]);
+    logAudit(store, session, {
+      module: "Absensi - Rekap Mesin",
+      docNomor: "-",
+      action: "Hapus SEMUA Data Rekap",
+      detail: `${total} baris rekap dihapus, siap input ulang dari Rekap Mesin`
+    });
+    alert("Semua data Rekap Absensi telah dihapus.");
   };
   // ════════════════════════════════════════════════════════════════════════
   // LAPORAN MINGGUAN MEKANIK (Kamis–Rabu) — replaces the old per-day "Harian"
@@ -26766,13 +26949,65 @@ function RekapMesinPanel({
       color: theme.green,
       margin: "0 0 8px"
     }
-  }, `✓ ${rawParsed.karyawan.length} karyawan terbaca. Periode terdeteksi: ${rawParsed.periode.mulai || "?"} s/d ${rawParsed.periode.selesai || "?"}`), /*#__PURE__*/React.createElement("div", {
+  }, `✓ ${rawParsed.karyawan.length} karyawan terbaca. Periode terdeteksi: ${rawParsed.periode.mulai || "?"} s/d ${rawParsed.periode.selesai || "?"}`), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      margin: "0 0 10px"
+    }
+  }, "Kolom \"Karyawan (App)\" mencocokkan nama dari mesin dengan Data Karyawan — wajib cocok (✅) sebelum bisa disimpan di Step 3. Jika tidak cocok (⚠️), pilih karyawan yang benar secara manual. Gunakan \"+ Tambah Karyawan\" untuk menambahkan karyawan yang tidak terbaca mesin sama sekali (mis. dinas luar penuh seminggu), atau 🗑️ untuk menghapus baris yang tidak relevan (mis. sudah resign) dari periode ini."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      alignItems: "flex-end",
+      flexWrap: "wrap",
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    label: "+ Tambah Karyawan (tidak terbaca mesin)",
+    value: addManualName,
+    onChange: setAddManualName,
+    options: (employees || []).filter(e => !(rawParsed.karyawan || []).some(k => String(k.nama || "").toLowerCase().trim() === String(e.nama || "").toLowerCase().trim())).map(e => ({
+      value: e.username,
+      label: e.nama
+    })),
+    style: {
+      minWidth: 260
+    }
+  }), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    onClick: addKaryawanManual
+  }, "+ Tambah")), /*#__PURE__*/React.createElement("div", {
     style: {
       overflowX: "auto"
     }
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["Nama", "ID", "Normal", "Riil", "Absen", "Trlmbt(j)", "Plg.Cpt(j)", "Lembur(j)", "Jml.Ijin", "D.Luar", "Sakit", "Cuti", "Ijin", "Scan", "Jam Kerja"],
-    rows: rawParsed.karyawan.map(k => [k.nama, k.karyawanId, k.normal, k.riil, k.absen, k.terlambat, k.plgCpt, k.lembur, k.jmlIjin, k.dLuar, k.sakit, k.cuti, k.ijin, k.scan, k.jamKerja]),
+    headers: ["Nama (Mesin)", "Karyawan (App)", "ID", "Normal", "Riil", "Absen", "Trlmbt(j)", "Plg.Cpt(j)", "Lembur(j)", "Jml.Ijin", "D.Luar", "Sakit", "Cuti", "Ijin", "Scan", "Jam Kerja", "Aksi"],
+    rows: rawParsed.karyawan.map(k => {
+      const matched = resolveEmpForName(k.nama);
+      const matchCell = matched ? /*#__PURE__*/React.createElement(Badge, {
+        color: theme.green
+      }, "✅ ", matched.nama) : /*#__PURE__*/React.createElement(Select, {
+        value: nameOverrides[k.nama] || "",
+        onChange: v => setNameOverrides(prev => ({
+          ...prev,
+          [k.nama]: v
+        })),
+        placeholder: "⚠️ Pilih Karyawan",
+        options: (employees || []).map(e => ({
+          value: e.nama,
+          label: e.nama
+        })),
+        style: {
+          minWidth: 200
+        }
+      });
+      return [k.nama, matchCell, k.karyawanId, k.normal, k.riil, k.absen, k.terlambat, k.plgCpt, k.lembur, k.jmlIjin, k.dLuar, k.sakit, k.cuti, k.ijin, k.scan, k.jamKerja, /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "danger",
+        onClick: () => removeRawKaryawan(k.nama)
+      }, "🗑️")];
+    }),
     emptyMsg: "-"
   })))), rawParsed && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
     style: {
@@ -26939,9 +27174,18 @@ function RekapMesinPanel({
       color: theme.text,
       fontSize: 15
     }
-  }, "Data Rekap Absensi Tersimpan"), /*#__PURE__*/React.createElement(ExportExcelBtn, {
+  }, "Data Rekap Absensi Tersimpan"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement(ExportExcelBtn, {
     onClick: exportRekap
-  })), /*#__PURE__*/React.createElement(Input, {
+  }), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "danger",
+    onClick: hapusSemuaRekap
+  }, "🗑️ Hapus SEMUA Data"))), /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari periode / nama...",
     value: rekapFilter,
     onChange: setRekapFilter,
