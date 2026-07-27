@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-27.2";
+const APP_BUILD = "2026-07-27.3";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -15290,6 +15290,34 @@ function PurchaseOrderModule({
     setEditTanggalPO(null);
   };
 
+  // Catatan-only revision — same "lightweight" pattern as editTanggalPO above: editable any time
+  // (before or after GM approval, even after the PO is closed/Sudah Diterima), never touches
+  // items/price/approval status. Added per request: Catatan used to only be settable at creation
+  // or via the full Edit/Revise flow, which forces re-approval — overkill for just fixing a note.
+  const [editCatatanPO, setEditCatatanPO] = useState(null); // { po, catatan }
+  const openEditCatatanPO = p => {
+    setEditCatatanPO({
+      po: p,
+      catatan: p.catatan || ""
+    });
+  };
+  const saveEditCatatanPO = () => {
+    if (!editCatatanPO) return;
+    const arr = [...po];
+    arr[po.indexOf(editCatatanPO.po)] = {
+      ...editCatatanPO.po,
+      catatan: editCatatanPO.catatan
+    };
+    setPo(arr);
+    logAudit(store, session, {
+      module: isLocal ? "Purchase Order Lokal" : "Purchase Order Overseas",
+      docNomor: editCatatanPO.po.nomor,
+      action: "Revisi Catatan",
+      detail: editCatatanPO.catatan
+    });
+    setEditCatatanPO(null);
+  };
+
   // Add items from one more Item Requisition into the PO being built (multi-IR per supplier)
   // Step 1: user picked an IR from the dropdown (create form or revise/edit modal) — open a
   // per-item checklist instead of pulling every item in, since not all parts in one IR are
@@ -15881,6 +15909,10 @@ function PurchaseOrderModule({
     onClick: () => openRevise(p)
   }, "✏️ Edit"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
+    variant: "ghost",
+    onClick: () => openEditCatatanPO(p)
+  }, "📝 Catatan"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
     variant: "success",
     onClick: () => gmApprove(p)
   }, "✓ Approve"), /*#__PURE__*/React.createElement(Btn, {
@@ -15965,7 +15997,11 @@ function PurchaseOrderModule({
         size: "sm",
         variant: "ghost",
         onClick: () => openEditTanggalPO(p)
-      }, "📅 Tanggal"), p.statusBayar !== "Sudah Dibayar" && canMarkPaid && /*#__PURE__*/React.createElement(Btn, {
+      }, "📅 Tanggal"), /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "ghost",
+        onClick: () => openEditCatatanPO(p)
+      }, "📝 Catatan"), p.statusBayar !== "Sudah Dibayar" && canMarkPaid && /*#__PURE__*/React.createElement(Btn, {
         size: "sm",
         variant: "success",
         onClick: () => openPayMethod(p)
@@ -16034,11 +16070,21 @@ function PurchaseOrderModule({
       onClick: () => setDetail(p)
     }, p.nomor), fmtDateRev(p.tanggal), p.supplierNama, fmtMoney(p.total, p.currency), p.noInvoiceSupplier || "-", /*#__PURE__*/React.createElement(Badge, {
       color: p.statusBayar === "Sudah Dibayar" ? theme.green : p.statusBayar === "Dibayar Sebagian" ? theme.yellow : theme.red
-    }, p.statusBayar), p.statusBayar !== "Belum Dibayar" && canMarkPaid ? /*#__PURE__*/React.createElement(Btn, {
+    }, p.statusBayar), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        flexWrap: "wrap",
+        gap: 6
+      }
+    }, p.statusBayar !== "Belum Dibayar" && canMarkPaid && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "ghost",
       onClick: () => openEditPayment(p)
-    }, "✏️ Edit Pembayaran") : "-"]),
+    }, "✏️ Edit Pembayaran"), /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => openEditCatatanPO(p)
+    }, "📝 Catatan"))]),
     onDelete: isOwnerLike ? i => {
       const target = poFiltered.filter(p => p.status === "Sudah Diterima")[i];
       if (!confirm(`Hapus PO ${target.nomor}?`)) return;
@@ -17277,6 +17323,42 @@ function PurchaseOrderModule({
     onClick: () => setEditTanggalPO(null)
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     onClick: saveEditTanggalPO
+  }, "Simpan")))), /*#__PURE__*/React.createElement(Modal, {
+    open: !!editCatatanPO,
+    title: `Edit Catatan PO — ${editCatatanPO?.po?.nomor || ""}`,
+    onClose: () => setEditCatatanPO(null),
+    width: 420
+  }, editCatatanPO && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Hanya mengubah catatan — item, harga, dan status approval tidak terpengaruh. Bisa diedit kapan pun: sebelum approval, setelah disetujui GM, maupun setelah PO diterima (closed)."), /*#__PURE__*/React.createElement(Input, {
+    label: "Catatan",
+    multiline: true,
+    value: editCatatanPO.catatan,
+    onChange: v => setEditCatatanPO({
+      ...editCatatanPO,
+      catatan: v
+    })
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setEditCatatanPO(null)
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: saveEditCatatanPO
   }, "Simpan")))));
 }
 
