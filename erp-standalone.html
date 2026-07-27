@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-27.4";
+const APP_BUILD = "2026-07-27.5";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -1187,7 +1187,7 @@ function computeBadgeCount(store, session, moduleId) {
     case "financial_dashboard":
       if (["owner", "gm", "finance", "finance_director"].includes(role)) {
         const ov1 = store.invoices.filter(i => i.statusBayar !== "Lunas" && i.tipePembayaran === "TEMPO" && getDueStatus(i.tipePembayaran, i.tanggalJatuhTempo).label === "Terlambat").length;
-        const ov2 = [...store.poLocal, ...store.poOverseas].filter(p => p.status !== "Sudah Diterima" && p.tipePembayaran === "TEMPO" && getDueStatus(p.tipePembayaran, p.tanggalJatuhTempo).label === "Terlambat").length;
+        const ov2 = [...store.poLocal, ...store.poOverseas].filter(p => p.statusBayar !== "Sudah Dibayar" && p.tipePembayaran === "TEMPO" && getDueStatus(p.tipePembayaran, p.tanggalJatuhTempo).label === "Terlambat").length;
         return ov1 + ov2;
       }
       return 0;
@@ -3417,7 +3417,7 @@ function Dashboard({
   });
   const poAll = [...(store.poLocal || []), ...(store.poOverseas || [])];
   const poReminders = poAll.filter(p => {
-    if (p.status === "Sudah Diterima" || p.tipePembayaran !== "TEMPO") return false;
+    if (p.statusBayar === "Sudah Dibayar" || p.tipePembayaran !== "TEMPO") return false;
     const due = getDueStatus(p.tipePembayaran, p.tanggalJatuhTempo);
     return due.label === "Terlambat" || due.label === "Jatuh Tempo Segera";
   });
@@ -15299,6 +15299,9 @@ function PurchaseOrderModule({
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   const canMarkPaid = ["purchasing", "purchasing_overseas", "finance_director", "owner", "gm"].includes(session.role); // Erni, Maria (Overseas), or Christine (Finance Director)
   const isMaria = session.role === "purchasing_overseas";
+  // PO CLOSED requires BOTH: barang sudah diterima (status) AND pembayaran sudah lunas (statusBayar).
+  // If either is missing, the PO stays in PO ON GOING so it doesn't get lost from view.
+  const isPoClosed = p => p.status === "Sudah Diterima" && p.statusBayar === "Sudah Dibayar";
   const [poSearch, setPoSearch] = useState("");
   const [irOngoingSearch, setIrOngoingSearch] = useState("");
   const irOngoingListAll = itemRequisitions.filter(ir => ir.status === "Menunggu Purchasing" && (ir.items || []).some(it => !it.sudahDiPO));
@@ -16097,7 +16100,7 @@ function PurchaseOrderModule({
     }
   })), /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "PO ON GOING",
-    count: po.filter(p => p.status !== "Sudah Diterima").length,
+    count: po.filter(p => !isPoClosed(p)).length,
     badgeColor: theme.accent,
     storageKey: `po_ongoing_${mode}`,
     defaultOpen: true
@@ -16107,10 +16110,10 @@ function PurchaseOrderModule({
       fontSize: 12,
       color: theme.muted
     }
-  }, "Semua PO yang belum diterima — input No. Invoice Supplier, edit item/Biaya Tambahan, dan tandai pembayaran di sini."), /*#__PURE__*/React.createElement(Table, {
+  }, "Semua PO yang belum diterima dan/atau belum lunas dibayar — pindah ke PO CLOSED hanya setelah barang diterima Workshop DAN pembayaran lunas. Input No. Invoice Supplier, edit item/Biaya Tambahan, dan tandai pembayaran di sini."), /*#__PURE__*/React.createElement(Table, {
     search: true,
     headers: ["No. PO", "Tanggal", "Supplier", "Tipe Bayar", "Jatuh Tempo", "Total", "Status", "No. Invoice Supplier", "No. Faktur Pajak", "Status Bayar", "Aksi"],
-    rows: poFiltered.filter(p => p.status !== "Sudah Diterima").map(p => {
+    rows: poFiltered.filter(p => !isPoClosed(p)).map(p => {
       const due = getDueStatus(p.tipePembayaran, p.tanggalJatuhTempo);
       return [/*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("span", {
         style: {
@@ -16174,7 +16177,7 @@ function PurchaseOrderModule({
         size: "sm",
         variant: "success",
         onClick: () => openPayMethod(p)
-      }, p.statusBayar === "Dibayar Sebagian" ? "+ Tambah Pembayaran" : "✓ Tandai Dibayar"), p.statusBayar !== "Belum Dibayar" && canMarkPaid && /*#__PURE__*/React.createElement(Btn, {
+      }, p.statusBayar === "Dibayar Sebagian" ? "+ Tambah Pembayaran" : "✓ Tandai Dibayar"), canMarkPaid && /*#__PURE__*/React.createElement(Btn, {
         size: "sm",
         variant: "ghost",
         onClick: () => openEditPayment(p)
@@ -16185,7 +16188,7 @@ function PurchaseOrderModule({
       }, "Edit Dok."))];
     }),
     onDelete: isOwnerLike || isHandler || isMaria ? i => {
-      const target = poFiltered.filter(p => p.status !== "Sudah Diterima")[i];
+      const target = poFiltered.filter(p => !isPoClosed(p))[i];
       if (!isOwnerLike && target.status !== "Menunggu Approval GM") {
         return alert("PO yang sudah diproses (disetujui/ditolak GM) hanya dapat dihapus oleh Owner/GM/Finance Director.");
       }
@@ -16224,13 +16227,19 @@ function PurchaseOrderModule({
     emptyMsg: `Belum ada PO ${isLocal ? "Lokal" : "Overseas"} on going`
   })), /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "PO CLOSED",
-    count: po.filter(p => p.status === "Sudah Diterima").length,
+    count: po.filter(p => isPoClosed(p)).length,
     badgeColor: theme.green,
     storageKey: `po_closed_${mode}`
-  }, /*#__PURE__*/React.createElement(Table, {
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 10px",
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "PO otomatis masuk ke sini hanya setelah barang diterima Workshop DAN pembayaran sudah lunas."), /*#__PURE__*/React.createElement(Table, {
     search: true,
     headers: ["No. PO", "Tanggal", "Supplier", "Total", "No. Invoice Supplier", "Status Bayar", "Aksi"],
-    rows: poFiltered.filter(p => p.status === "Sudah Diterima").map(p => [/*#__PURE__*/React.createElement("span", {
+    rows: poFiltered.filter(p => isPoClosed(p)).map(p => [/*#__PURE__*/React.createElement("span", {
       style: {
         color: theme.accentLight,
         fontWeight: 600,
@@ -16245,7 +16254,7 @@ function PurchaseOrderModule({
         flexWrap: "wrap",
         gap: 6
       }
-    }, p.statusBayar !== "Belum Dibayar" && canMarkPaid && /*#__PURE__*/React.createElement(Btn, {
+    }, canMarkPaid && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "ghost",
       onClick: () => openEditPayment(p)
@@ -16255,7 +16264,7 @@ function PurchaseOrderModule({
       onClick: () => openEditCatatanPO(p)
     }, "📝 Catatan"))]),
     onDelete: isOwnerLike ? i => {
-      const target = poFiltered.filter(p => p.status === "Sudah Diterima")[i];
+      const target = poFiltered.filter(p => isPoClosed(p))[i];
       if (!confirm(`Hapus PO ${target.nomor}?`)) return;
       setPo(po.filter(x => x !== target));
       logAudit(store, session, {
@@ -24381,7 +24390,7 @@ function FinancialDashboardModule({
   const poAll = [...poLocal, ...poOverseas];
   const totalPiutang = invoices.reduce((s, i) => s + (i.total - (i.terbayar || 0)), 0);
   const totalPiutangLunas = invoices.filter(i => i.statusBayar === "Lunas").reduce((s, i) => s + i.total, 0);
-  const totalHutang = poAll.filter(p => p.status !== "Sudah Diterima" || p.tipePembayaran === "TEMPO").reduce((s, p) => s + p.total, 0);
+  const totalHutang = poAll.filter(p => p.statusBayar !== "Sudah Dibayar").reduce((s, p) => s + p.total, 0);
   const cashIn = invoices.reduce((s, i) => s + (i.terbayar || 0), 0);
   const cashOut = poAll.reduce((s, p) => s + p.total, 0); // simplified: assumes all PO eventually paid
   const netCashFlow = cashIn - cashOut;
@@ -24391,7 +24400,7 @@ function FinancialDashboardModule({
     return getDueStatus(i.tipePembayaran, i.tanggalJatuhTempo).label === "Terlambat";
   });
   const overduePOs = poAll.filter(p => {
-    if (p.status === "Sudah Diterima" || p.tipePembayaran !== "TEMPO") return false;
+    if (p.statusBayar === "Sudah Dibayar" || p.tipePembayaran !== "TEMPO") return false;
     return getDueStatus(p.tipePembayaran, p.tanggalJatuhTempo).label === "Terlambat";
   });
   return /*#__PURE__*/React.createElement("div", {
