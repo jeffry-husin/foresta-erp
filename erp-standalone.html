@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-27.7";
+const APP_BUILD = "2026-07-27.8";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -850,6 +850,15 @@ const ROLE_DEFS = {
     label: "Workshop Manager",
     color: "#0ea5e9",
     modules: ["dashboard", "workshop_dashboard", "maintenance_schedule", "kpi_mekanik", "sales_order", "item_requisition", "part_request", "goods_receipt", "parts_use", "delivery_order", "mekanik_report", "master_mill", "attendance", "master_coa"]
+  },
+  // Freelance field technician — same day-to-day modules as Mekanik (job reports, parts use,
+  // uang dinas) since freelance staff also get dispatched to sites, but kept as a distinct role so
+  // Payroll/KPI/reporting can tell freelance vs permanent mekanik apart. No Payroll module access
+  // (freelance is typically paid per-job/uang dinas, not monthly payroll) — same as Mekanik.
+  freelance: {
+    label: "Freelance",
+    color: "#94a3b8",
+    modules: ["dashboard", "mekanik_report", "part_request", "parts_use", "master_mill", "kpi_mekanik", "attendance", "uang_dinas"]
   }
 };
 
@@ -1110,7 +1119,7 @@ function hasUangDinasAccess(session) {
   if (!session) return false;
   if (session.role === "owner" || session.role === "gm" || session.role === "finance_director") return true;
   if (session.username === "workshop1" || session.username === "workshop2") return true;
-  return session.role === "mekanik";
+  return session.role === "mekanik" || session.role === "freelance";
 }
 function isUangDinasSuperUser(session) {
   return !!session && (session.role === "owner" || session.role === "gm" || session.role === "finance_director");
@@ -2447,6 +2456,96 @@ function cascadeQuotationRevision(store, session, {
               docNomor: po.nomor,
               action: "Cascade: Perlu Review Manual",
               detail: `Terkait revisi Quotation ${oldNomor} -> ${newNomor} via IR ${ir.nomor}`
+            });
+          }
+        });
+      });
+    });
+  });
+  store.setSalesOrders(soArr);
+  store.setItemRequisitions(irArr);
+  store.setPoLocal(poLocalArr);
+  store.setPoOverseas(poOverseasArr);
+  auditEntries.forEach(e => logAudit(store, session, e));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// DIRECT-EDIT FLAG — when a SUPERUSER (Owner/GM/Finance Director) edits a Unit Quotation directly
+// in place (same nomor, no new revision number — see QuotationUnit's openEdit/editingQ, now allowed
+// at ANY status per Jef's request) and that quotation already has a downstream Sales Order, this
+// flags the SO (and its own downstream IR/PO chain) for manual review — same non-destructive
+// philosophy as cascadeQuotationRevision above: qty/harga/item on live downstream docs are NEVER
+// auto-changed. The one exception, opt-in only, is appending a note to an SO that isn't locked yet
+// (no shipment / no PO already sent to supplier / no invoice Lunas) — informational text only, safe
+// even if wrong, unlike silently touching quantities or prices. MR (Mekanik Report / Kunjungan) has
+// no cascadeAlert UI of its own yet, so it isn't separately flagged here — whoever handles the SO's
+// MR job will see the alert via the SO itself.
+function flagDownstreamForDirectEdit(store, session, {
+  quotNomor,
+  appendNote
+}) {
+  const affectedSOs = store.salesOrders.filter(so => so.sourceNomor === quotNomor);
+  if (affectedSOs.length === 0) return;
+  const soIsLocked = so => {
+    const hasShipment = store.deliveryOrders.some(d => d.soNomor === so.nomor);
+    const hasLunasInvoice = store.invoices.some(i => i.soNomor === so.nomor && i.statusBayar === "Lunas");
+    return hasShipment || hasLunasInvoice || !!so.selesaiManual;
+  };
+  const mkAlert = locked => ({
+    message: `Quotation sumber (${quotNomor}) diedit langsung oleh ${session.nama} (Owner/GM). ${locked ? "Dokumen ini sudah berjalan (ada pengiriman / invoice lunas / ditandai selesai) sehingga TIDAK diubah otomatis — mohon cek manual apakah perlu penyesuaian." : "Mohon cek apakah dokumen ini perlu disesuaikan mengikuti perubahan tersebut."}`,
+    fromNomor: quotNomor,
+    toNomor: quotNomor,
+    flaggedAt: new Date().toISOString()
+  });
+  const soArr = [...store.salesOrders];
+  const irArr = [...store.itemRequisitions];
+  const poLocalArr = [...store.poLocal];
+  const poOverseasArr = [...store.poOverseas];
+  const auditEntries = [];
+  affectedSOs.forEach(so => {
+    const locked = soIsLocked(so);
+    const idx = soArr.findIndex(s => s.nomor === so.nomor);
+    if (idx >= 0) {
+      const applyNote = !!appendNote && !locked;
+      soArr[idx] = {
+        ...soArr[idx],
+        cascadeAlert: mkAlert(locked),
+        catatan: applyNote ? `${soArr[idx].catatan ? soArr[idx].catatan + "\n" : ""}[Update dari revisi Quotation ${quotNomor} oleh ${session.nama}]: ${appendNote}` : soArr[idx].catatan
+      };
+      auditEntries.push({
+        module: "Sales Order",
+        docNomor: so.nomor,
+        action: applyNote ? "Cascade: Catatan Quotation Diterapkan" : "Cascade: Perlu Review Manual",
+        detail: `Quotation ${quotNomor} diedit langsung${locked ? " (SO sudah berjalan)" : ""}`
+      });
+    }
+    const linkedIRs = irArr.filter(ir => ir.soNomor === so.nomor);
+    linkedIRs.forEach(ir => {
+      const irIdx = irArr.findIndex(x => x.nomor === ir.nomor);
+      if (irIdx >= 0) {
+        irArr[irIdx] = {
+          ...irArr[irIdx],
+          cascadeAlert: mkAlert(locked)
+        };
+        auditEntries.push({
+          module: "Item Requisition",
+          docNomor: ir.nomor,
+          action: "Cascade: Perlu Review Manual",
+          detail: `Terkait edit langsung Quotation ${quotNomor} via SO ${so.nomor}`
+        });
+      }
+      [["Purchase Order Lokal", poLocalArr], ["Purchase Order Overseas", poOverseasArr]].forEach(([label, arr]) => {
+        arr.forEach((po, pIdx) => {
+          if ((po.irNomors || []).includes(ir.nomor) && po.status !== "Sudah Diterima") {
+            arr[pIdx] = {
+              ...arr[pIdx],
+              cascadeAlert: mkAlert(locked)
+            };
+            auditEntries.push({
+              module: label,
+              docNomor: po.nomor,
+              action: "Cascade: Perlu Review Manual",
+              detail: `Terkait edit langsung Quotation ${quotNomor} via IR ${ir.nomor}`
             });
           }
         });
@@ -6882,9 +6981,9 @@ function MekanikReport({
   // Manajemen User list (Supabase profiles), not the local `employees` array — deleting a user in
   // Manajemen User only removes their `profiles` row, it never touches `employees`, so a deleted
   // mekanik (e.g. "Mekanik1") would otherwise keep showing up here forever.
-  const activeMekanikUsers = (authUsers && authUsers.length ? authUsers.filter(u => u.role === "mekanik" && u.aktif !== false) : employees.filter(e => e.role === "mekanik"));
+  const activeMekanikUsers = (authUsers && authUsers.length ? authUsers.filter(u => ["mekanik", "freelance"].includes(u.role) && u.aktif !== false) : employees.filter(e => ["mekanik", "freelance"].includes(e.role)));
   const partRecs = normalizePartRecs(partRecsRaw);
-  const isMekanik = session.role === "mekanik";
+  const isMekanik = session.role === "mekanik" || session.role === "freelance";
   // HO1 (owner), HO2 (gm), HO3 (finance_director) all get delete/full-access rights here, per company hierarchy.
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   const isSepti = session.role === "workshop_manager";
@@ -9904,7 +10003,7 @@ function PartRequestModule({
     parts,
     setParts
   } = store;
-  const isMekanik = session.role === "mekanik";
+  const isMekanik = session.role === "mekanik" || session.role === "freelance";
   const isAsil = session.role === "service_manager";
   const isApprover = session.role === "owner" || session.role === "gm" || session.role === "finance_director"; // HO1/HO2/HO3 super-user parity
   const [modal, setModal] = useState(false);
@@ -10521,7 +10620,8 @@ function QuotationUnit({
     customers,
     units,
     parts,
-    employees
+    employees,
+    salesOrders
   } = store;
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   // HO1/HO2/HO3 (owner/gm/finance_director) are all "super user" — all three must see the approval
@@ -10530,6 +10630,10 @@ function QuotationUnit({
   const [modal, setModal] = useState(false);
   const [revisionOf, setRevisionOf] = useState(null); // original quotation being revised, if any
   const [editingQ, setEditingQ] = useState(null); // quotation being edited in-place (same nomor, no new revision)
+  // SUPERUSER (Owner/GM/Finance Director) can edit a quotation at ANY status, including after it
+  // already became an SO — this optional note is the ONLY thing that can ever be pushed onto an
+  // already-created SO as a result (never qty/harga/item); see flagDownstreamForDirectEdit above.
+  const [applyNoteToSO, setApplyNoteToSO] = useState("");
   const [detail, setDetail] = useState(null);
   const [form, setForm] = useState({
     tanggal: today(),
@@ -10635,6 +10739,7 @@ function QuotationUnit({
   const openEdit = q => {
     setRevisionOf(null);
     setEditingQ(q);
+    setApplyNoteToSO("");
     setForm({
       tanggal: q.tanggal || today(),
       customerId: q.customerId || "",
@@ -10782,12 +10887,23 @@ function QuotationUnit({
         logAudit(store, session, {
           module: "Unit Quotation",
           docNomor: editingQ.nomor,
-          action: newStatus === "Draft" ? "Simpan Draft" : "Edit",
+          action: newStatus === "Draft" ? "Simpan Draft" : (isOwnerLike && editingQ.status !== "Menunggu Approval GM" && editingQ.status !== "Draft" ? "Edit (Superuser)" : "Edit"),
           detail: `${cust?.nama || editingQ.customerNama} — ${fmt(total)}`
         });
+        // If this quotation already spawned an SO (Disetujui GM onward), flag every downstream
+        // SO/IR/PO for manual review — never touches their qty/harga/item. The only thing that can
+        // ever land on the SO automatically is an appended note, and only if the SUPERUSER typed one
+        // in AND that specific SO isn't locked yet (no shipment/PO-to-supplier/invoice Lunas).
+        if (isOwnerLike) {
+          flagDownstreamForDirectEdit(store, session, {
+            quotNomor: editingQ.nomor,
+            appendNote: applyNoteToSO.trim() || null
+          });
+        }
       }
       setModal(false);
       setEditingQ(null);
+      setApplyNoteToSO("");
       return;
     }
     const baseNomor = revisionOf ? revisionOf.revisiDari || revisionOf.nomor : null;
@@ -11007,11 +11123,11 @@ function QuotationUnit({
       gap: 6,
       flexWrap: "wrap"
     }
-  }, (q.status === "Menunggu Approval GM" || q.status === "Draft") && /*#__PURE__*/React.createElement(Btn, {
+  }, (q.status === "Menunggu Approval GM" || q.status === "Draft" || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
     onClick: () => openEdit(q)
-  }, "✎ Edit"), q.status === "Draft" && /*#__PURE__*/React.createElement(Btn, {
+  }, isOwnerLike && q.status !== "Menunggu Approval GM" && q.status !== "Draft" ? "✎ Edit (Superuser)" : "✎ Edit"), q.status === "Draft" && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "success",
     onClick: () => submitDraft(q)
@@ -11766,7 +11882,26 @@ function QuotationUnit({
       ...form,
       catatan: v
     })
-  }), /*#__PURE__*/React.createElement("div", {
+  }), editingQ && isOwnerLike && salesOrders.some(so => so.sourceNomor === editingQ.nomor) && /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: `1px dashed ${theme.border}`,
+      borderRadius: 10,
+      padding: 12,
+      background: theme.surface
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 8px",
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Quotation ini sudah punya SO terkait. Perubahan qty/harga/item TIDAK PERNAH otomatis diterapkan ke SO/IR/PO — semua akan ditandai \"⚠ Perlu Review Manual\". Opsional: tulis catatan di bawah untuk otomatis ditambahkan ke SO yang belum terkunci (belum ada pengiriman/PO ke supplier/invoice lunas)."), /*#__PURE__*/React.createElement(Input, {
+    label: "Catatan tambahan untuk SO (opsional)",
+    multiline: true,
+    value: applyNoteToSO,
+    onChange: setApplyNoteToSO,
+    placeholder: "Contoh: Tanggal delivery mundur 1 minggu sesuai revisi quotation"
+  })), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
@@ -11777,6 +11912,7 @@ function QuotationUnit({
     onClick: () => {
       setModal(false);
       setEditingQ(null);
+      setApplyNoteToSO("");
     }
   }, "Batal"), !revisionOf && /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
@@ -18809,7 +18945,7 @@ function PartsUseModule({
     employees
   } = store;
   const isStefanus = session.role === "logistic";
-  const isMekanik = session.role === "mekanik";
+  const isMekanik = session.role === "mekanik" || session.role === "freelance";
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   const canRelease = isStefanus || isOwnerLike;
   const [modal, setModal] = useState(false);
@@ -19405,7 +19541,7 @@ function PartsUseModule({
       ...form,
       mekanikNama: v
     }),
-    options: (employees || []).filter(e => e.role === "mekanik").map(e => ({
+    options: (employees || []).filter(e => ["mekanik", "freelance"].includes(e.role)).map(e => ({
       value: e.nama,
       label: e.nama
     })),
@@ -23437,7 +23573,7 @@ function MekanikKPIModule({
   } = store;
   const partRecs = normalizePartRecs(partRecsRaw);
   const isOwnerLike = session.role === "owner" || session.role === "gm";
-  const isMekanik = session.role === "mekanik";
+  const isMekanik = session.role === "mekanik" || session.role === "freelance";
   const mekanikNames = [...new Set(visits.map(v => v.mekanikNama))];
   const targetNames = isMekanik ? [session.nama] : mekanikNames;
   const stats = targetNames.map(nama => {
@@ -23542,7 +23678,7 @@ function TicketingModule({
   });
   const [namaPicker, setNamaPicker] = useState("");
   const [namaBebas, setNamaBebas] = useState("");
-  const mekanikList = employees.filter(e => e.role === "mekanik").map(e => e.nama);
+  const mekanikList = employees.filter(e => ["mekanik", "freelance"].includes(e.role)).map(e => e.nama);
   const newNomor = (arr = tickets) => genDocNumber(arr, "TK");
   const toggleSO = nomor => {
     setForm(f => ({
@@ -28277,7 +28413,23 @@ function KPISalesModule({
   // won and turned into a Sales Order (a real PO from the client), which is what should drive the
   // scored component; raw Value Quotation is shown for comparison only and is NOT scored, since a
   // sales manager could otherwise inflate it just by issuing lots of unfollowed quotations.
-  const quotationsForSalesManager = nama => [...quotationsUnit.filter(q => q.salesManagerNama === nama), ...(quotationsPS || []).filter(q => q.salesManagerNama === nama)];
+  // A revised quotation (UQ-017-R1, R2, ...) keeps the ORIGINAL row in the array (status stays
+  // whatever it was, e.g. "Sudah jadi SO") purely for audit/history — only the LATEST revision in
+  // each revisiDari chain is the "real" active quotation. Counting every row here would double
+  // (or triple, quadruple...) count the same underlying deal every time it's revised. Same
+  // quotIsLatestRevision logic already used by Sales Order's "SQ ON GOING" picker.
+  const quotIsLatestRevision = (arr, q) => {
+    const fam = q.revisiDari || q.nomor;
+    const members = arr.filter(x => (x.revisiDari || x.nomor) === fam);
+    if (members.length <= 1) return true;
+    const revNum = x => {
+      const m = /-R(\d+)$/.exec(x.nomor || "");
+      return m ? parseInt(m[1], 10) : -1;
+    };
+    const latest = members.reduce((a, b) => revNum(b) > revNum(a) ? b : a);
+    return latest.nomor === q.nomor;
+  };
+  const quotationsForSalesManager = nama => [...quotationsUnit.filter(q => q.salesManagerNama === nama && quotIsLatestRevision(quotationsUnit, q)), ...(quotationsPS || []).filter(q => q.salesManagerNama === nama && quotIsLatestRevision(quotationsPS, q))];
   // "SO client sudah selesai" (PO Closed, sisi penjualan) = barang sudah dikirim penuh ke client DAN
   // invoice-nya sudah Lunas — sama prinsipnya dengan kriteria PO CLOSED di modul Purchase Order.
   const soFullyShippedKpi = so => {
