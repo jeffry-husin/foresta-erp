@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-27.5";
+const APP_BUILD = "2026-07-27.6";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -28235,6 +28235,7 @@ function KPISalesModule({
     poLocal,
     poOverseas,
     invoices,
+    deliveryOrders,
     employees,
     kpiSalesRoster,
     setKpiSalesRoster
@@ -28254,20 +28255,37 @@ function KPISalesModule({
   // anyone's actual login role/access (confirmed business rule: "Hanya daftar KPI, tidak ubah role").
   const salesManagerNames = [...new Set([...baseRoster, ...rosterExtra])].filter(n => !rosterExcluded.includes(n));
   const targetNames = isSalesManager ? [session.nama] : salesManagerNames;
-  // Value PO: traced through PO -> IR -> SO, since a Purchase Order isn't directly tagged with a
-  // sales manager — it's the SO the underlying Item Requisition came from that carries ownership.
-  const poValueForSalesManager = nama => {
-    const mySONomors = new Set(salesOrders.filter(so => so.salesManagerNama === nama).map(so => so.nomor));
-    const myIRNomors = new Set((itemRequisitions || []).filter(ir => mySONomors.has(ir.soNomor)).map(ir => ir.nomor));
-    const allPO = [...(poLocal || []), ...(poOverseas || [])];
-    return allPO.filter(p => p.status !== "Ditolak GM" && (p.irNomors || []).some(n => myIRNomors.has(n))).reduce((sum, p) => sum + (Number(p.total) || 0), 0);
+  // Value Quotation is traced from Unit Quotation / Parts & Service Quotation directly (the actual
+  // offer given to the CLIENT) — NOT from Purchase Order to Supplier, which is a procurement
+  // document and has nothing to do with sales performance. "Jadi SO" = the quotation was actually
+  // won and turned into a Sales Order (a real PO from the client), which is what should drive the
+  // scored component; raw Value Quotation is shown for comparison only and is NOT scored, since a
+  // sales manager could otherwise inflate it just by issuing lots of unfollowed quotations.
+  const quotationsForSalesManager = nama => [...quotationsUnit.filter(q => q.salesManagerNama === nama), ...(quotationsPS || []).filter(q => q.salesManagerNama === nama)];
+  // "SO client sudah selesai" (PO Closed, sisi penjualan) = barang sudah dikirim penuh ke client DAN
+  // invoice-nya sudah Lunas — sama prinsipnya dengan kriteria PO CLOSED di modul Purchase Order.
+  const soFullyShippedKpi = so => {
+    const soDOs = (deliveryOrders || []).filter(d => d.soNomor === so.nomor);
+    if (soDOs.length === 0) return false;
+    return (so.items || []).every(it => {
+      const key = it.partNumber || it.unitCode;
+      const shippedQty = soDOs.reduce((sum, d) => sum + (d.items || []).filter(di => di.partNumber === key).reduce((s, di) => s + (Number(di.qty) || 0), 0), 0);
+      return shippedQty >= (Number(it.qty) || 0);
+    });
   };
+  const soHasLunasInvoice = so => (invoices || []).some(i => i.soNomor === so.nomor && i.statusBayar === "Lunas");
   const rawStats = targetNames.map(nama => {
-    const quotCount = quotationsUnit.filter(q => q.salesManagerNama === nama).length + (quotationsPS || []).filter(q => q.salesManagerNama === nama).length;
+    const myQuot = quotationsForSalesManager(nama);
+    const quotCount = myQuot.length;
+    const valueQuotation = myQuot.reduce((sum, q) => sum + (Number(q.total) || 0), 0);
+    const myQuotSuccess = myQuot.filter(q => q.status === "Sudah jadi SO");
+    const valueQuotationSO = myQuotSuccess.reduce((sum, q) => sum + (Number(q.total) || 0), 0);
+    const soDiterimaCount = myQuotSuccess.length;
+    const conversionRate = quotCount ? Math.round(soDiterimaCount / quotCount * 100) : 0;
+    const poClosedCount = salesOrders.filter(so => so.salesManagerNama === nama && soFullyShippedKpi(so) && soHasLunasInvoice(so)).length;
     // "Jumlah Meeting" = client visits logged in Sales Activity (jenisAktivitas "Kunjungan") — the
     // closest existing tracked activity to a client meeting.
     const meetingCount = salesActivities.filter(a => a.salesNama === nama && a.jenisAktivitas === "Kunjungan").length;
-    const poValue = poValueForSalesManager(nama);
     const myInvoices = invoices.filter(i => salesOrders.some(so => so.nomor === i.soNomor && so.salesManagerNama === nama));
     const paidOnTime = myInvoices.filter(i => {
       if (i.statusBayar !== "Lunas") return false;
@@ -28278,20 +28296,26 @@ function KPISalesModule({
     const onTimeRate = myInvoices.length ? Math.round(paidOnTime / myInvoices.length * 100) : 0;
     return {
       nama,
-      poValue,
+      valueQuotation,
+      valueQuotationSO,
+      soDiterimaCount,
+      conversionRate,
+      poClosedCount,
       onTimeRate,
       quotCount,
       meetingCount
     };
   });
-  // Peer-relative normalization: each metric scored against the best performer currently in the
-  // roster (0-100), so nobody can inflate their score just by clearing an arbitrary fixed bar —
-  // the bar moves with real company performance instead.
-  const maxPoValue = Math.max(1, ...rawStats.map(s => s.poValue));
+  // Peer-relative normalization: each SCORED metric is measured against the best performer
+  // currently in the roster (0-100), so nobody can inflate their score just by clearing an
+  // arbitrary fixed bar — the bar moves with real company performance instead. Value Quotation,
+  // Conversion Rate, SO Diterima and PO Closed are shown as reference info but are NOT part of
+  // the weighted score.
+  const maxValueQuotationSO = Math.max(1, ...rawStats.map(s => s.valueQuotationSO));
   const maxQuot = Math.max(1, ...rawStats.map(s => s.quotCount));
   const maxMeeting = Math.max(1, ...rawStats.map(s => s.meetingCount));
   const stats = rawStats.map(s => {
-    const poScore = Math.round(s.poValue / maxPoValue * 100);
+    const poScore = Math.round(s.valueQuotationSO / maxValueQuotationSO * 100);
     const paymentScore = s.onTimeRate; // already 0-100
     const quotScore = Math.round(s.quotCount / maxQuot * 100);
     const meetingScore = Math.round(s.meetingCount / maxMeeting * 100);
@@ -28349,7 +28373,11 @@ function KPISalesModule({
   }, "KPI Sales"), /*#__PURE__*/React.createElement(ExportExcelBtn, {
     onClick: () => exportToExcel(stats.map(s => ({
       salesManager: s.nama,
-      valuePO: s.poValue,
+      valueQuotation: s.valueQuotation,
+      valueQuotationJadiSO: s.valueQuotationSO,
+      conversionRate: s.conversionRate + "%",
+      soPODiterima: s.soDiterimaCount,
+      poClosed: s.poClosedCount,
       onTimePaymentRate: s.onTimeRate + "%",
       quotations: s.quotCount,
       meetings: s.meetingCount,
@@ -28364,7 +28392,7 @@ function KPISalesModule({
       borderRadius: 8,
       border: `1px dashed ${theme.border}`
     }
-  }, "ℹ️ Skor KPI = (Value PO × 40%) + (Bayar Tepat Waktu × 25%) + (Jumlah Quotation × 20%) + (Jumlah Meeting × 15%). Setiap komponen dinilai relatif terhadap performa terbaik di antara sales manager saat ini (bukan angka tetap), dan seluruhnya ditarik otomatis dari data PO/Invoice/Quotation/Sales Activity — tidak ada input manual yang bisa dimanipulasi."), isOwnerLike && /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, "ℹ️ Skor KPI = (Value Quotation → SO × 40%) + (Bayar Tepat Waktu × 25%) + (Jumlah Quotation × 20%) + (Jumlah Meeting × 15%). Value Quotation → SO ditarik dari Unit/Parts & Service Quotation yang statusnya sudah \"Sudah jadi SO\" (benar-benar deal dari CLIENT) — bukan lagi dari PO ke Supplier. Value Quotation (total semua quotation dibuat), Conversion Rate, Jumlah SO/PO Diterima, dan PO Closed ditampilkan sebagai info pembanding dan TIDAK ikut dihitung skor, supaya tidak bisa didongkrak hanya dengan membuat banyak quotation tanpa follow-up. Setiap komponen skor dinilai relatif terhadap performa terbaik di antara sales manager saat ini, dan seluruhnya ditarik otomatis dari data Quotation/SO/Delivery Order/Invoice/Sales Activity — tidak ada input manual yang bisa dimanipulasi."), isOwnerLike && /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "KELOLA DAFTAR SALES MANAGER (KPI)",
     count: salesManagerNames.length,
     badgeColor: theme.purple,
@@ -28432,10 +28460,12 @@ function KPISalesModule({
       marginBottom: 12
     }
   }), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Rank", "Sales Manager", "Value PO", "Bayar Tepat Waktu", "Quotation", "Meeting", "KPI Score"],
+    headers: ["Rank", "Sales Manager", "Value Quotation", "Value Quotation → SO", "Conversion Rate", "SO/PO Diterima", "PO Closed", "Bayar Tepat Waktu", "Quotation", "Meeting", "KPI Score"],
     rows: statsFiltered.map((s, i) => [/*#__PURE__*/React.createElement(Badge, {
       color: i === 0 ? theme.yellow : theme.muted
-    }, i === 0 ? "🏆 #1" : `#${i + 1}`), s.nama, fmtMoney(s.poValue, "IDR"), /*#__PURE__*/React.createElement(Badge, {
+    }, i === 0 ? "🏆 #1" : `#${i + 1}`), s.nama, fmtMoney(s.valueQuotation, "IDR"), fmtMoney(s.valueQuotationSO, "IDR"), /*#__PURE__*/React.createElement(Badge, {
+      color: s.conversionRate >= 50 ? theme.green : s.conversionRate >= 25 ? theme.yellow : theme.red
+    }, s.conversionRate, "%"), s.soDiterimaCount, s.poClosedCount, /*#__PURE__*/React.createElement(Badge, {
       color: s.onTimeRate >= 80 ? theme.green : s.onTimeRate >= 50 ? theme.yellow : theme.red
     }, s.onTimeRate, "%"), s.quotCount, s.meetingCount, /*#__PURE__*/React.createElement("strong", {
       style: {
