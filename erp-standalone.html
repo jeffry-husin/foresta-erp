@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-25.5";
+const APP_BUILD = "2026-07-27.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -16315,7 +16315,7 @@ function PurchaseOrderModule({
       ...form,
       currency: v
     }),
-    options: ["USD", "EUR", "GBP", "MYR", "Other"].map(c => ({
+    options: ["USD", "EUR", "GBP", "MYR", "SGD", "Other"].map(c => ({
       value: c,
       label: c
     }))
@@ -16951,7 +16951,7 @@ function PurchaseOrderModule({
     label: "Mata Uang",
     value: reviseCurrency,
     onChange: setReviseCurrency,
-    options: ["USD", "EUR", "GBP", "MYR", "Other"].map(c => ({
+    options: ["USD", "EUR", "GBP", "MYR", "SGD", "Other"].map(c => ({
       value: c,
       label: c
     }))
