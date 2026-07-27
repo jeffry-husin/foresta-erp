@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-27.9";
+const APP_BUILD = "2026-07-27.10";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -27882,8 +27882,20 @@ function FormCutiModule({
       jumlahHari: countDays(formOverride.dariTanggal, formOverride.sampaiTanggal)
     } : req;
     const dates = dateRange(merged.dariTanggal, merged.sampaiTanggal);
-    const existingDates = new Set(attendance.filter(a => a.username === merged.username).map(a => a.tanggal));
-    const newAttendance = dates.filter(d => !existingDates.has(d)).map(d => ({
+    // Bug fix: previously any pre-existing attendance row for the date (regardless of status —
+    // e.g. a blank/"Hadir" row already uploaded via Rekap Mesin before the leave was approved)
+    // silently blocked the "Cuti" row from ever being written, so approved leave never counted
+    // against the 12-day/year quota (Sisa Cuti stayed at 12 even though leave was taken). Fix:
+    // only skip dates that ALREADY have a "Cuti" row (true duplicate); for dates with some other
+    // status, overwrite that row's status to "Cuti" since an approved leave should take precedence.
+    const cutiDates = new Set(attendance.filter(a => a.username === merged.username && a.status === "Cuti").map(a => a.tanggal));
+    const datesToWrite = dates.filter(d => !cutiDates.has(d));
+    const overwriteDates = new Set(datesToWrite.filter(d => attendance.some(a => a.username === merged.username && a.tanggal === d)));
+    const updatedAttendance = attendance.map(a => overwriteDates.has(a.tanggal) && a.username === merged.username ? {
+      ...a,
+      status: "Cuti"
+    } : a);
+    const newAttendance = datesToWrite.filter(d => !overwriteDates.has(d)).map(d => ({
       id: "ABS-" + uid(),
       tanggal: d,
       username: merged.username,
@@ -27893,7 +27905,7 @@ function FormCutiModule({
       uangHarian: 0,
       status: "Cuti"
     }));
-    if (newAttendance.length > 0) setAttendance([...attendance, ...newAttendance]);
+    if (newAttendance.length > 0 || overwriteDates.size > 0) setAttendance([...updatedAttendance, ...newAttendance]);
     const arr = [...leaveRequests];
     arr[leaveRequests.indexOf(req)] = {
       ...merged,
