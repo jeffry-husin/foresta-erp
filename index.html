@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-27.8";
+const APP_BUILD = "2026-07-27.9";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -28445,9 +28445,12 @@ function KPISalesModule({
   const rawStats = targetNames.map(nama => {
     const myQuot = quotationsForSalesManager(nama);
     const quotCount = myQuot.length;
-    const valueQuotation = myQuot.reduce((sum, q) => sum + (Number(q.total) || 0), 0);
+    // Sebelum Pajak — perusahaan tidak mengambil PPN sebagai revenue, jadi Value Quotation dan
+    // Value Quotation → SO dihitung dari total dikurangi pajak (bukan q.total yang sudah termasuk PPN).
+    const preTax = q => (Number(q.total) || 0) - (Number(q.pajak) || 0);
+    const valueQuotation = myQuot.reduce((sum, q) => sum + preTax(q), 0);
     const myQuotSuccess = myQuot.filter(q => q.status === "Sudah jadi SO");
-    const valueQuotationSO = myQuotSuccess.reduce((sum, q) => sum + (Number(q.total) || 0), 0);
+    const valueQuotationSO = myQuotSuccess.reduce((sum, q) => sum + preTax(q), 0);
     const soDiterimaCount = myQuotSuccess.length;
     const conversionRate = quotCount ? Math.round(soDiterimaCount / quotCount * 100) : 0;
     const poClosedCount = salesOrders.filter(so => so.salesManagerNama === nama && soFullyShippedKpi(so) && soHasLunasInvoice(so)).length;
@@ -28560,7 +28563,7 @@ function KPISalesModule({
       borderRadius: 8,
       border: `1px dashed ${theme.border}`
     }
-  }, "ℹ️ Skor KPI = (Value Quotation → SO × 40%) + (Bayar Tepat Waktu × 25%) + (Jumlah Quotation × 20%) + (Jumlah Meeting × 15%). Value Quotation → SO ditarik dari Unit/Parts & Service Quotation yang statusnya sudah \"Sudah jadi SO\" (benar-benar deal dari CLIENT) — bukan lagi dari PO ke Supplier. Value Quotation (total semua quotation dibuat), Conversion Rate, Jumlah SO/PO Diterima, dan PO Closed ditampilkan sebagai info pembanding dan TIDAK ikut dihitung skor, supaya tidak bisa didongkrak hanya dengan membuat banyak quotation tanpa follow-up. Setiap komponen skor dinilai relatif terhadap performa terbaik di antara sales manager saat ini, dan seluruhnya ditarik otomatis dari data Quotation/SO/Delivery Order/Invoice/Sales Activity — tidak ada input manual yang bisa dimanipulasi."), isOwnerLike && /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, "ℹ️ Skor KPI = (Value Quotation → SO × 40%) + (Bayar Tepat Waktu × 25%) + (Jumlah Quotation × 20%) + (Jumlah Meeting × 15%). Value Quotation → SO ditarik dari Unit/Parts & Service Quotation yang statusnya sudah \"Sudah jadi SO\" (benar-benar deal dari CLIENT) — bukan lagi dari PO ke Supplier. Value Quotation dan Value Quotation → SO ditampilkan SEBELUM PAJAK (PPN tidak diambil sebagai revenue perusahaan). Value Quotation (total semua quotation dibuat), Conversion Rate, Jumlah SO/PO Diterima, dan PO Closed ditampilkan sebagai info pembanding dan TIDAK ikut dihitung skor, supaya tidak bisa didongkrak hanya dengan membuat banyak quotation tanpa follow-up. Setiap komponen skor dinilai relatif terhadap performa terbaik di antara sales manager saat ini, dan seluruhnya ditarik otomatis dari data Quotation/SO/Delivery Order/Invoice/Sales Activity — tidak ada input manual yang bisa dimanipulasi."), isOwnerLike && /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "KELOLA DAFTAR SALES MANAGER (KPI)",
     count: salesManagerNames.length,
     badgeColor: theme.purple,
@@ -28628,7 +28631,7 @@ function KPISalesModule({
       marginBottom: 12
     }
   }), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Rank", "Sales Manager", "Value Quotation", "Value Quotation → SO", "Conversion Rate", "SO/PO Diterima", "PO Closed", "Bayar Tepat Waktu", "Quotation", "Meeting", "KPI Score"],
+    headers: ["Rank", "Sales Manager", "Value Quotation (Sebelum Pajak)", "Value Quotation → SO (Sebelum Pajak)", "Conversion Rate", "SO/PO Diterima", "PO Closed", "Bayar Tepat Waktu", "Quotation", "Meeting", "KPI Score"],
     rows: statsFiltered.map((s, i) => [/*#__PURE__*/React.createElement(Badge, {
       color: i === 0 ? theme.yellow : theme.muted
     }, i === 0 ? "🏆 #1" : `#${i + 1}`), s.nama, fmtMoney(s.valueQuotation, "IDR"), fmtMoney(s.valueQuotationSO, "IDR"), /*#__PURE__*/React.createElement(Badge, {
