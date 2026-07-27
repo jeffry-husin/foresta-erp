@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-27.6";
+const APP_BUILD = "2026-07-27.7";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -7060,13 +7060,14 @@ function MekanikReport({
   const myVisits = (visitSearch.trim() ? myVisitsAll.filter(v => [v.id, v.customerNama, v.unitTerkait, v.lokasi, v.mekanikNama].filter(Boolean).some(x => String(x).toLowerCase().includes(visitSearch.trim().toLowerCase()))) : myVisitsAll).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const myVisitsOngoing = myVisits.filter(v => !v.selesai);
   const myVisitsSelesai = myVisits.filter(v => v.selesai);
-  // "MR On Going": SOs explicitly routed to Workshop at creation time (so.fulfillmentType ===
-  // "MR", chosen via the "Buat SO – MR" button on Sales Order) that haven't been turned into a
-  // Kunjungan yet. Drops off this list automatically once a visit referencing that SO exists (see
-  // openVisitFromSO below).
+  // "MR On Going": SOs routed to Workshop (so.fulfillmentType === "MR", chosen via the "Buat SO –
+  // MR" button on Sales Order, or "BOTH" — the automatic dual-route used for SO Unit, since a unit
+  // sale typically needs both procurement AND installation/commissioning) that haven't been turned
+  // into a Kunjungan yet. Drops off this list automatically once a visit referencing that SO exists
+  // (see openVisitFromSO below).
   const [mrSearch, setMrSearch] = useState("");
   const [soPreview, setSoPreview] = useState(null); // SO clicked from MR ON GOING list, to preview jenis pekerjaan before starting a visit
-  const mrOngoingAll = (salesOrders || []).filter(so => so.fulfillmentType === "MR" && !visits.some(v => v.soNomor === so.nomor));
+  const mrOngoingAll = (salesOrders || []).filter(so => ["MR", "BOTH"].includes(so.fulfillmentType) && !visits.some(v => v.soNomor === so.nomor));
   const mrOngoingList = (mrSearch.trim() ? mrOngoingAll.filter(so => [so.nomor, so.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(mrSearch.trim().toLowerCase()))) : mrOngoingAll).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   // Clicking an "MR On Going" entry behaves exactly like "+ Kunjungan Baru", just pre-filled with
   // that SO's client/SO number so the mekanik doesn't have to re-pick them.
@@ -13448,11 +13449,15 @@ function SalesOrderModule({
   const togglePickedItem = i => setPickedItems(arr => arr.includes(i) ? arr.filter(x => x !== i) : [...arr, i]);
   // fulfillmentType routes the whole SO downstream: "IR" = eligible to appear in Item
   // Requisition's stock-shortage picker (Purchasing/parts flow); "MR" = skips Item Requisition
-  // entirely and appears directly in Mekanik Report's "MR On Going" picker (workshop/jasa flow).
-  // This is a single explicit choice made by whoever creates the SO — it does NOT depend on
-  // per-item categorization (Master Part "kategori" data is not reliably tagged Service vs Parts
-  // in practice, which is what caused pure-jasa SOs to get stuck forever in the IR "stock kurang"
-  // picker). Can be changed later per-SO via the "Ubah Tipe" control on the SO list.
+  // entirely and appears directly in Mekanik Report's "MR On Going" picker (workshop/jasa flow);
+  // "BOTH" = appears in BOTH pickers at once — this is set AUTOMATICALLY for every SO Unit (no
+  // manual choice needed), since a unit sale typically needs both procurement/preparation of the
+  // unit itself AND a separate installation/commissioning job for the workshop. SO Parts/Service
+  // still requires the explicit IR-or-MR choice, since those are typically one or the other. This
+  // does NOT depend on per-item categorization (Master Part "kategori" data is not reliably tagged
+  // Service vs Parts in practice, which is what caused pure-jasa SOs to get stuck forever in the IR
+  // "stock kurang" picker). Can be changed later per-SO via the "Ubah Tipe" control on the SO list
+  // (cycles IR → MR → BOTH → IR).
   const createSO = fulfillmentType => {
     if (!pickQuot) return;
     const {
@@ -13517,7 +13522,7 @@ function SalesOrderModule({
       ...so,
       nomor: soNomor
     }]);
-    if (fulfillmentType === "MR") ensureUangDinasProject(soNomor, so.customerNama);
+    if (fulfillmentType === "MR" || fulfillmentType === "BOTH") ensureUangDinasProject(soNomor, so.customerNama);
     if (type === "Unit") {
       const arr = [...quotationsUnit];
       arr[quotationsUnit.indexOf(quot)] = {
@@ -13541,18 +13546,25 @@ function SalesOrderModule({
     });
     setPickQuot(null);
   };
-  // Manual reclassify — lets Purchasing/Owner/GM move a specific SO between the IR (Purchasing)
-  // and MR (Workshop) routes at any time, e.g. to fix an SO that was routed wrong at creation, or
-  // to migrate legacy SOs created before this field existed (those default to "IR").
+  // Manual reclassify — lets Purchasing/Owner/GM cycle a specific SO between the IR (Purchasing),
+  // MR (Workshop), and BOTH (dual-route — used automatically for SO Unit, but selectable here for
+  // any SO that turns out to need both, e.g. legacy SOs created before this field existed).
+  const fulfillmentCycle = {
+    IR: "MR",
+    MR: "BOTH",
+    BOTH: "IR"
+  };
+  const fulfillmentLabel = ft => ft === "BOTH" ? "IR + MR" : ft || "IR";
   const changeFulfillmentType = so => {
     const current = so.fulfillmentType || "IR";
-    const next = current === "IR" ? "MR" : "IR";
-    if (!confirm(`Ubah rute SO ${so.nomor} dari ${current} menjadi ${next}?\n\n${next === "IR" ? "SO akan muncul di picker Item Requisition (Purchasing)." : "SO akan hilang dari Item Requisition dan muncul di MR On Going (Mekanik Report)."}`)) return;
+    const next = fulfillmentCycle[current] || "IR";
+    const nextDesc = next === "IR" ? "SO akan muncul di picker Item Requisition (Purchasing) saja." : next === "MR" ? "SO akan hilang dari Item Requisition dan muncul di MR On Going (Mekanik Report) saja." : "SO akan muncul DI KEDUANYA — picker Item Requisition (Purchasing) DAN MR On Going (Mekanik Report).";
+    if (!confirm(`Ubah rute SO ${so.nomor} dari ${fulfillmentLabel(current)} menjadi ${fulfillmentLabel(next)}?\n\n${nextDesc}`)) return;
     setSalesOrders(prev => prev.map(s => s.nomor === so.nomor ? {
       ...s,
       fulfillmentType: next
     } : s));
-    if (next === "MR") ensureUangDinasProject(so.nomor, so.customerNama);
+    if (next === "MR" || next === "BOTH") ensureUangDinasProject(so.nomor, so.customerNama);
     logAudit(store, session, {
       module: "Sales Order",
       docNomor: so.nomor,
@@ -13700,10 +13712,10 @@ function SalesOrderModule({
     }, so.tipe), /*#__PURE__*/React.createElement("span", {
       style: (isEpy || isOwnerLike) ? { cursor: "pointer" } : undefined,
       onClick: (isEpy || isOwnerLike) ? () => changeFulfillmentType(so) : undefined,
-      title: (isEpy || isOwnerLike) ? "Klik untuk ubah rute IR/MR" : undefined
+      title: (isEpy || isOwnerLike) ? "Klik untuk ubah rute IR / MR / IR+MR" : undefined
     }, /*#__PURE__*/React.createElement(Badge, {
-      color: (so.fulfillmentType || "IR") === "MR" ? theme.purple : theme.cyan
-    }, so.fulfillmentType || "IR")), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
+      color: so.fulfillmentType === "BOTH" ? theme.accent : (so.fulfillmentType || "IR") === "MR" ? theme.purple : theme.cyan
+    }, fulfillmentLabel(so.fulfillmentType))), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
       color: theme.green
     }, so.status), (isEpy || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
@@ -13733,10 +13745,10 @@ function SalesOrderModule({
     }, so.tipe), /*#__PURE__*/React.createElement("span", {
       style: (isEpy || isOwnerLike) ? { cursor: "pointer" } : undefined,
       onClick: (isEpy || isOwnerLike) ? () => changeFulfillmentType(so) : undefined,
-      title: (isEpy || isOwnerLike) ? "Klik untuk ubah rute IR/MR" : undefined
+      title: (isEpy || isOwnerLike) ? "Klik untuk ubah rute IR / MR / IR+MR" : undefined
     }, /*#__PURE__*/React.createElement(Badge, {
-      color: (so.fulfillmentType || "IR") === "MR" ? theme.purple : theme.cyan
-    }, so.fulfillmentType || "IR")), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
+      color: so.fulfillmentType === "BOTH" ? theme.accent : (so.fulfillmentType || "IR") === "MR" ? theme.purple : theme.cyan
+    }, fulfillmentLabel(so.fulfillmentType))), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
       color: theme.green
     }, so.status), (isEpy || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
@@ -13766,10 +13778,10 @@ function SalesOrderModule({
     }, so.tipe), /*#__PURE__*/React.createElement("span", {
       style: (isEpy || isOwnerLike) ? { cursor: "pointer" } : undefined,
       onClick: (isEpy || isOwnerLike) ? () => changeFulfillmentType(so) : undefined,
-      title: (isEpy || isOwnerLike) ? "Klik untuk ubah rute IR/MR" : undefined
+      title: (isEpy || isOwnerLike) ? "Klik untuk ubah rute IR / MR / IR+MR" : undefined
     }, /*#__PURE__*/React.createElement(Badge, {
-      color: (so.fulfillmentType || "IR") === "MR" ? theme.purple : theme.cyan
-    }, so.fulfillmentType || "IR")), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
+      color: so.fulfillmentType === "BOTH" ? theme.accent : (so.fulfillmentType || "IR") === "MR" ? theme.purple : theme.cyan
+    }, fulfillmentLabel(so.fulfillmentType))), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
       color: theme.green
     }, soSelesaiVia(so))]),
     onDelete: isOwnerLike ? i => deleteSO(salesOrdersFiltered.filter(so => soIsCompleted(so))[i]) : undefined,
@@ -13933,7 +13945,7 @@ function SalesOrderModule({
       color: theme.muted,
       textAlign: "right"
     }
-  }, "Pilih salah satu: SO ini diteruskan ke Purchasing (Item Requisition) atau langsung ke Workshop (Mekanik Report)."), /*#__PURE__*/React.createElement("div", {
+  }, pickQuot.type === "Unit" ? "SO Unit otomatis diteruskan ke Purchasing (Item Requisition) DAN Workshop (Mekanik Report) sekaligus — unit sale biasanya butuh pengadaan/persiapan barang sekaligus jasa pemasangan/komisioning." : "Pilih salah satu: SO ini diteruskan ke Purchasing (Item Requisition) atau langsung ke Workshop (Mekanik Report)."), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "flex-end",
@@ -13942,12 +13954,14 @@ function SalesOrderModule({
   }, /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
     onClick: () => setPickQuot(null)
-  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+  }, "Batal"), pickQuot.type === "Unit" ? /*#__PURE__*/React.createElement(Btn, {
+    onClick: () => createSO("BOTH")
+  }, "✓ Buat SO (IR + MR otomatis)") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
     onClick: () => createSO("MR")
   }, "🔧 Buat SO – MR"), /*#__PURE__*/React.createElement(Btn, {
     onClick: () => createSO("IR")
-  }, "✓ Buat SO – IR"))))), /*#__PURE__*/React.createElement(Modal, {
+  }, "✓ Buat SO – IR")))))), /*#__PURE__*/React.createElement(Modal, {
     open: !!detail,
     title: `Detail ${detail?.nomor}`,
     onClose: () => setDetail(null),
@@ -14514,11 +14528,13 @@ function ItemRequisitionModule({
   // stock or by an existing IR already requesting it (checkStockForSO returns no remaining
   // shortfall). If the SO still has items not yet covered (partially converted, or never
   // requisitioned at all), it keeps showing so HRD/Purchasing can still pull the remaining items.
-  // Only SOs explicitly routed to IR (fulfillmentType === "IR", the default for legacy SOs
+  // Only SOs explicitly routed to IR (fulfillmentType === "IR" or "BOTH" — "BOTH" is the automatic
+  // dual-route used for SO Unit, since a unit sale typically needs both procurement AND
+  // installation/commissioning — the default for legacy SOs
   // created before this field existed) are eligible for the Purchasing/Item Requisition picker.
   // SOs routed to MR skip Item Requisition entirely and go straight to Mekanik Report's own
   // "MR On Going" picker instead — see MekanikReport module.
-  const soPickerEligible = activeSO.filter(so => (so.fulfillmentType || "IR") === "IR" && checkStockForSO(so.nomor).length > 0);
+  const soPickerEligible = activeSO.filter(so => ["IR", "BOTH"].includes(so.fulfillmentType || "IR") && checkStockForSO(so.nomor).length > 0);
   const soPickerList = soPickerSearch.trim() ? soPickerEligible.filter(so => [so.nomor, so.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(soPickerSearch.trim().toLowerCase()))) : soPickerEligible;
   // Traces IR -> PO (Lokal/Overseas, matched via po.irNomors) -> per-part received qty
   // (summed from po.receivedMap, which Goods Receipt maintains as items get received at
