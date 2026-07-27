@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-27.3";
+const APP_BUILD = "2026-07-27.4";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -3020,7 +3020,17 @@ function Table({
       fontWeight: 600,
       whiteSpace: "nowrap",
       cursor: "pointer",
-      userSelect: "none"
+      userSelect: "none",
+      // First column stays visible while scrolling right on wide tables (many columns) — sorting
+      // still works exactly the same (this only pins position, it doesn't change table behavior),
+      // so the row's identifying info (doc number/name) never scrolls out of view.
+      ...(hIdx === 0 ? {
+        position: "sticky",
+        left: 0,
+        background: theme.bg,
+        zIndex: 1,
+        boxShadow: "4px 0 6px -4px rgba(0,0,0,0.3)"
+      } : {})
     }
   }, h, " ", sortCol === hIdx ? sortDir === "asc" ? "▲" : "▼" : /*#__PURE__*/React.createElement("span", {
     style: {
@@ -3059,7 +3069,13 @@ function Table({
       style: {
         padding: "10px 12px",
         color: theme.text,
-        whiteSpace: "nowrap"
+        whiteSpace: "nowrap",
+        ...(j === 0 ? {
+          position: "sticky",
+          left: 0,
+          background: theme.bg,
+          boxShadow: "4px 0 6px -4px rgba(0,0,0,0.3)"
+        } : {})
       }
     }, cell)), (onEdit || onDelete) && /*#__PURE__*/React.createElement("td", {
       style: {
@@ -10503,7 +10519,8 @@ function QuotationUnit({
     setQuotationsUnit,
     customers,
     units,
-    parts
+    parts,
+    employees
   } = store;
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   // HO1/HO2/HO3 (owner/gm/finance_director) are all "super user" — all three must see the approval
@@ -10932,6 +10949,36 @@ function QuotationUnit({
     "Sudah jadi SO": theme.cyan,
     Closed: theme.muted
   };
+  // Sales Manager defaults to whoever created the quotation (see save()), but a quotation is
+  // sometimes created by an admin/assistant on behalf of the actual sales manager who should get
+  // KPI credit — Owner/GM can reassign it here, on ANY quotation regardless of status, so both
+  // new and historical records can be corrected without affecting anything else on the document.
+  const [reassignSM, setReassignSM] = useState(null); // { q, nama }
+  const openReassignSM = q => setReassignSM({
+    q,
+    nama: q.salesManagerNama || ""
+  });
+  const saveReassignSM = () => {
+    if (!reassignSM || !reassignSM.nama) return alert("Pilih Sales Manager");
+    const emp = (employees || []).find(e => e.nama === reassignSM.nama);
+    const arr = [...quotationsUnit];
+    const idx = quotationsUnit.indexOf(reassignSM.q);
+    if (idx >= 0) {
+      arr[idx] = {
+        ...reassignSM.q,
+        salesManagerNama: reassignSM.nama,
+        salesManagerUsername: emp?.username || reassignSM.q.salesManagerUsername || null
+      };
+      setQuotationsUnit(arr);
+      logAudit(store, session, {
+        module: "Unit Quotation",
+        docNomor: reassignSM.q.nomor,
+        action: "Ubah Sales Manager",
+        detail: `${reassignSM.q.salesManagerNama || "-"} → ${reassignSM.nama}`
+      });
+    }
+    setReassignSM(null);
+  };
   const buildRow = q => [/*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.accentLight,
@@ -10980,6 +11027,10 @@ function QuotationUnit({
     variant: "warning",
     onClick: () => closeQuotation(q)
   }, "🔒 Closed"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => openReassignSM(q)
+  }, "🔁 Sales Manager"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "danger",
     onClick: () => deleteQuotation(q)
@@ -11731,7 +11782,46 @@ function QuotationUnit({
     onClick: () => save(true)
   }, "💾 Simpan sebagai Draft"), /*#__PURE__*/React.createElement(Btn, {
     onClick: () => save(false)
-  }, editingQ ? "Simpan Perubahan" : revisionOf ? "Simpan Revisi" : "Ajukan Quotation")))));
+  }, editingQ ? "Simpan Perubahan" : revisionOf ? "Simpan Revisi" : "Ajukan Quotation")))), /*#__PURE__*/React.createElement(Modal, {
+    open: !!reassignSM,
+    title: `Ubah Sales Manager — ${reassignSM?.q?.nomor || ""}`,
+    onClose: () => setReassignSM(null),
+    width: 420
+  }, reassignSM && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Menentukan siapa yang mendapat kredit KPI Sales untuk quotation ini — tidak mengubah item, harga, client, atau status approval. Berguna saat quotation dibuat oleh staff/admin atas nama sales manager tertentu."), /*#__PURE__*/React.createElement(Select, {
+    label: "Sales Manager",
+    value: reassignSM.nama,
+    onChange: v => setReassignSM({
+      ...reassignSM,
+      nama: v
+    }),
+    options: (employees || []).map(e => ({
+      value: e.nama,
+      label: `${e.nama}${e.role ? ` (${ROLE_DEFS[e.role]?.label || e.role})` : ""}`
+    }))
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setReassignSM(null)
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: saveReassignSM
+  }, "Simpan")))));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -11747,7 +11837,8 @@ function QuotationPS({
     customers,
     parts,
     partRecs: partRecsRaw,
-    setPartRecs
+    setPartRecs,
+    employees
   } = store;
   const partRecs = normalizePartRecs(partRecsRaw);
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
@@ -12048,6 +12139,12 @@ function QuotationPS({
       total,
       createdByUsername: session.username,
       createdByNama: session.nama,
+      // Sales Manager = pembuat quotation secara default (sama seperti Unit Quotation) — sebelumnya
+      // field ini tidak pernah diisi untuk Parts & Service Quotation sama sekali, sehingga quotation
+      // yang dibuat staff non-sales-manager (mis. Muhasil) tidak pernah terhitung di KPI Sales
+      // siapa pun. Bisa diubah/di-assign ulang oleh Owner/GM lewat "🔁 Ubah Sales Manager".
+      salesManagerUsername: session.username,
+      salesManagerNama: session.nama,
       status: asDraft ? "Draft" : "Menunggu Approval GM",
       revisiDari: baseNomor || null,
       salesDiscount: revisionOf && salesDiscount.aktif ? salesDiscount : null
@@ -12209,6 +12306,35 @@ function QuotationPS({
     "Sudah jadi SO": theme.cyan,
     Closed: theme.muted
   };
+  // Same reassignable Sales Manager pattern as Unit Quotation — see comment there. Especially
+  // relevant here since PS Quotation is commonly created by Asil (Service Manager) on behalf of
+  // whichever sales manager owns the client relationship.
+  const [reassignSM, setReassignSM] = useState(null); // { q, nama }
+  const openReassignSM = q => setReassignSM({
+    q,
+    nama: q.salesManagerNama || ""
+  });
+  const saveReassignSM = () => {
+    if (!reassignSM || !reassignSM.nama) return alert("Pilih Sales Manager");
+    const emp = (employees || []).find(e => e.nama === reassignSM.nama);
+    const arr = [...quotationsPS];
+    const idx = quotationsPS.indexOf(reassignSM.q);
+    if (idx >= 0) {
+      arr[idx] = {
+        ...reassignSM.q,
+        salesManagerNama: reassignSM.nama,
+        salesManagerUsername: emp?.username || reassignSM.q.salesManagerUsername || null
+      };
+      setQuotationsPS(arr);
+      logAudit(store, session, {
+        module: "Parts & Service Quotation",
+        docNomor: reassignSM.q.nomor,
+        action: "Ubah Sales Manager",
+        detail: `${reassignSM.q.salesManagerNama || "-"} → ${reassignSM.nama}`
+      });
+    }
+    setReassignSM(null);
+  };
   const buildRowPS = q => [/*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.accentLight,
@@ -12216,7 +12342,7 @@ function QuotationPS({
       cursor: "pointer"
     },
     onClick: () => setDetail(q)
-  }, q.nomor), q.tanggal, q.customerNama, fmt(q.total), q.fromRecIds?.length ? /*#__PURE__*/React.createElement(Badge, {
+  }, q.nomor), q.tanggal, q.customerNama, q.salesManagerNama || "-", fmt(q.total), q.fromRecIds?.length ? /*#__PURE__*/React.createElement(Badge, {
     color: theme.purple
   }, "Dari Mekanik") : /*#__PURE__*/React.createElement(Badge, {
     color: theme.muted
@@ -12261,6 +12387,10 @@ function QuotationPS({
     variant: "warning",
     onClick: () => closeQuotationPS(q)
   }, "🔒 Closed"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => openReassignSM(q)
+  }, "🔁 Sales Manager"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "danger",
     onClick: () => deleteQuotationPS(q)
@@ -12423,7 +12553,7 @@ function QuotationPS({
     badgeColor: theme.accent,
     storageKey: "qps_ongoing"
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. Quotation", "Tanggal", "Client", "Total", "Sumber", "Status", "Aksi"],
+    headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total", "Sumber", "Status", "Aksi"],
     rows: qpsOnGoing.map(buildRowPS),
     emptyMsg: "Tidak ada quotation on going"
   })), /*#__PURE__*/React.createElement(CollapsibleSection, {
@@ -12432,7 +12562,7 @@ function QuotationPS({
     badgeColor: theme.cyan,
     storageKey: "qps_success"
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. Quotation", "Tanggal", "Client", "Total", "Sumber", "Status", "Aksi"],
+    headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total", "Sumber", "Status", "Aksi"],
     rows: qpsSuccess.map(buildRowPS),
     emptyMsg: "Belum ada quotation yang menjadi SO"
   })), /*#__PURE__*/React.createElement(CollapsibleSection, {
@@ -12441,7 +12571,7 @@ function QuotationPS({
     badgeColor: theme.muted,
     storageKey: "qps_closed"
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. Quotation", "Tanggal", "Client", "Total", "Sumber", "Status", "Aksi"],
+    headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total", "Sumber", "Status", "Aksi"],
     rows: qpsClosed.map(buildRowPS),
     emptyMsg: "Belum ada quotation yang closed"
   })), /*#__PURE__*/React.createElement(Modal, {
@@ -13001,7 +13131,46 @@ function QuotationPS({
     onClick: () => save(true)
   }, "💾 Simpan sebagai Draft"), /*#__PURE__*/React.createElement(Btn, {
     onClick: () => save(false)
-  }, editingQ ? "Simpan Perubahan" : revisionOf ? "Simpan Revisi" : "Ajukan Quotation")))));
+  }, editingQ ? "Simpan Perubahan" : revisionOf ? "Simpan Revisi" : "Ajukan Quotation")))), /*#__PURE__*/React.createElement(Modal, {
+    open: !!reassignSM,
+    title: `Ubah Sales Manager — ${reassignSM?.q?.nomor || ""}`,
+    onClose: () => setReassignSM(null),
+    width: 420
+  }, reassignSM && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Menentukan siapa yang mendapat kredit KPI Sales untuk quotation ini — tidak mengubah item, harga, client, atau status approval. Berguna saat quotation dibuat oleh staff/admin (mis. Asil) atas nama sales manager tertentu."), /*#__PURE__*/React.createElement(Select, {
+    label: "Sales Manager",
+    value: reassignSM.nama,
+    onChange: v => setReassignSM({
+      ...reassignSM,
+      nama: v
+    }),
+    options: (employees || []).map(e => ({
+      value: e.nama,
+      label: `${e.nama}${e.role ? ` (${ROLE_DEFS[e.role]?.label || e.role})` : ""}`
+    }))
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setReassignSM(null)
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: saveReassignSM
+  }, "Simpan")))));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
