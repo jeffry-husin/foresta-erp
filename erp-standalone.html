@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-28.3";
+const APP_BUILD = "2026-07-28.4";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -11155,7 +11155,23 @@ function QuotationUnit({
     variant: "danger",
     onClick: () => deleteQuotation(q)
   }, "Hapus"))];
-  const onGoingQ = myQuotations.filter(q => !["Sudah jadi SO", "Closed"].includes(q.status));
+  // Bug fix: when a quotation is revised, the OLDER revision (e.g. the original UQ-024 once
+  // UQ-024-R1 exists) never gets its own status changed — it just sits there, still "Disetujui
+  // GM" — so it kept showing in ON GOING forever even after the newer revision became an SO
+  // (visible in QUOTATION SUCCESS). Filter ON GOING down to only the latest revision in each
+  // family; a superseded older revision is dead history, not something still "on going".
+  const quotIsLatestRevision = (arr, q) => {
+    const fam = q.revisiDari || q.nomor;
+    const members = arr.filter(x => (x.revisiDari || x.nomor) === fam);
+    if (members.length <= 1) return true;
+    const revNum = x => {
+      const m = /-R(\d+)$/.exec(x.nomor || "");
+      return m ? parseInt(m[1], 10) : -1;
+    };
+    const latest = members.reduce((a, b) => revNum(b) > revNum(a) ? b : a);
+    return latest.nomor === q.nomor;
+  };
+  const onGoingQ = myQuotations.filter(q => !["Sudah jadi SO", "Closed"].includes(q.status) && quotIsLatestRevision(quotationsUnit, q));
   const successQ = myQuotations.filter(q => q.status === "Sudah jadi SO");
   const closedQ = myQuotations.filter(q => q.status === "Closed");
   const staleQ = onGoingQ.filter(needsFollowUp);
