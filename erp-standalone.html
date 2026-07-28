@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-28.4";
+const APP_BUILD = "2026-07-28.5";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -865,6 +865,10 @@ const ROLE_DEFS = {
 // Client-facing documents must NEVER show Part Description (internal use only).
 // Enforced in: Quotation (Unit & Parts/Service), Sales Order, Invoice, Delivery Order.
 const CLIENT_FACING_MODULES = ["quotation_unit", "quotation_ps", "sales_order", "invoice", "delivery_order"];
+
+// Database Client category — fixed industry list (was free-text before, which meant it was
+// basically only ever filled in as "Umum" since sales had no real options to pick from).
+const CLIENT_CATEGORIES = ["SAWIT", "MINING", "MARINE", "MANUFACTURE", "GOVERNMENT", "KONTRAKTOR", "UMUM"];
 
 // Mekanik Report sub-statuses
 const KEPARAHAN_OPTIONS = ["Ringan", "Sedang", "Berat", "Kritikal"];
@@ -3002,7 +3006,15 @@ function tableCellText(node) {
   if (node === null || node === undefined || typeof node === "boolean") return "";
   if (typeof node === "string" || typeof node === "number") return String(node);
   if (Array.isArray(node)) return node.map(tableCellText).join(" ");
-  if (node && node.props && node.props.children !== undefined) return tableCellText(node.props.children);
+  if (node && node.props) {
+    // Select-shaped cell (an inline-editable column, e.g. Database Client's Category dropdown) has
+    // no children — pull the currently selected option's label instead so sort/search still work.
+    if (Array.isArray(node.props.options) && node.props.value !== undefined) {
+      const opt = node.props.options.find(o => String(o.value) === String(node.props.value ?? ""));
+      if (opt) return String(opt.label ?? "");
+    }
+    if (node.props.children !== undefined) return tableCellText(node.props.children);
+  }
   return "";
 }
 function tableCellSortValue(node) {
@@ -5614,6 +5626,30 @@ function CustomerDB({
       setCustomers(a);
     }
   };
+  // Quick-revise Category directly from the list — deliberately bypasses the normal GM-approval
+  // edit-request flow used for other client fields (see save()), since Category is just a
+  // classification tag, not something that needs approval. Still access-gated the same way as
+  // everything else: Owner/GM/Finance Director can revise any client, a Sales Manager only their own.
+  const updateCategory = (customer, newCategory) => {
+    if (!isOwnerLike && !customerAccessibleBy(customer, session)) {
+      alert("Anda belum memiliki akses ke client ini. Gunakan tombol \"Request Akses\" untuk mengajukan akses ke HO1/HO2/HO3.");
+      return;
+    }
+    const idx = customers.indexOf(customer);
+    if (idx < 0) return;
+    const arr = [...customers];
+    arr[idx] = {
+      ...customer,
+      category: newCategory
+    };
+    setCustomers(arr);
+    logAudit(store, session, {
+      module: "Database Client",
+      docNomor: customer.nama,
+      action: "Ubah Category",
+      detail: `${customer.category || "-"} → ${newCategory}`
+    });
+  };
   const doExport = () => exportToExcel(visible.flatMap(c => {
     const pics = c.pics && c.pics.length ? c.pics : [{
       nama: "",
@@ -5906,7 +5942,7 @@ function CustomerDB({
     variant: "danger",
     onClick: () => rejectAccessRequest(req)
   }, "✗ Tolak"))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
-    headers: isOwnerLike ? ["ID", "Nama Client", "PIC Utama", "Telepon", "Email", "Sales Manager", "Akses"] : ["ID", "Nama Client", "PIC Utama", "Telepon", "Email", "Akses"],
+    headers: isOwnerLike ? ["ID", "Nama Client", "PIC Utama", "Telepon", "Email", "Category", "Sales Manager", "Akses"] : ["ID", "Nama Client", "PIC Utama", "Telepon", "Email", "Category", "Sales Manager", "Akses"],
     rows: filtered.map(c => {
       const picLabelText = c.pics && c.pics.length ? `${c.pics[0].nama}${c.pics.length > 1 ? ` (+${c.pics.length - 1})` : ""}` : "-";
       const picLabel = /*#__PURE__*/React.createElement("span", {
@@ -5920,6 +5956,19 @@ function CustomerDB({
         }
       }, picLabelText);
       const hasAccess = isOwnerLike || customerAccessibleBy(c, session);
+      // Category can be revised right here by whoever has access to this client (see
+      // updateCategory) — no approval needed, unlike other client fields.
+      const categoryCell = hasAccess ? /*#__PURE__*/React.createElement(Select, {
+        value: c.category || "",
+        onChange: v => updateCategory(c, v),
+        options: CLIENT_CATEGORIES.map(cat => ({
+          value: cat,
+          label: cat
+        })),
+        style: {
+          minWidth: 150
+        }
+      }) : c.category || "-";
       const accessCell = isOwnerLike ? /*#__PURE__*/React.createElement(Btn, {
         size: "sm",
         variant: "ghost",
@@ -5933,9 +5982,9 @@ function CustomerDB({
         variant: "ghost",
         onClick: () => requestAccess(c)
       }, "Request Akses"));
-      return isOwnerLike ? [c.id, c.nama, picLabel, c.telepon, c.email, /*#__PURE__*/React.createElement(Badge, {
+      return [c.id, c.nama, picLabel, c.telepon, c.email, categoryCell, /*#__PURE__*/React.createElement(Badge, {
         color: theme.accent
-      }, c.salesManager), accessCell] : [c.id, c.nama, picLabel, c.telepon, c.email, accessCell];
+      }, c.salesManager || "-"), accessCell];
     }),
     onEdit: onEdit,
     onDelete: isOwnerLike ? onDelete : undefined
@@ -6003,14 +6052,17 @@ function CustomerDB({
       gridTemplateColumns: "1fr 1fr",
       gap: 14
     }
-  }, /*#__PURE__*/React.createElement(Input, {
+  }, /*#__PURE__*/React.createElement(Select, {
     label: "Category",
     value: form.category,
     onChange: v => setForm({
       ...form,
       category: v
     }),
-    placeholder: "Misal: Mining, Palm Oil, Port..."
+    options: CLIENT_CATEGORIES.map(c => ({
+      value: c,
+      label: c
+    }))
   }), /*#__PURE__*/React.createElement(Select, {
     label: "Currency",
     value: form.currency,
@@ -6268,13 +6320,17 @@ function CustomerDB({
       gridTemplateColumns: "1fr 1fr",
       gap: 14
     }
-  }, /*#__PURE__*/React.createElement(Input, {
+  }, /*#__PURE__*/React.createElement(Select, {
     label: "Category",
     value: reviewForm.category,
     onChange: v => setReviewForm({
       ...reviewForm,
       category: v
-    })
+    }),
+    options: CLIENT_CATEGORIES.map(c => ({
+      value: c,
+      label: c
+    }))
   }), /*#__PURE__*/React.createElement(Select, {
     label: "Currency",
     value: reviewForm.currency,
