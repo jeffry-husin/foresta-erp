@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-28.1";
+const APP_BUILD = "2026-07-28.2";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -27778,7 +27778,10 @@ function FormCutiModule({
     setDetailForm({
       alasan: r.alasan,
       dariTanggal: r.dariTanggal,
-      sampaiTanggal: r.sampaiTanggal
+      sampaiTanggal: r.sampaiTanggal,
+      // HRD-selected at approval time: "Cuti" (Cuti Biasa, potong kuota 12 hari/tahun) atau
+      // "Cuti Khusus" (di luar kuota — menikah, keluarga meninggal, dll). Defaults to Cuti Biasa.
+      jenisCuti: r.jenisCuti || "Cuti"
     });
   };
   const emptyForm = {
@@ -27879,24 +27882,31 @@ function FormCutiModule({
     setDetail(null);
   };
   const approve = (req, formOverride) => {
+    // Fallback to req's own dates when formOverride only carries a partial patch (e.g. the quick
+    // Approve button only sends { jenisCuti }, not dariTanggal/sampaiTanggal) — otherwise jumlahHari
+    // would incorrectly recompute from undefined dates.
     const merged = formOverride ? {
       ...req,
       ...formOverride,
-      jumlahHari: countDays(formOverride.dariTanggal, formOverride.sampaiTanggal)
+      jumlahHari: countDays(formOverride.dariTanggal || req.dariTanggal, formOverride.sampaiTanggal || req.sampaiTanggal)
     } : req;
+    // HRD chooses at approval time whether this is Cuti Biasa (potong kuota 12 hari/tahun) atau
+    // Cuti Khusus (di luar kuota — menikah, keluarga meninggal, dll). Writes to the same
+    // attendance "status" vocabulary already used across Absensi ("Cuti" / "Cuti Khusus").
+    const jenisCuti = merged.jenisCuti === "Cuti Khusus" ? "Cuti Khusus" : "Cuti";
     const dates = dateRange(merged.dariTanggal, merged.sampaiTanggal);
     // Bug fix: previously any pre-existing attendance row for the date (regardless of status —
     // e.g. a blank/"Hadir" row already uploaded via Rekap Mesin before the leave was approved)
     // silently blocked the "Cuti" row from ever being written, so approved leave never counted
     // against the 12-day/year quota (Sisa Cuti stayed at 12 even though leave was taken). Fix:
-    // only skip dates that ALREADY have a "Cuti" row (true duplicate); for dates with some other
-    // status, overwrite that row's status to "Cuti" since an approved leave should take precedence.
-    const cutiDates = new Set(attendance.filter(a => a.username === merged.username && a.status === "Cuti").map(a => a.tanggal));
-    const datesToWrite = dates.filter(d => !cutiDates.has(d));
+    // only skip dates that ALREADY have a row matching the chosen jenisCuti (true duplicate); for
+    // dates with some other status, overwrite that row's status since an approved leave takes precedence.
+    const matchDates = new Set(attendance.filter(a => a.username === merged.username && a.status === jenisCuti).map(a => a.tanggal));
+    const datesToWrite = dates.filter(d => !matchDates.has(d));
     const overwriteDates = new Set(datesToWrite.filter(d => attendance.some(a => a.username === merged.username && a.tanggal === d)));
     const updatedAttendance = attendance.map(a => overwriteDates.has(a.tanggal) && a.username === merged.username ? {
       ...a,
-      status: "Cuti"
+      status: jenisCuti
     } : a);
     const newAttendance = datesToWrite.filter(d => !overwriteDates.has(d)).map(d => ({
       id: "ABS-" + uid(),
@@ -27906,12 +27916,13 @@ function FormCutiModule({
       jamKeluar: "",
       lembur: 0,
       uangHarian: 0,
-      status: "Cuti"
+      status: jenisCuti
     }));
     if (newAttendance.length > 0 || overwriteDates.size > 0) setAttendance([...updatedAttendance, ...newAttendance]);
     const arr = [...leaveRequests];
     arr[leaveRequests.indexOf(req)] = {
       ...merged,
+      jenisCuti,
       status: "Disetujui",
       approvedBy: session.nama,
       approvedTanggal: today()
@@ -27921,9 +27932,65 @@ function FormCutiModule({
       module: "Form Cuti",
       docNomor: merged.id,
       action: "Approve",
-      detail: `${merged.nama}: ${merged.jumlahHari} hari (${merged.dariTanggal} s/d ${merged.sampaiTanggal})`
+      detail: `${merged.nama}: ${merged.jumlahHari} hari (${merged.dariTanggal} s/d ${merged.sampaiTanggal}) — ${jenisCuti}`
     });
     setDetail(null);
+  };
+  // Revise an ALREADY-approved leave request (dates and/or Cuti Biasa vs Cuti Khusus) — needed
+  // because a lot of historical leave was never run through Form Cuti at all (see Sisa Cuti bug
+  // backlog) and HRD needs to be able to go back and correct/reclassify what's already on record,
+  // with the change re-synced into Absensi (attendance) immediately, not just edited in isolation.
+  const reviseApproved = (req, formOverride) => {
+    const oldDates = dateRange(req.dariTanggal, req.sampaiTanggal);
+    const oldJenis = req.jenisCuti === "Cuti Khusus" ? "Cuti Khusus" : "Cuti";
+    const merged = {
+      ...req,
+      ...formOverride,
+      jumlahHari: countDays(formOverride.dariTanggal || req.dariTanggal, formOverride.sampaiTanggal || req.sampaiTanggal)
+    };
+    const newJenis = merged.jenisCuti === "Cuti Khusus" ? "Cuti Khusus" : "Cuti";
+    const newDates = dateRange(merged.dariTanggal, merged.sampaiTanggal);
+    const newDateSet = new Set(newDates);
+    // Dates dropped from the range: remove the attendance row this leave originally wrote, but only
+    // if it still holds the status this leave set (status === oldJenis) — never touch a row someone
+    // else has since edited to something else.
+    let nextAttendance = attendance.filter(a => !(a.username === merged.username && oldDates.includes(a.tanggal) && !newDateSet.has(a.tanggal) && a.status === oldJenis));
+    // Dates still in range (or newly added): write/overwrite to the (possibly changed) jenisCuti,
+    // same dedupe/overwrite logic as approve().
+    const matchDates = new Set(nextAttendance.filter(a => a.username === merged.username && a.status === newJenis).map(a => a.tanggal));
+    const datesToWrite = newDates.filter(d => !matchDates.has(d));
+    const overwriteDates = new Set(datesToWrite.filter(d => nextAttendance.some(a => a.username === merged.username && a.tanggal === d)));
+    nextAttendance = nextAttendance.map(a => overwriteDates.has(a.tanggal) && a.username === merged.username ? {
+      ...a,
+      status: newJenis
+    } : a);
+    const newRows = datesToWrite.filter(d => !overwriteDates.has(d)).map(d => ({
+      id: "ABS-" + uid(),
+      tanggal: d,
+      username: merged.username,
+      jamMasuk: "",
+      jamKeluar: "",
+      lembur: 0,
+      uangHarian: 0,
+      status: newJenis
+    }));
+    setAttendance([...nextAttendance, ...newRows]);
+    const arr = [...leaveRequests];
+    arr[leaveRequests.indexOf(req)] = {
+      ...merged,
+      jenisCuti: newJenis,
+      revisedBy: session.nama,
+      revisedTanggal: today()
+    };
+    setLeaveRequests(arr);
+    logAudit(store, session, {
+      module: "Form Cuti",
+      docNomor: merged.id,
+      action: "Revisi Cuti Disetujui",
+      detail: `${merged.nama}: ${oldJenis}(${req.dariTanggal} s/d ${req.sampaiTanggal}) → ${newJenis}(${merged.dariTanggal} s/d ${merged.sampaiTanggal})`
+    });
+    setDetail(null);
+    setDetailForm(null);
   };
   const saveDetailEdits = () => {
     if (!detail || !detailForm) return;
@@ -28171,7 +28238,14 @@ function FormCutiModule({
   }, "👁 Detail/Edit"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "success",
-    onClick: () => approve(r)
+    onClick: () => {
+      // Quick-approve shortcut (skips the Detail modal) — still asks HRD to pick Cuti Biasa vs
+      // Cuti Khusus before writing to attendance, same choice available via Detail/Edit → Approve.
+      const isKhusus = confirm(`Approve cuti ${r.nama} (${r.jumlahHari} hari)?\n\nOK = Cuti Khusus (di luar kuota)\nCancel = Cuti Biasa (potong kuota 12 hari/tahun)`);
+      approve(r, {
+        jenisCuti: isKhusus ? "Cuti Khusus" : "Cuti"
+      });
+    }
   }, "✓ Approve"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "danger",
@@ -28299,7 +28373,12 @@ function FormCutiModule({
       color: theme.cyan,
       fontSize: 12
     }
-  }, "Diajukan atas nama staff oleh ", detail.createdByNama), isApprover && detail.status === "Menunggu Approval HRD" && detailForm ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Input, {
+  }, "Diajukan atas nama staff oleh ", detail.createdByNama), isApprover && (detail.status === "Menunggu Approval HRD" || detail.status === "Disetujui") && detailForm ? /*#__PURE__*/React.createElement(React.Fragment, null, detail.status === "Disetujui" && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: theme.yellow,
+      fontSize: 12
+    }
+  }, "✏️ Cuti ini sudah Disetujui — perubahan di bawah akan langsung menyesuaikan data Absensi (menambah/menghapus/mengubah baris Cuti sesuai rentang & jenis yang baru)."), /*#__PURE__*/React.createElement(Input, {
     label: "Alasan Cuti",
     value: detailForm.alasan,
     onChange: v => setDetailForm({
@@ -28330,7 +28409,21 @@ function FormCutiModule({
       sampaiTanggal: v
     }),
     type: "date"
-  })), /*#__PURE__*/React.createElement("div", {
+  })), /*#__PURE__*/React.createElement(Select, {
+    label: "Jenis Cuti",
+    value: detailForm.jenisCuti || "Cuti",
+    onChange: v => setDetailForm({
+      ...detailForm,
+      jenisCuti: v
+    }),
+    options: [{
+      value: "Cuti",
+      label: "Cuti Biasa (potong kuota 12 hari/tahun)"
+    }, {
+      value: "Cuti Khusus",
+      label: "Cuti Khusus (di luar kuota — menikah, keluarga meninggal, dll)"
+    }]
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
       color: theme.text,
       fontSize: 13
@@ -28338,15 +28431,22 @@ function FormCutiModule({
   }, "Jumlah hari: ", /*#__PURE__*/React.createElement("strong", null, countDays(detailForm.dariTanggal, detailForm.sampaiTanggal))), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
-    onClick: saveDetailEdits
-  }, "💾 Simpan Perubahan")) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Alasan: "), detail.alasan), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Dari Tanggal: "), detail.dariTanggal), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Sampai Tanggal: "), detail.sampaiTanggal), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Jumlah Hari: "), detail.jumlahHari)), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Status: "), /*#__PURE__*/React.createElement(Badge, {
+    onClick: detail.status === "Disetujui" ? () => reviseApproved(detail, detailForm) : saveDetailEdits
+  }, detail.status === "Disetujui" ? "💾 Simpan Revisi (update Absensi)" : "💾 Simpan Perubahan")) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Alasan: "), detail.alasan), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Dari Tanggal: "), detail.dariTanggal), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Sampai Tanggal: "), detail.sampaiTanggal), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Jumlah Hari: "), detail.jumlahHari), detail.jenisCuti && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Jenis Cuti: "), /*#__PURE__*/React.createElement(Badge, {
+    color: detail.jenisCuti === "Cuti Khusus" ? theme.accentLight : theme.green
+  }, detail.jenisCuti))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Status: "), /*#__PURE__*/React.createElement(Badge, {
     color: statusColor[detail.status]
   }, detail.status)), detail.status === "Ditolak" && detail.rejectReason && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Alasan Penolakan: "), detail.rejectReason), detail.approvedBy && /*#__PURE__*/React.createElement("div", {
     style: {
       color: theme.muted,
       fontSize: 13
     }
-  }, "Diputuskan oleh ", detail.approvedBy, " pada ", detail.approvedTanggal), detail.status === "Menunggu Approval HRD" && !isApprover && detail.username === session.username && /*#__PURE__*/React.createElement(Btn, {
+  }, "Diputuskan oleh ", detail.approvedBy, " pada ", detail.approvedTanggal), detail.revisedBy && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "Direvisi terakhir oleh ", detail.revisedBy, " pada ", detail.revisedTanggal), detail.status === "Menunggu Approval HRD" && !isApprover && detail.username === session.username && /*#__PURE__*/React.createElement(Btn, {
     variant: "danger",
     size: "sm",
     onClick: () => {
