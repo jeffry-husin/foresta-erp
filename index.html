@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-27.10";
+const APP_BUILD = "2026-07-28.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -6981,7 +6981,10 @@ function MekanikReport({
   // Manajemen User list (Supabase profiles), not the local `employees` array — deleting a user in
   // Manajemen User only removes their `profiles` row, it never touches `employees`, so a deleted
   // mekanik (e.g. "Mekanik1") would otherwise keep showing up here forever.
-  const activeMekanikUsers = (authUsers && authUsers.length ? authUsers.filter(u => ["mekanik", "freelance"].includes(u.role) && u.aktif !== false) : employees.filter(e => ["mekanik", "freelance"].includes(e.role)));
+  // Includes "workshop_manager" (anggota WORKSHOP, e.g. WORKSHOP1/WORKSHOP2/Septi) alongside
+  // mekanik/freelance, so a Workshop team member can also be assigned/added to a Kunjungan and get
+  // access to fill DAR/Part Recommendation/other Mekanik Report forms for that visit — not just field mekanik.
+  const activeMekanikUsers = (authUsers && authUsers.length ? authUsers.filter(u => ["mekanik", "freelance", "workshop_manager"].includes(u.role) && u.aktif !== false) : employees.filter(e => ["mekanik", "freelance", "workshop_manager"].includes(e.role)));
   const partRecs = normalizePartRecs(partRecsRaw);
   const isMekanik = session.role === "mekanik" || session.role === "freelance";
   // HO1 (owner), HO2 (gm), HO3 (finance_director) all get delete/full-access rights here, per company hierarchy.
@@ -9915,7 +9918,7 @@ function MekanikReport({
       keterangan: v
     })
   }), !isMekanik && /*#__PURE__*/React.createElement(Select, {
-    label: "Mekanik yang Ditugaskan (Utama)",
+    label: "Mekanik/Workshop yang Ditugaskan (Utama)",
     value: visitForm.mekanikUtama,
     onChange: v => setVisitForm({
       ...visitForm,
@@ -9935,7 +9938,7 @@ function MekanikReport({
       color: theme.muted,
       marginBottom: 6
     }
-  }, isMekanik ? "Mekanik Lain yang Ikut (opsional — selain Anda sendiri)" : "Mekanik Lain yang Ikut (opsional — selain yang ditugaskan di atas)"), /*#__PURE__*/React.createElement("div", {
+  }, isMekanik ? "Mekanik/Workshop Lain yang Ikut (opsional — selain Anda sendiri)" : "Mekanik/Workshop Lain yang Ikut (opsional — selain yang ditugaskan di atas)"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       flexWrap: "wrap",
