@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-28.5";
+const APP_BUILD = "2026-07-30.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -182,17 +182,25 @@ const terbilang = n => {
   return (eja(n) + " Rupiah").replace(/\s+/g, " ").trim();
 };
 const today = () => new Date().toISOString().split("T")[0];
-// Unified "revision date" display format requested app-wide: DD-MMM-YYYY, e.g. "23-JUL-2026".
-// Accepts a YYYY-MM-DD (or any Date-parseable) string; returns "-" for empty/invalid input so
-// callers can drop it straight into a table cell without extra guarding.
-const REV_MONTHS = ["JAN", "FEB", "MAR", "APR", "MEI", "JUN", "JUL", "AGU", "SEP", "OKT", "NOV", "DES"];
+// Unified date display format requested app-wide: DD-MMM-YY with English 3-letter month
+// abbreviations, e.g. "01-JAN-26". Accepts a YYYY-MM-DD (or any Date-parseable) string; returns
+// "-" for empty/invalid input so callers can drop it straight into a table cell without extra
+// guarding. (Previously this only reformatted a handful of "revision date" spots as DD-MMM-YYYY
+// with Indonesian month names — now the single source of truth for every date display, also
+// auto-applied to every plain YYYY-MM-DD table cell by the global Table component below.)
+const REV_MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
 const fmtDateRev = dateStr => {
   if (!dateStr) return "-";
   const d = new Date(dateStr);
   if (isNaN(d.getTime())) return "-";
   const dd = String(d.getDate()).padStart(2, "0");
-  return `${dd}-${REV_MONTHS[d.getMonth()]}-${d.getFullYear()}`;
+  const yy = String(d.getFullYear()).slice(-2);
+  return `${dd}-${REV_MONTHS[d.getMonth()]}-${yy}`;
 };
+// Applied automatically to every raw YYYY-MM-DD table cell by the global Table component — leaves
+// everything else (numbers, Badges, other elements, non-date strings) untouched.
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const autoFormatTableCell = cell => typeof cell === "string" && ISO_DATE_RE.test(cell) ? fmtDateRev(cell) : cell;
 const uid = () => Math.random().toString(36).slice(2, 9).toUpperCase();
 // Compares a document's bomSnapshot (captured at creation time, {unitCode: bomUpdatedAt}) against
 // the CURRENT live Master Unit records. Returns the list of unitCodes whose BOM has since been
@@ -802,27 +810,27 @@ const ROLE_DEFS = {
   inventory: {
     label: "Inventory",
     color: "#a855f7",
-    modules: ["dashboard", "item_requisition", "master_part", "master_unit", "attendance"]
+    modules: ["dashboard", "item_requisition", "master_part", "master_unit", "attendance", "mutasi_barang"]
   },
   purchasing: {
     label: "Purchasing",
     color: "#f97316",
-    modules: ["dashboard", "po_local", "supplier", "part_request", "attendance"]
+    modules: ["dashboard", "po_local", "supplier", "part_request", "attendance", "mutasi_barang"]
   },
   purchasing_overseas: {
     label: "Purchasing Overseas",
     color: "#fb923c",
-    modules: ["dashboard", "po_overseas", "supplier", "part_request", "attendance"]
+    modules: ["dashboard", "po_overseas", "supplier", "part_request", "attendance", "mutasi_barang"]
   },
   storage: {
     label: "Storage / Gudang",
     color: "#84cc16",
-    modules: ["dashboard", "goods_receipt", "master_part", "attendance"]
+    modules: ["dashboard", "goods_receipt", "master_part", "attendance", "mutasi_barang"]
   },
   logistic: {
     label: "Logistic",
     color: "#22c55e",
-    modules: ["dashboard", "parts_use", "delivery_order", "attendance"]
+    modules: ["dashboard", "parts_use", "delivery_order", "attendance", "mutasi_barang"]
   },
   finance: {
     label: "Finance",
@@ -849,7 +857,7 @@ const ROLE_DEFS = {
   workshop_manager: {
     label: "Workshop Manager",
     color: "#0ea5e9",
-    modules: ["dashboard", "workshop_dashboard", "maintenance_schedule", "kpi_mekanik", "sales_order", "item_requisition", "part_request", "goods_receipt", "parts_use", "delivery_order", "mekanik_report", "master_mill", "attendance", "master_coa"]
+    modules: ["dashboard", "workshop_dashboard", "maintenance_schedule", "kpi_mekanik", "sales_order", "item_requisition", "part_request", "goods_receipt", "parts_use", "delivery_order", "mekanik_report", "master_mill", "attendance", "master_coa", "mutasi_barang"]
   },
   // Freelance field technician — same day-to-day modules as Mekanik (job reports, parts use,
   // uang dinas) since freelance staff also get dispatched to sites, but kept as a distinct role so
@@ -1023,13 +1031,17 @@ const ALL_MODULES = [{
   icon: "🚚",
   label: "Delivery Order"
 }, {
+  id: "mutasi_barang",
+  icon: "🔄",
+  label: "Mutasi Barang"
+}, {
   id: "invoice",
   icon: "💰",
   label: "Invoice"
 }, {
   id: "workshop_dashboard",
   icon: "🏭",
-  label: "Workshop Dashboard"
+  label: "Dashboard Workshop"
 }, {
   // "part_request" (Request Part Baru) deactivated 2026-07-13 per request — module code, its
   // render-switch cases, and existing data are left intact; it's just no longer in ALL_MODULES,
@@ -1093,6 +1105,52 @@ const ALL_MODULES = [{
   id: "company_settings",
   icon: "⚙️",
   label: "Setting Perusahaan"
+}];
+// Sidebar restructure: standalone top-level items plus named, collapsible groups (Max/Min), in
+// this exact order per request. Any module id not listed here (shouldn't happen — every
+// ALL_MODULES entry is placed) falls through and is appended as standalone so nothing silently
+// disappears from the sidebar if a new module is ever added without updating this list.
+const SIDEBAR_STANDALONE_IDS = ["dashboard", "financial_dashboard", "workshop_dashboard", "audit_trail"];
+const SIDEBAR_GROUPS = [{
+  key: "database",
+  label: "DATABASE",
+  moduleIds: ["master_part", "master_unit", "master_coa", "master_mill", "customer", "supplier"]
+}, {
+  key: "sales",
+  label: "SALES",
+  moduleIds: ["quotation_unit", "quotation_ps", "sales_activity", "client_history", "price_analysis"]
+}, {
+  key: "operation",
+  label: "OPERATION",
+  moduleIds: ["sales_order", "item_requisition", "po_local", "po_overseas"]
+}, {
+  key: "logistik",
+  label: "LOGISTIK",
+  moduleIds: ["goods_receipt", "parts_use", "delivery_order", "mutasi_barang"]
+}, {
+  key: "workshop",
+  label: "WORKSHOP",
+  moduleIds: ["mekanik_report", "maintenance_schedule", "uang_dinas"]
+}, {
+  key: "expenses",
+  label: "EXPENSES",
+  moduleIds: ["ticketing", "workshop_ops"]
+}, {
+  key: "finance",
+  label: "FINANCE",
+  moduleIds: ["invoice", "jurnal"]
+}, {
+  key: "hr",
+  label: "HR",
+  moduleIds: ["attendance", "cuti", "payroll"]
+}, {
+  key: "kpi",
+  label: "KPI",
+  moduleIds: ["kpi_mekanik", "kpi_sales"]
+}, {
+  key: "setting",
+  label: "SETTING",
+  moduleIds: ["users", "company_settings"]
 }];
 function getAllowedModules(role, customModules) {
   // If the user has a custom per-user module list defined (from User_dan_Akses matrix), it takes precedence over the generic role.
@@ -1227,9 +1285,14 @@ function customerAccessibleBy(customer, session) {
   }
   // Legacy fallback for records never migrated to the username-based list: fuzzy-match the old
   // free-text name (handles "Hengky" matching real user "Hengky Sebastian" in either direction).
-  const legacy = (customer.salesManager || "").trim();
+  // Bug fix: this comparison was case-sensitive, so records saved as "Hengky Sebastian" (Title
+  // Case) never matched a profile name of "HENGKY SEBASTIAN" (ALL CAPS, how profiles are stored) —
+  // silently hid the vast majority of a sales manager's own clients (found: 121/931 clients for one
+  // user alone). Compare uppercased on both sides so casing differences never matter.
+  const legacy = (customer.salesManager || "").trim().toUpperCase();
   if (!legacy) return false;
-  return legacy === session.nama || session.nama.startsWith(legacy) || legacy.startsWith(session.nama);
+  const namaUp = (session.nama || "").toUpperCase();
+  return legacy === namaUp || namaUp.startsWith(legacy) || legacy.startsWith(namaUp);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -3188,7 +3251,7 @@ function Table({
           boxShadow: "4px 0 6px -4px rgba(0,0,0,0.3)"
         } : {})
       }
-    }, cell)), (onEdit || onDelete) && /*#__PURE__*/React.createElement("td", {
+    }, autoFormatTableCell(cell))), (onEdit || onDelete) && /*#__PURE__*/React.createElement("td", {
       style: {
         padding: "10px 12px",
         display: "flex",
@@ -5908,7 +5971,12 @@ function CustomerDB({
         detail: ""
       });
     }
-  }, "✗ Tolak"))))), pendingAccessRequests.length > 0 && /*#__PURE__*/React.createElement(Card, {
+  }, "✗ Tolak"))))), /* Bug fix: this card had no isOwnerLike gate at all — ANY logged-in user
+  (including another Sales Manager like SALES2) would see, and could even click Approve/Tolak on,
+  someone else's "Client Access Request" (e.g. SALES1 requesting access to a client). Access
+  requests should only ever be visible/actionable to Owner/GM/Finance Director, same as every other
+  approval in this module. */
+  isOwnerLike && pendingAccessRequests.length > 0 && /*#__PURE__*/React.createElement(Card, {
     title: "Pending Access Requests (Client)"
   }, pendingAccessRequests.map(req => /*#__PURE__*/React.createElement("div", {
     key: req.id,
@@ -5942,7 +6010,11 @@ function CustomerDB({
     variant: "danger",
     onClick: () => rejectAccessRequest(req)
   }, "✗ Tolak"))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
-    headers: isOwnerLike ? ["ID", "Nama Client", "PIC Utama", "Telepon", "Email", "Category", "Sales Manager", "Akses"] : ["ID", "Nama Client", "PIC Utama", "Telepon", "Email", "Category", "Sales Manager", "Akses"],
+    // Nama Client leads (sticky first column when scrolling horizontally — Table pins column 0),
+    // since that's what actually identifies a client at a glance, not the internal ID. ID itself,
+    // Email, and Telepon are dropped from the list entirely (still in the record/edit form, just
+    // not useful clutter here).
+    headers: ["Nama Client", "PIC Utama", "Category", "Sales Manager", "Akses"],
     rows: filtered.map(c => {
       const picLabelText = c.pics && c.pics.length ? `${c.pics[0].nama}${c.pics.length > 1 ? ` (+${c.pics.length - 1})` : ""}` : "-";
       const picLabel = /*#__PURE__*/React.createElement("span", {
@@ -5982,7 +6054,7 @@ function CustomerDB({
         variant: "ghost",
         onClick: () => requestAccess(c)
       }, "Request Akses"));
-      return [c.id, c.nama, picLabel, c.telepon, c.email, categoryCell, /*#__PURE__*/React.createElement(Badge, {
+      return [c.nama, picLabel, categoryCell, /*#__PURE__*/React.createElement(Badge, {
         color: theme.accent
       }, c.salesManager || "-"), accessCell];
     }),
@@ -10671,7 +10743,8 @@ function PartRequestModule({
 // ════════════════════════════════════════════════════════════════════════════
 function QuotationUnit({
   store,
-  session
+  session,
+  onRequestSO
 }) {
   const {
     quotationsUnit,
@@ -11206,7 +11279,11 @@ function QuotationUnit({
     size: "sm",
     variant: "ghost",
     onClick: () => openReassignSM(q)
-  }, "🔁 Sales Manager"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+  }, "🔁 Sales Manager"), q.status === "Disetujui GM" && !quotAlreadyHasSO(q.nomor) && quotIsLatestRevision(quotationsUnit, q) && onRequestSO && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "success",
+    onClick: () => onRequestSO(q.nomor)
+  }, "▶ Buat SO"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "danger",
     onClick: () => deleteQuotation(q)
@@ -11216,6 +11293,9 @@ function QuotationUnit({
   // GM" — so it kept showing in ON GOING forever even after the newer revision became an SO
   // (visible in QUOTATION SUCCESS). Filter ON GOING down to only the latest revision in each
   // family; a superseded older revision is dead history, not something still "on going".
+  // Used by the "Buat SO" button (task: create SO directly from Unit Quotation's ON GOING list,
+  // not just from the Sales Order module's own pull screen) to know whether an SO already exists.
+  const quotAlreadyHasSO = nomor => salesOrders.some(so => so.sourceNomor === nomor);
   const quotIsLatestRevision = (arr, q) => {
     const fam = q.revisiDari || q.nomor;
     const members = arr.filter(x => (x.revisiDari || x.nomor) === fam);
@@ -13385,7 +13465,9 @@ function QuotationPS({
 // ════════════════════════════════════════════════════════════════════════════
 function SalesOrderModule({
   store,
-  session
+  session,
+  pendingSOQuot,
+  clearPendingSOQuot
 }) {
   const {
     salesOrders,
@@ -13652,6 +13734,19 @@ function SalesOrderModule({
       alamat: ""
     });
   };
+  // Cross-module handoff: Unit Quotation's "Buat SO" button sets App-level pendingSOQuot to the
+  // quotation nomor and switches here. Pick it up, find the matching (still-eligible) quotation,
+  // and auto-open the same item-pick flow used by this module's own pull screen.
+  React.useEffect(() => {
+    if (!pendingSOQuot) return;
+    const quot = approvedUnit.find(q => q.nomor === pendingSOQuot);
+    if (quot) {
+      openPickItems(quot, "Unit");
+    } else {
+      alert("Quotation " + pendingSOQuot + " tidak lagi tersedia untuk dibuatkan SO (mungkin sudah menjadi SO, atau bukan revisi terbaru).");
+    }
+    clearPendingSOQuot();
+  }, [pendingSOQuot]);
   const togglePickedItem = i => setPickedItems(arr => arr.includes(i) ? arr.filter(x => x !== i) : [...arr, i]);
   // fulfillmentType routes the whole SO downstream: "IR" = eligible to appear in Item
   // Requisition's stock-shortage picker (Purchasing/parts flow); "MR" = skips Item Requisition
@@ -14664,7 +14759,12 @@ function ItemRequisitionModule({
       // not Item Requisition/Purchase Order. In practice this SO shouldn't even reach here when
       // fulfillmentType is "MR" (soPickerEligible filters those out), but skip Service items
       // defensively regardless of routing.
-      if (it.kategori === "Service") return;
+      // Bug fix (SO-015 → IR-012, PN 104583/109316): older SO items never had `kategori` snapshotted
+      // onto them at all (only added to the item-add flow later), so this check silently never
+      // triggered for any pre-existing SO — Jasa items kept leaking into Item Requisition. Fall back
+      // to the CURRENT Master Part's kategori whenever the SO item itself doesn't carry one.
+      const effectiveKategori = it.kategori || (parts || []).find(p => p.partNumber === it.partNumber)?.kategori;
+      if (effectiveKategori === "Service") return;
       const isUnitSourced = it.sumber === "Master Unit" || !!(!it.partNumber && it.unitCode && (units || []).find(u => u.unitCode === it.unitCode));
       if (isUnitSourced) {
         const unit = (units || []).find(u => u.unitCode === it.unitCode);
@@ -14971,6 +15071,73 @@ function ItemRequisitionModule({
     setRecheckModal(null);
     setDetail(null);
   };
+  // "Recheck Stock" — root-cause fix for a recurring backlog pattern: an IR's qtyButuh/stokTersedia/
+  // qtyKurang are computed once, at the moment the IR is created, from Master Part's stock AT THAT
+  // TIME. If stock is later corrected (e.g. a counting error found weeks after), the IR never
+  // re-syncs — it just keeps showing the stale "stokTersedia"/"qtyKurang" forever, which is what
+  // caused most of the historical IR/PO backlog reported (SO-052, IR-037, IR-036, IR-016, IR-012,
+  // etc.). Per confirmed approach: keep the IR as a snapshot for safety (never silently mutate a
+  // document already in flight) — this button recomputes against CURRENT stock and previews the
+  // diff; nothing is written until Purchasing/HRD/Owner explicitly clicks "Terapkan Perubahan Ini".
+  const [stockRecheckModal, setStockRecheckModal] = useState(null); // { ir, rows }
+  const buildStockRecheckDiff = ir => {
+    const rows = (ir.items || []).map(it => {
+      const p = parts.find(x => x.partNumber === it.partNumber);
+      const currentStok = p?.stok ?? 0;
+      const oldStok = it.stokTersedia || 0;
+      const qtyButuh = it.qtyButuh || 0;
+      const newQtyKurang = Math.max(0, qtyButuh - currentStok);
+      const oldQtyKurang = it.qtyKurang || 0;
+      return {
+        partNumber: it.partNumber,
+        partName: it.partName,
+        qtyButuh,
+        oldStok,
+        currentStok,
+        oldQtyKurang,
+        newQtyKurang
+      };
+    }).filter(r => r.oldStok !== r.currentStok || r.oldQtyKurang !== r.newQtyKurang);
+    return rows;
+  };
+  const openStockRecheck = ir => {
+    const rows = buildStockRecheckDiff(ir);
+    if (rows.length === 0) return alert("Tidak ada perbedaan — stock yang tercatat di IR ini sudah sesuai dengan stock Master Part saat ini.");
+    setStockRecheckModal({
+      ir,
+      rows
+    });
+  };
+  const applyStockRecheck = () => {
+    if (!stockRecheckModal) return;
+    const {
+      ir,
+      rows
+    } = stockRecheckModal;
+    const byPart = {};
+    rows.forEach(r => byPart[r.partNumber] = r);
+    const nextItems = (ir.items || []).map(it => {
+      const r = byPart[it.partNumber];
+      if (!r) return it;
+      return {
+        ...it,
+        stokTersedia: r.currentStok,
+        qtyKurang: r.newQtyKurang
+      };
+    });
+    setItemRequisitions(prev => prev.map(r => r.nomor === ir.nomor ? {
+      ...r,
+      items: nextItems
+    } : r));
+    logAudit(store, session, {
+      module: "Item Requisition",
+      docNomor: ir.nomor,
+      action: "Recheck Stock — Diterapkan",
+      detail: rows.map(r => `${r.partNumber}: stock ${r.oldStok} → ${r.currentStok} (qty kurang ${r.oldQtyKurang} → ${r.newQtyKurang})`).join("; ")
+    });
+    setStockRecheckModal(null);
+    setDetail(null);
+  };
   return React.createElement("div", {
     style: {
       display: "flex",
@@ -15217,7 +15384,16 @@ function ItemRequisitionModule({
   }, `BOM untuk Unit ${bomRevisedUnits(detail.bomSnapshot, units).join(", ")} telah direvisi di Master Unit setelah IR ini dibuat. Item pada IR ini TIDAK otomatis berubah.`), detail.soNomor && !detail.bomCandidate && detail.status !== "Sudah di-PO" && canManage && React.createElement(Btn, {
     size: "sm",
     onClick: () => openRecheck(detail)
-  }, "🔄 Cek Ulang vs BOM Terbaru")), React.createElement(Table, {
+  }, "🔄 Cek Ulang vs BOM Terbaru")), detail.status !== "Sudah di-PO" && canManage && React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end"
+    }
+  }, React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => openStockRecheck(detail)
+  }, "📦 Recheck Stock — bandingkan qty kurang dengan stock Master Part saat ini")), React.createElement(Table, {
     headers: ["Part Number", "Part Name", "Qty Dibutuhkan", "Stok Tersedia", "Qty Kurang", "Catatan", "Status Diterima"],
     rows: detail.items.map(it => {
       const diterima = irRefInfo(detail).receivedByPart[it.partNumber] || 0;
@@ -15306,6 +15482,42 @@ function ItemRequisitionModule({
     onClick: () => setRecheckModal(null)
   }, "Batal"), React.createElement(Btn, {
     onClick: applyRecheck
+  }, "✓ Terapkan Perubahan Ini")))), React.createElement(Modal, {
+    open: !!stockRecheckModal,
+    title: `Recheck Stock — ${stockRecheckModal?.ir?.nomor || ""}`,
+    onClose: () => setStockRecheckModal(null),
+    width: 680
+  }, stockRecheckModal && React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 13,
+      color: theme.muted
+    }
+  }, "Stock Master Part sudah berubah sejak IR ini dibuat/terakhir di-recheck — perbandingan di bawah ini. Qty Kurang akan dihitung ulang dari stock saat ini. Tidak ada perubahan tersimpan sampai Anda klik \"Terapkan Perubahan Ini\"."), React.createElement(Table, {
+    headers: ["Part Number", "Part Name", "Qty Dibutuhkan", "Stok Lama", "Stok Saat Ini", "Qty Kurang Lama", "Qty Kurang Baru"],
+    rows: stockRecheckModal.rows.map(r => [r.partNumber, r.partName, fmtNum(r.qtyButuh), fmtNum(r.oldStok), fmtNum(r.currentStok), fmtNum(r.oldQtyKurang), React.createElement("span", {
+      style: {
+        color: r.newQtyKurang !== r.oldQtyKurang ? theme.red : theme.text,
+        fontWeight: 600
+      }
+    }, fmtNum(r.newQtyKurang))])
+  }), React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      gap: 10
+    }
+  }, React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setStockRecheckModal(null)
+  }, "Batal"), React.createElement(Btn, {
+    onClick: applyStockRecheck
   }, "✓ Terapkan Perubahan Ini")))), React.createElement(Modal, {
     open: modal,
     title: editingNomor ? "Revisi Item Requisition" : "Buat Item Requisition",
@@ -15724,7 +15936,10 @@ function PurchaseOrderModule({
     const availableIdx = ir.items.map((_, i) => i).filter(i => !ir.items[i].sudahDiPO);
     if (availableIdx.length === 0) return alert("Semua item di IR ini sudah masuk ke PO lain.");
     setIrPick(ir);
-    setIrPickedIdx(availableIdx);
+    // Items start UNCHECKED — Purchasing picks exactly which parts actually belong on this PO
+    // instead of everything being pre-selected and needing to be manually unchecked (which was
+    // easy to miss and could pull unrelated items onto a supplier's PO by accident).
+    setIrPickedIdx([]);
     setIrPickTarget(target);
   };
   const toggleIrPickedIdx = i => setIrPickedIdx(arr => arr.includes(i) ? arr.filter(x => x !== i) : [...arr, i]);
@@ -15949,7 +16164,17 @@ function PurchaseOrderModule({
       paidDate: today(),
       tanggalBayar: payDate,
       jumlahDibayar: totalDibayar,
-      metodeBayar: payMethod
+      metodeBayar: payMethod,
+      // Each partial payment is now recorded as its own dated entry (e.g. 25% on one date, 10% on
+      // another) instead of only keeping the running cumulative total — jumlahDibayar/tanggalBayar
+      // above still hold the latest snapshot for existing displays, but this array is the actual
+      // payment-by-payment history.
+      riwayatPembayaran: [...(payMethodModal.riwayatPembayaran || []), {
+        tanggal: payDate,
+        jumlah: jumlahInput,
+        metode: payMethod,
+        dicatatOleh: session.nama
+      }]
     };
     setPo(arr);
     logAudit(store, session, {
@@ -16698,7 +16923,17 @@ function PurchaseOrderModule({
       fontWeight: 700,
       fontSize: 16
     }
-  }, "Total: ", detail.currency, " ", fmtNum(detail.total)), /*#__PURE__*/React.createElement("div", {
+  }, "Total: ", detail.currency, " ", fmtNum(detail.total)), (detail.riwayatPembayaran || []).length > 0 && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 6px",
+      fontSize: 13,
+      fontWeight: 600,
+      color: theme.muted
+    }
+  }, "Riwayat Pembayaran"), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Tanggal", "Jumlah", "Metode", "Dicatat Oleh"],
+    rows: detail.riwayatPembayaran.map(r => [r.tanggal, fmtMoney(r.jumlah, detail.currency), r.metode || "-", r.dicatatOleh])
+  })), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "flex-end"
@@ -17170,6 +17405,9 @@ function PurchaseOrderModule({
     }
   }, "Pilih item mana yang mau dibuat menjadi PO ini (item yang sudah di-PO tidak bisa dipilih lagi):"), irPick.items.map((it, i) => {
     const consumed = !!it.sudahDiPO;
+    // Show Item Description alongside part number/name so Purchasing can tell parts apart when
+    // choosing which items actually belong on this PO (looked up the same way confirmIrPick does).
+    const partDesc = store.parts.find(p => p.partNumber === it.partNumber)?.description || "";
     return /*#__PURE__*/React.createElement("label", {
       key: i,
       style: {
@@ -17190,7 +17428,13 @@ function PurchaseOrderModule({
       checked: irPickedIdx.includes(i),
       disabled: consumed,
       onChange: () => toggleIrPickedIdx(i)
-    }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("strong", null, it.partNumber), " — ", it.partName, " — Qty ", fmtNum(it.qtyKurang)), consumed && /*#__PURE__*/React.createElement("span", {
+    }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("strong", null, it.partNumber), " — ", it.partName, " — Qty ", fmtNum(it.qtyKurang)), partDesc && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        color: theme.muted,
+        marginTop: 2
+      }
+    }, partDesc), consumed && /*#__PURE__*/React.createElement("span", {
       style: {
         marginLeft: 8
       }
@@ -17783,7 +18027,8 @@ function GoodsReceiptModule({
     setEditRequests,
     itemRequisitions,
     goodsReceiptReceivers,
-    setGoodsReceiptReceivers
+    setGoodsReceiptReceivers,
+    salesOrders
   } = store;
   const [receiverSettingsOpen, setReceiverSettingsOpen] = useState(false);
   const [detailGR, setDetailGR] = useState(null);
@@ -17835,9 +18080,16 @@ function GoodsReceiptModule({
     const irNomors = po?.irNomors || [];
     const relatedIRs = (itemRequisitions || []).filter(ir => irNomors.includes(ir.nomor));
     const soNomors = [...new Set(relatedIRs.map(ir => ir.soNomor).filter(Boolean))];
+    // Nama Customer / No. PO Customer come from the SO(s) at the end of this receipt's IR chain
+    // (PO -> IR -> SO -> customerNama/noPoClient) — same chain grRefInfo already walks for IR/SO.
+    const relatedSOs = (salesOrders || []).filter(so => soNomors.includes(so.nomor));
+    const customerNamas = [...new Set(relatedSOs.map(so => so.customerNama).filter(Boolean))];
+    const noPoCustomers = [...new Set(relatedSOs.map(so => so.noPoClient).filter(Boolean))];
     return {
       irNomors,
-      soNomors
+      soNomors,
+      customerNamas,
+      noPoCustomers
     };
   };
   const isJhon = ["storage", "logistic", "inventory", "workshop_manager", "purchasing", "purchasing_overseas"].includes(session.role);
@@ -17991,6 +18243,10 @@ function GoodsReceiptModule({
   // hardcoded pair. Falls back to the original workshop1/inventory1 default if the setting is empty.
   const activeReceiverUsernames = (goodsReceiptReceivers && goodsReceiptReceivers.length ? goodsReceiptReceivers : ["workshop1", "inventory1"]);
   const mekanikList = employees.filter(e => activeReceiverUsernames.includes(e.username)).map(e => e.nama);
+  // "Head Office (Sementara)" receipts are handled by Purchasing (Erni/purchase2, Karno/purchase3)
+  // before Workshop confirms the final receipt — the GM-configurable receiver list above is really
+  // meant for the Workshop/final-receipt case, so Head Office gets its own Purchasing-only list.
+  const headOfficeReceiverList = employees.filter(e => e.role === "purchasing" || e.role === "purchasing_overseas").map(e => e.nama);
   const remainingQty = (po, partNumber, qty) => qty - (po.receivedMap?.[partNumber] || 0);
   const approvedPOs = [...poLocal.filter(p => (p.status === "Disetujui GM - Kirim ke Supplier" || p.status === "Diterima Sebagian") && p.items.some(it => remainingQty(p, it.partNumber, it.qty) > 0)).map(p => ({
     ...p,
@@ -18328,19 +18584,22 @@ function GoodsReceiptModule({
     storageKey: "gr_list",
     defaultOpen: true
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. Penerimaan", "Tanggal", "No. PO", "Diterima Oleh", "Jumlah Item", "Status"],
-    rows: goodsReceiptsFiltered.map(g => [/*#__PURE__*/React.createElement("span", {
-      style: {
-        color: theme.accentLight,
-        fontWeight: 600,
-        cursor: "pointer"
-      },
-      onClick: () => setDetailGR(g)
-    }, g.nomor), g.tanggal, g.poNomor, g.diterimaOleh, /*#__PURE__*/React.createElement(Badge, {
-      color: theme.green
-    }, g.items.length, " part"), /*#__PURE__*/React.createElement(Badge, {
-      color: g.statusFinal?.startsWith("Final") ? theme.green : theme.yellow
-    }, g.statusFinal)]),
+    headers: ["No. Penerimaan", "Tanggal", "No. PO", "Nama Customer", "No. PO Customer", "Diterima Oleh", "Jumlah Item", "Status"],
+    rows: goodsReceiptsFiltered.map(g => {
+      const ref = grRefInfo(g);
+      return [/*#__PURE__*/React.createElement("span", {
+        style: {
+          color: theme.accentLight,
+          fontWeight: 600,
+          cursor: "pointer"
+        },
+        onClick: () => setDetailGR(g)
+      }, g.nomor), g.tanggal, g.poNomor, ref.customerNamas.join(", ") || "-", ref.noPoCustomers.join(", ") || "-", g.diterimaOleh, /*#__PURE__*/React.createElement(Badge, {
+        color: theme.green
+      }, g.items.length, " part"), /*#__PURE__*/React.createElement(Badge, {
+        color: g.statusFinal?.startsWith("Final") ? theme.green : theme.yellow
+      }, g.statusFinal)];
+    }),
     onEdit: isJhon || isOwnerLike ? i => openEditGR(goodsReceiptsFiltered[i]) : undefined,
     onDelete: isOwnerLike ? i => {
       const g = goodsReceiptsFiltered[i];
@@ -18403,7 +18662,9 @@ function GoodsReceiptModule({
   }, (() => {
     const {
       irNomors,
-      soNomors
+      soNomors,
+      customerNamas,
+      noPoCustomers
     } = grRefInfo(detailGR);
     return /*#__PURE__*/React.createElement("div", {
       style: {
@@ -18455,6 +18716,32 @@ function GoodsReceiptModule({
         color: theme.text
       }
     }, soNomors.length ? soNomors.join(", ") : "-")), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        justifyContent: "space-between"
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.muted
+      }
+    }, "Nama Customer"), /*#__PURE__*/React.createElement("strong", {
+      style: {
+        color: theme.text
+      }
+    }, customerNamas.length ? customerNamas.join(", ") : "-")), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        justifyContent: "space-between"
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.muted
+      }
+    }, "No. PO Customer"), /*#__PURE__*/React.createElement("strong", {
+      style: {
+        color: theme.text
+      }
+    }, noPoCustomers.length ? noPoCustomers.join(", ") : "-")), /*#__PURE__*/React.createElement("div", {
       style: {
         display: "flex",
         justifyContent: "space-between"
@@ -18808,7 +19095,10 @@ function GoodsReceiptModule({
     value: form.diterimaOleh,
     onChange: v => setForm({
       ...form,
-      diterimaOleh: v
+      diterimaOleh: v,
+      // Purchasing (Head Office) and Workshop/inventory (final receipt) draw from different name
+      // lists — clear the previous selection so it can't silently carry over a name from the wrong list.
+      mekanikNama: ""
     }),
     options: [{
       value: "Head Office",
@@ -18818,13 +19108,13 @@ function GoodsReceiptModule({
       label: "Workshop (Final/Langsung)"
     }]
   }), !namaManual ? /*#__PURE__*/React.createElement(Select, {
-    label: "Nama Penerima (Mekanik/Purchasing)",
+    label: form.diterimaOleh === "Head Office" ? "Nama Penerima (Purchasing)" : "Nama Penerima (Mekanik/Purchasing)",
     value: form.mekanikNama,
     onChange: v => setForm({
       ...form,
       mekanikNama: v
     }),
-    options: mekanikList.map(n => ({
+    options: (form.diterimaOleh === "Head Office" ? headOfficeReceiverList : mekanikList).map(n => ({
       value: n,
       label: n
     }))
@@ -19679,7 +19969,8 @@ function DeliveryOrderModule({
     setMaintenanceSchedules,
     editRequests,
     setEditRequests,
-    parts
+    parts,
+    setParts
   } = store;
   const isStefanus = session.role === "logistic";
   const isEpy = session.role === "sales_admin";
@@ -19807,6 +20098,24 @@ function DeliveryOrderModule({
     if (!itemsToShip.length) return alert("Pilih minimal satu barang untuk dikirim, dengan qty lebih dari 0.");
     const overQty = itemsToShip.find(it => Number(it.shipQty) > it.sisa);
     if (overQty) return alert(`Qty kirim untuk "${overQty.nama}" melebihi sisa yang belum dikirim (${overQty.sisa}).`);
+    // Bug fix: a DO could previously be created even when the actual Master Part stock was 0 (or
+    // less than the shipped qty) — this only ever checked the SO's own ordered-vs-already-shipped
+    // quantity (soItemsRemaining above), never real inventory. Block the whole DO (no auto-cap) if
+    // any item's real stock can't cover the requested qty — partial shipment of the OTHER items is
+    // still fine, but this specific DO attempt must be corrected manually first, per confirmed
+    // business rule (no silent auto-reduction).
+    const stockShortfall = itemsToShip.map(it => {
+      const part = parts.find(p => p.partNumber === it.partNumber);
+      const stok = part && part.stok !== null && part.stok !== undefined ? part.stok : null;
+      return {
+        ...it,
+        stok,
+        kurang: stok !== null ? Number(it.shipQty) - stok : 0
+      };
+    }).filter(it => it.stok !== null && it.kurang > 0);
+    if (stockShortfall.length > 0) {
+      return alert("Stock tidak mencukupi untuk item berikut — DO tidak bisa dibuat:\n" + stockShortfall.map(it => `- ${it.nama} (${it.partNumber}): mau kirim ${it.shipQty}, stock tersedia hanya ${it.stok}`).join("\n") + "\n\nKurangi qty pengiriman secara manual sesuai stock yang tersedia, lalu coba lagi.");
+    }
     const shippedKeys = new Set(itemsToShip.map(it => it.partNumber));
     const isPartial = itemsToShip.some(it => Number(it.shipQty) < it.sisa) || shippedKeys.size < (so?.items || []).length;
     let doNomor;
@@ -19826,6 +20135,23 @@ function DeliveryOrderModule({
         createdBy: session.nama,
         status: "Dikirim"
       }];
+    });
+    // Bug fix: shipping a DO never actually deducted the shipped qty from Master Part stock — stock
+    // only ever moved up (Penerimaan Barang, Parts Use returns), never down, so "stock" drifted away
+    // from reality the more DOs went out (e.g. SEAL KIT PN 255050503 staying inflated after
+    // shipments). Deduct now that the shortfall check above guarantees enough real stock exists.
+    setParts(prev => {
+      const newParts = [...prev];
+      itemsToShip.forEach(it => {
+        const pidx = newParts.findIndex(p => p.partNumber === it.partNumber);
+        if (pidx >= 0 && newParts[pidx].stok !== null && newParts[pidx].stok !== undefined) {
+          newParts[pidx] = {
+            ...newParts[pidx],
+            stok: Math.max(0, (newParts[pidx].stok || 0) - Number(it.shipQty))
+          };
+        }
+      });
+      return newParts;
     });
     // Auto-generate maintenance schedule for Unit-type SO — only for the units actually shipped in this DO
     if (so?.tipe === "Unit") {
@@ -20378,9 +20704,16 @@ function InvoiceModule({
     const diskonPersen = editInv.diskonPersen != null ? editInv.diskonPersen : null;
     const diskonNominal = diskonPersen != null ? newSubtotal * diskonPersen / 100 : (editInv.diskon || 0);
     const afterDiskon = Math.max(0, newSubtotal - diskonNominal);
-    const pajakNominal = afterDiskon * 0.11;
+    // Bug fix: same double-PPN issue as invoice creation (see save() above). For termin-based
+    // invoices the single synthetic item's amount is already tax-inclusive (a slice of so.total),
+    // so re-applying 11% here double-taxed edits to those invoices too. Extract the already-embedded
+    // PPN using the source SO's own tax ratio instead.
+    const isTermin = !!editInv.terminLabel;
+    const editSo = isTermin ? salesOrders.find(s => s.nomor === editInv.soNomor) : null;
+    const editSoPajakRatio = isTermin && editSo && editSo.total ? (editSo.pajak || 0) / editSo.total : 0;
+    const pajakNominal = isTermin ? afterDiskon * editSoPajakRatio : afterDiskon * 0.11;
     const uangMukaNominal = editInv.uangMuka || 0;
-    const newTotal = Math.max(0, afterDiskon + pajakNominal - uangMukaNominal);
+    const newTotal = isTermin ? Math.max(0, afterDiskon - uangMukaNominal) : Math.max(0, afterDiskon + pajakNominal - uangMukaNominal);
     submitEditRequest(store, session, {
       module: "Invoice",
       action: "Edit",
@@ -20591,9 +20924,18 @@ function InvoiceModule({
     const diskonInputValue = parseFloat(form.diskonValue) || 0;
     const diskonNominal = form.diskonMode === "persen" ? baseSubtotal * diskonInputValue / 100 : diskonInputValue;
     const afterDiskon = Math.max(0, baseSubtotal - diskonNominal);
-    const pajakNominal = afterDiskon * 0.11;
+    // Bug fix (UQ-024 → SO-055 case): for termin-based invoices (DP/Pelunasan), `terminAmount` is a
+    // proportional slice of `so.total` — and `so.total` ALREADY includes PPN (Quotation and SO both
+    // compute total = subtotal − diskon + PPN). Blindly adding another 11% here double-taxed every
+    // termin invoice, inflating the total. Non-termin (per-item) invoices don't have this problem:
+    // `so.items[].harga` are pre-tax unit prices (PPN is never baked into individual items), so
+    // applying 11% on `chosenItems`' subtotal is the correct — and only — point of taxation.
+    const soPajakRatio = hasTop && so && so.total ? (so.pajak || 0) / so.total : 0;
+    const pajakNominal = hasTop ? afterDiskon * soPajakRatio : afterDiskon * 0.11;
     const uangMukaNominal = parseFloat(form.uangMuka) || 0;
-    const invoiceTotal = Math.max(0, afterDiskon + pajakNominal - uangMukaNominal);
+    // For termin invoices `afterDiskon` is already tax-inclusive, so the PPN portion must not be
+    // added again — only Uang Muka is deducted from it to reach the total.
+    const invoiceTotal = hasTop ? Math.max(0, afterDiskon - uangMukaNominal) : Math.max(0, afterDiskon + pajakNominal - uangMukaNominal);
     setInvoices(prev => [...prev, {
       nomor: newNomor(prev),
       tanggal: today(),
@@ -21941,14 +22283,19 @@ function InvoiceModule({
       padding: "8px 10px"
     }
   }, (() => {
-    const previewSubtotal = form.terminLabel ? computeTerminAmount(selectedSO, form.terminLabel) : selectedSO?.total || 0;
+    // Mirrors save()'s hasTop branch: for termin invoices the base is already tax-inclusive (a
+    // slice of so.total), so PPN must be extracted from it rather than added again — see the bug
+    // fix note in save() for the full explanation (UQ-024 → SO-055 double-PPN case).
+    const previewHasTop = !!(selectedSO && (selectedSO.termOfPayment || []).length > 0);
+    const previewSubtotal = previewHasTop ? computeTerminAmount(selectedSO, form.terminLabel) : selectedSO?.total || 0;
     const previewDiskonValue = parseFloat(form.diskonValue) || 0;
     const previewDiskon = form.diskonMode === "persen" ? previewSubtotal * previewDiskonValue / 100 : previewDiskonValue;
     const previewAfterDiskon = Math.max(0, previewSubtotal - previewDiskon);
-    const previewPajak = previewAfterDiskon * 0.11;
+    const previewSoPajakRatio = previewHasTop && selectedSO && selectedSO.total ? (selectedSO.pajak || 0) / selectedSO.total : 0;
+    const previewPajak = previewHasTop ? previewAfterDiskon * previewSoPajakRatio : previewAfterDiskon * 0.11;
     const previewUangMuka = parseFloat(form.uangMuka) || 0;
-    const previewTotal = Math.max(0, previewAfterDiskon + previewPajak - previewUangMuka);
-    return `Subtotal ${fmt(previewSubtotal)} − Discount ${fmt(previewDiskon)} + PPN 11% ${fmt(previewPajak)} − Uang Muka ${fmt(previewUangMuka)} = Total ${fmt(previewTotal)}`;
+    const previewTotal = previewHasTop ? Math.max(0, previewAfterDiskon - previewUangMuka) : Math.max(0, previewAfterDiskon + previewPajak - previewUangMuka);
+    return `Subtotal ${fmt(previewSubtotal)} − Discount ${fmt(previewDiskon)} + PPN ${fmt(previewPajak)} − Uang Muka ${fmt(previewUangMuka)} = Total ${fmt(previewTotal)}`;
   })())), /*#__PURE__*/React.createElement(Input, {
     label: "No. Faktur Pajak (Opsional)",
     value: form.noFakturPajak,
@@ -23765,10 +24112,24 @@ function TicketingModule({
     setNamaPicker("");
   };
   const addNamaBebas = () => {
-    if (!namaBebas.trim() || form.mekanikNamaList.includes(namaBebas.trim())) return;
+    const raw = namaBebas.trim();
+    if (!raw) return;
+    // Free-text participant entry (for non-mekanik/non-roster names, e.g. drivers, guests) has
+    // historically let the same real person end up recorded under multiple name variants across
+    // tickets purely from inconsistent manual typing (e.g. "Nurbani" here vs the canonical
+    // "Nurbani Ismail" in Manajemen User/employees) — confusing when cross-referencing documents.
+    // Snap to the registered employee's full canonical name whenever the typed text exactly
+    // matches, or is a leading-word prefix of, an existing employee's nama (case-insensitive);
+    // otherwise keep the free text as-is for genuinely external/non-employee names.
+    const match = employees.find(e => e.nama && (e.nama.toLowerCase() === raw.toLowerCase() || e.nama.toLowerCase().startsWith(raw.toLowerCase() + " ")));
+    const finalNama = match ? match.nama : raw;
+    if (form.mekanikNamaList.includes(finalNama)) {
+      setNamaBebas("");
+      return;
+    }
     setForm(f => ({
       ...f,
-      mekanikNamaList: [...f.mekanikNamaList, namaBebas.trim()]
+      mekanikNamaList: [...f.mekanikNamaList, finalNama]
     }));
     setNamaBebas("");
   };
@@ -25138,6 +25499,144 @@ function AuditTrailModule({
       }
     }, l.detail)]),
     emptyMsg: "Belum ada riwayat approval"
+  })));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// MUTASI BARANG — read-only, fully automatic stock movement ledger. Never entered manually; every
+// row is derived live from Penerimaan Barang (Masuk) and Delivery Order (Keluar), so it can never
+// drift out of sync with those source documents. Searchable by Part Number, Part Name, Description,
+// Nama Customer, No. PO Customer, and No. PO ke Supplier per request.
+// ════════════════════════════════════════════════════════════════════════════
+function MutasiBarangModule({
+  store,
+  session
+}) {
+  const {
+    goodsReceipts,
+    deliveryOrders,
+    salesOrders,
+    itemRequisitions,
+    poLocal,
+    poOverseas,
+    parts
+  } = store;
+  const [search, setSearch] = useState("");
+  const [filterTipe, setFilterTipe] = useState("Semua");
+  // Same PO -> IR -> SO chain Goods Receipt's own grRefInfo walks — reimplemented locally since
+  // this is a separate top-level module and doesn't share GoodsReceiptModule's local scope.
+  const grCustomerInfo = g => {
+    const poList = g.poType === "Lokal" ? poLocal : poOverseas;
+    const po = (poList || []).find(p => p.nomor === g.poNomor);
+    const irNomors = po?.irNomors || [];
+    const relatedIRs = (itemRequisitions || []).filter(ir => irNomors.includes(ir.nomor));
+    const soNomors = [...new Set(relatedIRs.map(ir => ir.soNomor).filter(Boolean))];
+    const relatedSOs = (salesOrders || []).filter(so => soNomors.includes(so.nomor));
+    return {
+      customerNama: [...new Set(relatedSOs.map(so => so.customerNama).filter(Boolean))].join(", ") || "-",
+      noPoCustomer: [...new Set(relatedSOs.map(so => so.noPoClient).filter(Boolean))].join(", ") || "-"
+    };
+  };
+  const masukRows = (goodsReceipts || []).flatMap(g => {
+    const info = grCustomerInfo(g);
+    return (g.items || []).map(it => {
+      const part = parts.find(p => p.partNumber === it.partNumber);
+      return {
+        tanggal: g.tanggal,
+        tipe: "Masuk",
+        partNumber: it.partNumber,
+        partName: it.partName || part?.partName || "-",
+        description: part?.description || "-",
+        qty: it.qtyDiterima || 0,
+        refDoc: g.nomor,
+        noPoSupplier: g.poNomor || "-",
+        customerNama: info.customerNama,
+        noPoCustomer: info.noPoCustomer
+      };
+    });
+  });
+  const keluarRows = (deliveryOrders || []).flatMap(d => {
+    const so = (salesOrders || []).find(s => s.nomor === d.soNomor);
+    return (d.items || []).map(it => {
+      const part = parts.find(p => p.partNumber === it.partNumber);
+      return {
+        tanggal: d.tanggal,
+        tipe: "Keluar",
+        partNumber: it.partNumber,
+        partName: it.nama || part?.partName || "-",
+        description: part?.description || "-",
+        qty: it.qty || 0,
+        refDoc: d.nomor,
+        noPoSupplier: "-",
+        customerNama: d.customerNama || "-",
+        noPoCustomer: so?.noPoClient || "-"
+      };
+    });
+  });
+  const allRows = [...masukRows, ...keluarRows].sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  const filtered = allRows.filter(r => {
+    if (filterTipe !== "Semua" && r.tipe !== filterTipe) return false;
+    if (!search.trim()) return true;
+    const q = search.trim().toLowerCase();
+    return [r.partNumber, r.partName, r.description, r.customerNama, r.noPoCustomer, r.noPoSupplier].filter(Boolean).some(x => String(x).toLowerCase().includes(q));
+  });
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 20
+    }
+  }, /*#__PURE__*/React.createElement("h2", {
+    style: {
+      margin: 0,
+      color: theme.text
+    }
+  }, "Mutasi Barang"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Ledger pergerakan stock otomatis — Masuk dari Penerimaan Barang, Keluar dari Delivery Order. Read-only, tidak ada input manual."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: filterTipe,
+    onChange: setFilterTipe,
+    options: [{
+      value: "Semua",
+      label: "Semua"
+    }, {
+      value: "Masuk",
+      label: "Masuk"
+    }, {
+      value: "Keluar",
+      label: "Keluar"
+    }],
+    style: {
+      width: 160
+    }
+  }), /*#__PURE__*/React.createElement(Input, {
+    value: search,
+    onChange: setSearch,
+    placeholder: "Cari Part Number / Nama / Description / Customer / No. PO...",
+    style: {
+      width: 340
+    }
+  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
+    headers: ["Tanggal", "Tipe", "Part Number", "Part Name", "Description", "Qty", "No. Dokumen", "No. PO ke Supplier", "Nama Customer", "No. PO Customer"],
+    rows: filtered.map(r => [r.tanggal, /*#__PURE__*/React.createElement(Badge, {
+      color: r.tipe === "Masuk" ? theme.green : theme.red
+    }, r.tipe), r.partNumber, r.partName, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.muted,
+        fontSize: 12
+      }
+    }, r.description), fmtNum(r.qty), r.refDoc, r.noPoSupplier, r.customerNama, r.noPoCustomer]),
+    emptyMsg: "Belum ada mutasi barang"
   })));
 }
 
@@ -30988,6 +31487,30 @@ function App() {
   const [session, setSession] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [active, setActive] = useState("dashboard");
+  // Cross-module handoff: Unit Quotation's "Buat SO" button sets this to the quotation nomor and
+  // switches to the Sales Order module, which picks it up in a useEffect and auto-opens its
+  // existing item-pick flow, then clears this back to null.
+  const [pendingSOQuot, setPendingSOQuot] = useState(null);
+  // Sidebar group collapse state (Max/Min per group) — persisted per-browser so a user's chosen
+  // layout survives reloads. Keyed by SIDEBAR_GROUPS[].key; a group is expanded unless explicitly
+  // marked true here.
+  const [collapsedGroups, setCollapsedGroups] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("erp_sidebar_collapsed") || "{}");
+    } catch (e) {
+      return {};
+    }
+  });
+  const toggleGroupCollapsed = key => setCollapsedGroups(prev => {
+    const next = {
+      ...prev,
+      [key]: !prev[key]
+    };
+    try {
+      localStorage.setItem("erp_sidebar_collapsed", JSON.stringify(next));
+    } catch (e) {}
+    return next;
+  });
   const isMobileDevice = () => typeof window !== "undefined" && window.innerWidth < 768;
   const [isMobile, setIsMobile] = useState(isMobileDevice());
   const [sidebarOpen, setSidebarOpen] = useState(!isMobileDevice());
@@ -31077,6 +31600,129 @@ function App() {
   // Notification badge counts — shows pending items relevant to the logged-in user's role.
   // Logic lives in top-level computeBadgeCount() so Dashboard can reuse the same counts.
   const getBadgeCount = moduleId => computeBadgeCount(store, session, moduleId);
+  // Sidebar restructure: one shared button renderer (used for both standalone items and items
+  // inside a group) so the two render paths below can't visually drift apart, plus a group-header
+  // renderer that aggregates its children's badge counts when collapsed.
+  const renderMenuButton = (m, indent) => {
+    const count = getBadgeCount(m.id);
+    return /*#__PURE__*/React.createElement("button", {
+      key: m.id,
+      onClick: () => selectMenu(m.id),
+      style: {
+        width: "100%",
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        padding: `11px 16px 11px ${16 + indent}px`,
+        border: "none",
+        background: activeMenu?.id === m.id ? theme.accent + "22" : "none",
+        borderLeft: activeMenu?.id === m.id ? `3px solid ${theme.accent}` : "3px solid transparent",
+        color: activeMenu?.id === m.id ? theme.accent : theme.muted,
+        cursor: "pointer",
+        fontFamily: "inherit",
+        fontSize: 13,
+        fontWeight: activeMenu?.id === m.id ? 600 : 400,
+        textAlign: "left",
+        whiteSpace: "nowrap"
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 17,
+        flexShrink: 0,
+        position: "relative"
+      }
+    }, m.icon, count > 0 && /*#__PURE__*/React.createElement("span", {
+      style: {
+        position: "absolute",
+        top: -4,
+        right: -8,
+        background: theme.red,
+        color: "#fff",
+        borderRadius: 10,
+        fontSize: 9,
+        fontWeight: 700,
+        padding: "1px 4px",
+        minWidth: 14,
+        textAlign: "center",
+        lineHeight: 1.4
+      }
+    }, count)), (sidebarOpen || isMobile) && /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1
+      }
+    }, m.label), (sidebarOpen || isMobile) && count > 0 && /*#__PURE__*/React.createElement("span", {
+      style: {
+        background: theme.red,
+        color: "#fff",
+        borderRadius: 10,
+        fontSize: 10,
+        fontWeight: 700,
+        padding: "1px 6px"
+      }
+    }, count));
+  };
+  const renderGroupHeader = (group, items, collapsed) => {
+    const aggCount = items.reduce((s, m) => s + getBadgeCount(m.id), 0);
+    return /*#__PURE__*/React.createElement("button", {
+      key: "group-" + group.key,
+      onClick: () => toggleGroupCollapsed(group.key),
+      style: {
+        width: "100%",
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "9px 16px",
+        marginTop: 6,
+        border: "none",
+        background: "none",
+        cursor: "pointer",
+        fontFamily: "inherit",
+        fontSize: 11,
+        fontWeight: 700,
+        letterSpacing: 0.6,
+        color: theme.muted,
+        textAlign: "left",
+        whiteSpace: "nowrap"
+      }
+    }, (sidebarOpen || isMobile) && /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1
+      }
+    }, group.label), (sidebarOpen || isMobile) && aggCount > 0 && collapsed && /*#__PURE__*/React.createElement("span", {
+      style: {
+        background: theme.red,
+        color: "#fff",
+        borderRadius: 10,
+        fontSize: 10,
+        fontWeight: 700,
+        padding: "1px 6px"
+      }
+    }, aggCount), (sidebarOpen || isMobile) && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 10,
+        opacity: 0.6
+      }
+    }, collapsed ? "▸" : "▾"));
+  };
+  // Builds the full sidebar nav content: standalone items in the requested order, then each named
+  // group (skipped entirely if the user has none of its modules), with a Max/Min collapse toggle
+  // per group. Any allowed module that isn't placed in SIDEBAR_STANDALONE_IDS or any SIDEBAR_GROUPS
+  // entry (shouldn't happen, but keeps a future module from silently vanishing) is appended at the
+  // end as a standalone item.
+  const renderSidebarNav = () => {
+    const placedIds = new Set([...SIDEBAR_STANDALONE_IDS, ...SIDEBAR_GROUPS.flatMap(g => g.moduleIds)]);
+    const standaloneItems = SIDEBAR_STANDALONE_IDS.map(id => allowedMenus.find(m => m.id === id)).filter(Boolean);
+    const leftoverItems = allowedMenus.filter(m => !placedIds.has(m.id));
+    const nodes = [...standaloneItems, ...leftoverItems].map(m => renderMenuButton(m, 0));
+    SIDEBAR_GROUPS.forEach(group => {
+      const items = group.moduleIds.map(id => allowedMenus.find(m => m.id === id)).filter(Boolean);
+      if (items.length === 0) return;
+      const collapsed = !!collapsedGroups[group.key];
+      nodes.push(renderGroupHeader(group, items, collapsed));
+      if (!collapsed) items.forEach(m => nodes.push(renderMenuButton(m, 14)));
+    });
+    return nodes;
+  };
   const renderPage = () => {
     switch (activeMenu?.id) {
       case "dashboard":
@@ -31122,7 +31768,11 @@ function App() {
       case "quotation_unit":
         return /*#__PURE__*/React.createElement(QuotationUnit, {
           store: store,
-          session: session
+          session: session,
+          onRequestSO: nomor => {
+            setPendingSOQuot(nomor);
+            setActive("sales_order");
+          }
         });
       case "quotation_ps":
         return /*#__PURE__*/React.createElement(QuotationPS, {
@@ -31132,7 +31782,9 @@ function App() {
       case "sales_order":
         return /*#__PURE__*/React.createElement(SalesOrderModule, {
           store: store,
-          session: session
+          session: session,
+          pendingSOQuot: pendingSOQuot,
+          clearPendingSOQuot: () => setPendingSOQuot(null)
         });
       case "item_requisition":
         return /*#__PURE__*/React.createElement(ItemRequisitionModule, {
@@ -31163,6 +31815,11 @@ function App() {
         });
       case "delivery_order":
         return /*#__PURE__*/React.createElement(DeliveryOrderModule, {
+          store: store,
+          session: session
+        });
+      case "mutasi_barang":
+        return /*#__PURE__*/React.createElement(MutasiBarangModule, {
           store: store,
           session: session
         });
@@ -31365,64 +32022,7 @@ function App() {
       overflowY: "auto",
       padding: "8px 0"
     }
-  }, allowedMenus.map(m => {
-    const count = getBadgeCount(m.id);
-    return /*#__PURE__*/React.createElement("button", {
-      key: m.id,
-      onClick: () => selectMenu(m.id),
-      style: {
-        width: "100%",
-        display: "flex",
-        alignItems: "center",
-        gap: 12,
-        padding: "11px 16px",
-        border: "none",
-        background: activeMenu?.id === m.id ? theme.accent + "22" : "none",
-        borderLeft: activeMenu?.id === m.id ? `3px solid ${theme.accent}` : "3px solid transparent",
-        color: activeMenu?.id === m.id ? theme.accent : theme.muted,
-        cursor: "pointer",
-        fontFamily: "inherit",
-        fontSize: 13,
-        fontWeight: activeMenu?.id === m.id ? 600 : 400,
-        textAlign: "left",
-        whiteSpace: "nowrap"
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: {
-        fontSize: 17,
-        flexShrink: 0,
-        position: "relative"
-      }
-    }, m.icon, count > 0 && /*#__PURE__*/React.createElement("span", {
-      style: {
-        position: "absolute",
-        top: -4,
-        right: -8,
-        background: theme.red,
-        color: "#fff",
-        borderRadius: 10,
-        fontSize: 9,
-        fontWeight: 700,
-        padding: "1px 4px",
-        minWidth: 14,
-        textAlign: "center",
-        lineHeight: 1.4
-      }
-    }, count)), (sidebarOpen || isMobile) && /*#__PURE__*/React.createElement("span", {
-      style: {
-        flex: 1
-      }
-    }, m.label), (sidebarOpen || isMobile) && count > 0 && /*#__PURE__*/React.createElement("span", {
-      style: {
-        background: theme.red,
-        color: "#fff",
-        borderRadius: 10,
-        fontSize: 10,
-        fontWeight: 700,
-        padding: "1px 6px"
-      }
-    }, count));
-  })), /*#__PURE__*/React.createElement("div", {
+  }, renderSidebarNav()), /*#__PURE__*/React.createElement("div", {
     style: {
       borderTop: `1px solid ${theme.border}`,
       padding: "12px 14px"
