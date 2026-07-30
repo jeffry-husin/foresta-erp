@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-30.2";
+const APP_BUILD = "2026-07-30.3";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -1086,6 +1086,10 @@ const ALL_MODULES = [{
   icon: "💵",
   label: "Payroll (Akses Terbatas)"
 }, {
+  id: "uang_makan",
+  icon: "🍚",
+  label: "Uang Makan"
+}, {
   id: "uang_dinas",
   icon: "🧳",
   label: "Uang Dinas"
@@ -1142,7 +1146,7 @@ const SIDEBAR_GROUPS = [{
 }, {
   key: "hr",
   label: "HR",
-  moduleIds: ["attendance", "cuti", "payroll"]
+  moduleIds: ["attendance", "cuti", "uang_makan", "payroll"]
 }, {
   key: "kpi",
   label: "KPI",
@@ -1164,6 +1168,11 @@ function getAllowedModules(role, customModules) {
   }
   // Form Cuti (leave request) is available to every user regardless of role or custom module config.
   if (!list.includes("cuti")) list = [...list, "cuti"];
+  // Uang Makan (own monthly meal allowance report) is available to every user regardless of role
+  // or custom module config, same rationale as Form Cuti — it's a self-service view of their own
+  // data (Owner/GM/HRD Payroll additionally see everyone's, enforced inside UangMakanModule itself
+  // via hasPayrollAccess).
+  if (!list.includes("uang_makan")) list = [...list, "uang_makan"];
   // Master Part must be visible/searchable for every user (many modules reference parts by
   // number/name), regardless of role default or an individually-configured custom module list.
   if (!list.includes("master_part")) list = [...list, "master_part"];
@@ -2223,7 +2232,15 @@ function logAudit(store, session, {
     actorNama: session.nama,
     actorRole: session.role
   };
-  store.setAuditLog([...store.auditLog, entry]);
+  // Functional-update form (see usePersisted's concurrent-write note) — logAudit is called from
+  // every module in the app, so a plain-value setAuditLog([...store.auditLog, entry]) here meant
+  // ANY two audit entries written within the same few-hundred-ms window (extremely common — e.g.
+  // two people approving different documents around the same time) would silently drop one of
+  // them, since the second writer's stale local audit log snapshot would overwrite the first
+  // writer's entry entirely. Root-caused after a leave request ("Ajukan Cuti") audit trail for one
+  // user was found completely missing (not even a stale copy) while another user's concurrent
+  // Form Cuti actions logged fine — re-fetching immediately before appending closes that window.
+  store.setAuditLog(prev => [...prev, entry]);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -14671,6 +14688,7 @@ function ItemRequisitionModule({
     items: []
   });
   const [soPickerSearch, setSoPickerSearch] = useState("");
+  const [soDetailModal, setSoDetailModal] = useState(null); // SO nomor whose shortfall detail is open
   const closeManualModal = () => {
     setManualModal(false);
     setEditingNomor(null);
@@ -14828,6 +14846,26 @@ function ItemRequisitionModule({
         catatan: m.fromUnits && m.fromUnits.size > 0 ? `Dari BOM Unit: ${[...m.fromUnits].join(", ")}` : ""
       };
     }).filter(x => x.qtyKurang > 0); // only short items still not covered by stock or an existing IR
+  };
+  // Live stock lookup for an item already saved on an existing IR. An IR's it.stokTersedia/
+  // it.qtyKurang are a SNAPSHOT taken when the IR was created — if Master Part stock is corrected
+  // afterwards (recount, revision, etc.), that snapshot goes stale and — left unfixed — keeps
+  // showing/using the old numbers forever (root cause of the IR-042/PN 109853 backlog: stock was
+  // revised to 1 but the IR still said 0). Rather than relying on someone remembering to click
+  // "Recheck Stock" and apply it, every place that DISPLAYS or ACTS ON stock-kurang (Detail modal,
+  // print, and — most importantly — the qty pulled into a Purchase Order) now calls this to get the
+  // live number computed from current Master Part stock, so it can never go stale again. The stored
+  // stokTersedia/qtyKurang fields are left untouched as a record of what was originally requested;
+  // "Recheck Stock" below still exists for anyone who wants to formally persist+audit-log the
+  // correction onto the IR record itself.
+  const liveIrItemStock = it => {
+    const p = parts.find(x => x.partNumber === it.partNumber);
+    const stokTersedia = p ? (p.stok ?? 0) : (it.stokTersedia || 0);
+    const qtyKurang = Math.max(0, (it.qtyButuh || 0) - stokTersedia);
+    return {
+      stokTersedia,
+      qtyKurang
+    };
   };
   // "+ Buat IR dari SO" picker: an active SO should stop appearing here once it's already been
   // fully turned into Item Requisition(s) — i.e. every shortfall item is covered either by current
@@ -15187,7 +15225,7 @@ function ItemRequisitionModule({
       setManualForm(blankManualForm);
       setManualModal(true);
     }
-  }, "+ Request Part (Non-SO)"))), React.createElement("div", {
+  }, "+ Tambahan Part untuk SO / Non-SO"))), React.createElement("div", {
     style: {
       fontSize: 12,
       color: theme.muted,
@@ -15247,10 +15285,79 @@ function ItemRequisitionModule({
       fontSize: 12,
       color: theme.muted
     }
-  }, so.customerNama, " · ", so.tanggal)), React.createElement(Btn, {
+  }, so.customerNama, " · ", so.tanggal)), React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => setSoDetailModal(so.nomor)
+  }, "🔍 Lihat Detail"), React.createElement(Btn, {
     size: "sm",
     onClick: () => loadFromSO(so.nomor)
-  }, "Buat IR")))))), React.createElement(Card, null, React.createElement(Input, {
+  }, "Buat IR"))))))), React.createElement(Modal, {
+    open: !!soDetailModal,
+    title: `Detail Kekurangan Stock — ${soDetailModal || ""}`,
+    onClose: () => setSoDetailModal(null),
+    width: 560
+  }, soDetailModal && (() => {
+    const so = salesOrders.find(s => s.nomor === soDetailModal);
+    const shortItems = checkStockForSO(soDetailModal);
+    return React.createElement("div", {
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 14
+      }
+    }, React.createElement("div", {
+      style: {
+        fontSize: 13,
+        color: theme.muted
+      }
+    }, "Client: ", React.createElement("strong", {
+      style: {
+        color: theme.text
+      }
+    }, so?.customerNama || "-"), " · Tanggal SO: ", so?.tanggal || "-"), React.createElement(Table, {
+      headers: ["Part Number", "Part Name", "Qty Dibutuhkan", "Stok Tersedia", "Qty Kurang", "Catatan"],
+      rows: shortItems.map(it => [it.partNumber, it.partName, fmtNum(it.qtyButuh), fmtNum(it.stokTersedia), React.createElement("span", {
+        style: {
+          color: theme.red,
+          fontWeight: 600
+        }
+      }, fmtNum(it.qtyKurang)), React.createElement("span", {
+        style: catatanStyle
+      }, it.catatan || "-")]),
+      emptyMsg: "Tidak ada kekurangan stock untuk SO ini."
+    }), React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 10,
+        justifyContent: "flex-end"
+      }
+    }, React.createElement(Btn, {
+      variant: "ghost",
+      onClick: () => setSoDetailModal(null)
+    }, "Tutup"), canManage && React.createElement(Btn, {
+      variant: "ghost",
+      onClick: () => {
+        setSoDetailModal(null);
+        setEditingNomor(null);
+        setManualForm({
+          ...blankManualForm,
+          soNomor: soDetailModal
+        });
+        setManualModal(true);
+      }
+    }, "+ Tambah Part Pelengkap untuk SO Ini"), React.createElement(Btn, {
+      onClick: () => {
+        setSoDetailModal(null);
+        loadFromSO(soDetailModal);
+      }
+    }, "Buat IR dari SO Ini")));
+  })()), React.createElement(Card, null, React.createElement(Input, {
     placeholder: "Cari no. requisition / no. SO / nama client...",
     value: irSearch,
     onChange: setIrSearch,
@@ -15258,7 +15365,10 @@ function ItemRequisitionModule({
       marginBottom: 12
     }
   })), (() => {
-    const irHeaders = ["No. Requisition", "Tanggal", "No. SO", "No. PO Client", "Nama Client", "Jumlah Item Kurang", "Status", "IR Completed"];
+    const irHeaders = ["No. Requisition", "Tanggal", "No. SO", "No. PO Client", "Nama Client", "Jumlah Item Kurang", "Catatan", "Status", "IR Completed"];
+    // Catatan is per-item, not per-IR — join every non-empty item catatan into one cell so it's
+    // visible directly in the list without opening Detail (per user request).
+    const irRowCatatan = r => (r.items || []).map(it => it.catatan).filter(Boolean).join("; ") || "-";
     const buildIRRow = r => [React.createElement("span", {
       style: {
         color: theme.accentLight,
@@ -15272,7 +15382,9 @@ function ItemRequisitionModule({
       color: theme.blue
     }, "Non-SO / Kandidat BOM") : r.soNomor, (salesOrders.find(s => s.nomor === r.soNomor)?.noPoClient) || "-", r.soCustomerNama || "-", React.createElement(Badge, {
       color: theme.purple
-    }, r.items.length, " part"), React.createElement(Badge, {
+    }, r.items.length, " part"), React.createElement("span", {
+      style: catatanStyle
+    }, irRowCatatan(r)), React.createElement(Badge, {
       color: r.status === "Menunggu Purchasing" ? theme.yellow : theme.green
     }, r.status), r.status === "Sudah di-PO" ? React.createElement(Badge, {
       color: theme.green
@@ -15397,6 +15509,7 @@ function ItemRequisitionModule({
     headers: ["Part Number", "Part Name", "Qty Dibutuhkan", "Stok Tersedia", "Qty Kurang", "Catatan", "Status Diterima"],
     rows: detail.items.map(it => {
       const diterima = irRefInfo(detail).receivedByPart[it.partNumber] || 0;
+      const live = liveIrItemStock(it);
       const statusBadge = diterima <= 0 ? React.createElement(Badge, {
         color: theme.red
       }, "Belum Diterima") : diterima < (Number(it.qtyButuh) || 0) ? React.createElement(Badge, {
@@ -15404,12 +15517,12 @@ function ItemRequisitionModule({
       }, `Sebagian (${fmtNum(diterima)}/${fmtNum(it.qtyButuh)})`) : React.createElement(Badge, {
         color: theme.green
       }, `✓ Lengkap (${fmtNum(diterima)})`);
-      return [it.partNumber, it.partName, fmtNum(it.qtyButuh), fmtNum(it.stokTersedia), React.createElement("span", {
+      return [it.partNumber, it.partName, fmtNum(it.qtyButuh), fmtNum(live.stokTersedia), React.createElement("span", {
         style: {
           color: theme.red,
           fontWeight: 600
         }
-      }, fmtNum(it.qtyKurang)), React.createElement("span", {
+      }, fmtNum(live.qtyKurang)), React.createElement("span", {
         style: catatanStyle
       }, it.catatan || "-"), statusBadge];
     })
@@ -15429,7 +15542,10 @@ function ItemRequisitionModule({
       partyName: detail.soNomor || "-",
       partyExtra: detail.soCustomerNama || "",
       itemHeaders: ["Part Number", "Part Name", "Qty Dibutuhkan", "Stok Tersedia", "Qty Kurang", "Catatan"],
-      items: detail.items.map(it => [it.partNumber, it.partName, fmtNum(it.qtyButuh), fmtNum(it.stokTersedia), fmtNum(it.qtyKurang), it.catatan || "-"]),
+      items: detail.items.map(it => {
+        const live = liveIrItemStock(it);
+        return [it.partNumber, it.partName, fmtNum(it.qtyButuh), fmtNum(live.stokTersedia), fmtNum(live.qtyKurang), it.catatan || "-"];
+      }),
       showPrice: false,
       extraInfoRows: [["Status", detail.status], ["No. Sales Order", detail.soNomor || "-"], ["No. PO Client", (salesOrders.find(s => s.nomor === detail.soNomor)?.noPoClient) || "-"], ["No. Purchase Order", irRefInfo(detail).poNomors.join(", ") || "-"]],
       dibuatOleh: {
@@ -15612,7 +15728,7 @@ function ItemRequisitionModule({
     onClick: save
   }, editingNomor ? "Simpan Revisi" : "Buat Requisition")))), React.createElement(Modal, {
     open: manualModal,
-    title: editingNomor ? "Revisi Request Part (Non-SO)" : "Request Part Baru (Non-SO)",
+    title: editingNomor ? "Revisi Tambahan Part untuk SO / Non-SO" : "Tambahan Part untuk SO / Non-SO",
     onClose: closeManualModal,
     width: 480
   }, React.createElement("div", {
@@ -15627,7 +15743,7 @@ function ItemRequisitionModule({
       fontSize: 12,
       color: theme.muted
     }
-  }, "Untuk part yang tidak ada di item list Sales Order. Sales Order bersifat opsional — dapat dikaitkan dengan project yang berjalan, atau dibiarkan kosong sebagai kandidat update BOM umum."), React.createElement(Input, {
+  }, "Untuk part yang tidak ada di item list Sales Order — biasanya tambahan/pelengkap untuk melengkapi sebuah SO yang sedang berjalan. Pilih Sales Order terkait di bawah supaya part ini tercatat sebagai bagian dari SO tersebut (disarankan); hanya dibiarkan kosong jika benar-benar tidak terkait SO manapun (kandidat update BOM umum)."), React.createElement(Input, {
     label: "Tanggal",
     type: "date",
     value: manualForm.tanggal,
@@ -15636,7 +15752,7 @@ function ItemRequisitionModule({
       tanggal: v
     })
   }), React.createElement(Select, {
-    label: "Sales Order Terkait (opsional)",
+    label: "Sales Order Terkait — disarankan diisi",
     value: manualForm.soNomor,
     onChange: v => setManualForm({
       ...manualForm,
@@ -15644,7 +15760,7 @@ function ItemRequisitionModule({
     }),
     options: [{
       value: "",
-      label: "— Tidak terkait SO —"
+      label: "— Tidak terkait SO manapun —"
     }, ...activeSO.map(so => ({
       value: so.nomor,
       label: `${so.nomor} — ${so.customerNama}`
@@ -15952,11 +16068,15 @@ function PurchaseOrderModule({
     const newItems = chosen.map(i => {
       const it = irPick.items[i];
       const part = store.parts.find(p => p.partNumber === it.partNumber);
+      // Use LIVE qty kurang (recomputed against current Master Part stock), not the frozen
+      // it.qtyKurang snapshot from when the IR was created — otherwise a stock correction made
+      // after the IR but before it's turned into a PO would silently order the wrong quantity.
+      const liveQtyKurang = Math.max(0, (it.qtyButuh || 0) - (part ? (part.stok ?? 0) : (it.stokTersedia || 0)));
       return {
         partNumber: it.partNumber,
         partName: it.partName,
         partDescription: part?.description || "",
-        qty: it.qtyKurang,
+        qty: liveQtyKurang,
         harga: "",
         fromIR: irPick.nomor,
         fromIRIdx: i
@@ -17408,6 +17528,10 @@ function PurchaseOrderModule({
     // Show Item Description alongside part number/name so Purchasing can tell parts apart when
     // choosing which items actually belong on this PO (looked up the same way confirmIrPick does).
     const partDesc = store.parts.find(p => p.partNumber === it.partNumber)?.description || "";
+    // Live qty kurang vs current Master Part stock — see confirmIrPick's note; this is the qty
+    // Purchasing sees BEFORE picking, so it needs to already be live too, not just at confirm time.
+    const livePart = store.parts.find(p => p.partNumber === it.partNumber);
+    const liveQtyKurang = Math.max(0, (it.qtyButuh || 0) - (livePart ? (livePart.stok ?? 0) : (it.stokTersedia || 0)));
     return /*#__PURE__*/React.createElement("label", {
       key: i,
       style: {
@@ -17428,7 +17552,14 @@ function PurchaseOrderModule({
       checked: irPickedIdx.includes(i),
       disabled: consumed,
       onChange: () => toggleIrPickedIdx(i)
-    }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("strong", null, it.partNumber), " — ", it.partName, " — Qty ", fmtNum(it.qtyKurang)), partDesc && /*#__PURE__*/React.createElement("div", {
+    }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("strong", null, it.partNumber), " — ", it.partName, " — Qty ", fmtNum(liveQtyKurang), liveQtyKurang <= 0 && liveQtyKurang !== it.qtyKurang && /*#__PURE__*/React.createElement("span", {
+      style: {
+        marginLeft: 6,
+        fontSize: 11,
+        color: theme.green,
+        fontWeight: 600
+      }
+    }, "(stock sudah cukup — direvisi sejak IR dibuat)")), partDesc && /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: 11,
         color: theme.muted,
@@ -23866,6 +23997,117 @@ function UangDinasModule({
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// UANG MAKAN — standalone HR report. Previously only visible buried inside Payroll's preview
+// columns/Rekap Absensi print output (per request, moved out into its own module under HR).
+// Same source-of-truth formula as Payroll: Uang Makan Harian = total riilHari (from saved Rekap
+// Absensi for that employee/month) x uangHarianRate (Master Karyawan). Read-only report — no
+// editing here, since the underlying numbers (riilHari, rate) are owned by Rekap Absensi /
+// Manajemen User respectively; this just surfaces the derived monthly Uang Makan clearly.
+// ════════════════════════════════════════════════════════════════════════════
+function UangMakanModule({
+  store,
+  session
+}) {
+  const {
+    employees,
+    rekapAbsensi
+  } = store;
+  const isAdmin = hasPayrollAccess(session.role);
+  const [bulanFilter, setBulanFilter] = useState(today().slice(0, 7));
+  const myEmp = (employees || []).find(e => e.username === session.username);
+  const calcUangMakan = (empNama, bulanStr) => {
+    const rows = (rekapAbsensi || []).filter(r => r.periodeMulai && r.periodeMulai.slice(0, 7) === bulanStr && String(r.namaKaryawan || "").toLowerCase().trim() === String(empNama || "").toLowerCase().trim());
+    const rate = (employees.find(e => e.nama === empNama) || {}).uangHarianRate || 0;
+    const totalRiil = rows.reduce((s, r) => s + (Number(r.riilHari) || 0), 0);
+    return {
+      totalRiil,
+      rate,
+      uangMakan: totalRiil * rate,
+      periodeCount: rows.length
+    };
+  };
+  const visibleEmployees = isAdmin ? (employees || []).slice().sort((a, b) => (a.nama || "").localeCompare(b.nama || "")) : myEmp ? [myEmp] : [];
+  const rows = visibleEmployees.map(e => ({
+    emp: e,
+    ...calcUangMakan(e.nama, bulanFilter)
+  }));
+  const totalSemua = rows.reduce((s, r) => s + r.uangMakan, 0);
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      flexWrap: "wrap",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("h2", {
+    style: {
+      margin: 0,
+      color: theme.text
+    }
+  }, "Uang Makan"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      alignItems: "center"
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    type: "month",
+    value: bulanFilter,
+    onChange: setBulanFilter,
+    style: {
+      width: 180
+    }
+  }), isAdmin && /*#__PURE__*/React.createElement(ExportExcelBtn, {
+    onClick: () => exportToExcel(rows.map(r => ({
+      nama: r.emp.nama,
+      jabatan: r.emp.jabatan || "-",
+      bulan: bulanFilter,
+      totalRiilHari: r.totalRiil,
+      rateHarian: r.rate,
+      uangMakan: r.uangMakan
+    })), "Uang_Makan.xlsx", "Uang Makan")
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      background: theme.surface,
+      padding: "8px 14px",
+      borderRadius: 8,
+      border: `1px dashed ${theme.border}`
+    }
+  }, "ℹ️ Uang Makan Harian = total hari riil hadir (Rekap Absensi bulan terpilih) × rate Uang Makan Harian per karyawan (Master Karyawan). Laporan ini read-only — untuk koreksi hari hadir, edit di Rekap Absensi; untuk koreksi rate, edit di Manajemen User."), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
+    headers: ["Nama", "Jabatan", "Total Hari Riil", "Rate Harian", "Uang Makan"],
+    rows: rows.map(r => [r.emp.nama, r.emp.jabatan || "-", fmtNum(r.totalRiil), fmt(r.rate), /*#__PURE__*/React.createElement("strong", {
+      style: {
+        color: theme.green
+      }
+    }, fmt(r.uangMakan))]),
+    emptyMsg: isAdmin ? "Belum ada data Rekap Absensi untuk bulan ini." : "Belum ada data Rekap Absensi kamu untuk bulan ini — pastikan Rekap Absensi bulan ini sudah disimpan HRD."
+  }), isAdmin && rows.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      marginTop: 12,
+      fontSize: 15,
+      fontWeight: 700,
+      color: theme.text
+    }
+  }, "Total Semua Karyawan: ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.green,
+      marginLeft: 6
+    }
+  }, fmt(totalSemua)))));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // SALES REPORT — performance per Sales Manager
 // ════════════════════════════════════════════════════════════════════════════
 function SalesReportModule({
@@ -28449,15 +28691,24 @@ function FormCutiModule({
   const staffDispute = req => {
     const reason = prompt("Alasan tidak sesuai / bantahan:");
     if (!reason) return;
-    const arr = [...leaveRequests];
-    arr[leaveRequests.indexOf(req)] = {
-      ...req,
-      status: "Ditolak",
-      rejectReason: `Dibantah oleh staff: ${reason}`,
-      approvedBy: session.nama,
-      approvedTanggal: today()
-    };
-    setLeaveRequests(arr);
+    // Functional-update form — re-fetches the current leaveRequests from the server right before
+    // writing, instead of trusting this browser's possibly-stale local copy. A plain-array write
+    // here (setLeaveRequests(arr) built from local state) would silently discard any leave request
+    // someone else submitted after this page last loaded — root-caused as the exact cause of a
+    // leave request vanishing right after being submitted (see CT-035 investigation).
+    setLeaveRequests(prev => {
+      const idx = prev.findIndex(r => r.id === req.id);
+      if (idx < 0) return prev;
+      const arr = [...prev];
+      arr[idx] = {
+        ...arr[idx],
+        status: "Ditolak",
+        rejectReason: `Dibantah oleh staff: ${reason}`,
+        approvedBy: session.nama,
+        approvedTanggal: today()
+      };
+      return arr;
+    });
     logAudit(store, session, {
       module: "Form Cuti",
       docNomor: req.id,
@@ -28504,15 +28755,23 @@ function FormCutiModule({
       status: jenisCuti
     }));
     if (newAttendance.length > 0 || overwriteDates.size > 0) setAttendance([...updatedAttendance, ...newAttendance]);
-    const arr = [...leaveRequests];
-    arr[leaveRequests.indexOf(req)] = {
-      ...merged,
-      jenisCuti,
-      status: "Disetujui",
-      approvedBy: session.nama,
-      approvedTanggal: today()
-    };
-    setLeaveRequests(arr);
+    // Functional-update form — see staffDispute's note above; this is the call site that most
+    // directly explains a leave request vanishing right after submission (HRD approving one
+    // request from a stale local copy that predates someone else's just-submitted request).
+    setLeaveRequests(prev => {
+      const idx = prev.findIndex(r => r.id === req.id);
+      if (idx < 0) return prev;
+      const arr = [...prev];
+      arr[idx] = {
+        ...arr[idx],
+        ...merged,
+        jenisCuti,
+        status: "Disetujui",
+        approvedBy: session.nama,
+        approvedTanggal: today()
+      };
+      return arr;
+    });
     logAudit(store, session, {
       module: "Form Cuti",
       docNomor: merged.id,
@@ -28560,14 +28819,20 @@ function FormCutiModule({
       status: newJenis
     }));
     setAttendance([...nextAttendance, ...newRows]);
-    const arr = [...leaveRequests];
-    arr[leaveRequests.indexOf(req)] = {
-      ...merged,
-      jenisCuti: newJenis,
-      revisedBy: session.nama,
-      revisedTanggal: today()
-    };
-    setLeaveRequests(arr);
+    // Functional-update form — see staffDispute's note above.
+    setLeaveRequests(prev => {
+      const idx = prev.findIndex(r => r.id === req.id);
+      if (idx < 0) return prev;
+      const arr = [...prev];
+      arr[idx] = {
+        ...arr[idx],
+        ...merged,
+        jenisCuti: newJenis,
+        revisedBy: session.nama,
+        revisedTanggal: today()
+      };
+      return arr;
+    });
     logAudit(store, session, {
       module: "Form Cuti",
       docNomor: merged.id,
@@ -28579,29 +28844,43 @@ function FormCutiModule({
   };
   const saveDetailEdits = () => {
     if (!detail || !detailForm) return;
-    const idx = leaveRequests.indexOf(detail);
-    if (idx < 0) return;
-    const arr = [...leaveRequests];
-    arr[idx] = {
-      ...detail,
+    const patch = {
       ...detailForm,
       jumlahHari: countDays(detailForm.dariTanggal, detailForm.sampaiTanggal)
     };
-    setLeaveRequests(arr);
-    setDetail(arr[idx]);
+    // Functional-update form — see staffDispute's note above.
+    setLeaveRequests(prev => {
+      const idx = prev.findIndex(r => r.id === detail.id);
+      if (idx < 0) return prev;
+      const arr = [...prev];
+      arr[idx] = {
+        ...arr[idx],
+        ...patch
+      };
+      return arr;
+    });
+    setDetail({
+      ...detail,
+      ...patch
+    });
   };
   const reject = req => {
     const reason = prompt("Alasan penolakan cuti:");
     if (!reason) return;
-    const arr = [...leaveRequests];
-    arr[leaveRequests.indexOf(req)] = {
-      ...req,
-      status: "Ditolak",
-      rejectReason: reason,
-      approvedBy: session.nama,
-      approvedTanggal: today()
-    };
-    setLeaveRequests(arr);
+    // Functional-update form — see staffDispute's note above.
+    setLeaveRequests(prev => {
+      const idx = prev.findIndex(r => r.id === req.id);
+      if (idx < 0) return prev;
+      const arr = [...prev];
+      arr[idx] = {
+        ...arr[idx],
+        status: "Ditolak",
+        rejectReason: reason,
+        approvedBy: session.nama,
+        approvedTanggal: today()
+      };
+      return arr;
+    });
     logAudit(store, session, {
       module: "Form Cuti",
       docNomor: req.id,
@@ -28612,7 +28891,8 @@ function FormCutiModule({
   };
   const cancelRequest = req => {
     if (!confirm("Batalkan pengajuan cuti ini?")) return;
-    setLeaveRequests(leaveRequests.filter(r => r.id !== req.id));
+    // Functional-update form — see staffDispute's note above.
+    setLeaveRequests(prev => prev.filter(r => r.id !== req.id));
   };
   const statusColor = {
     "Menunggu Approval HRD": theme.yellow,
@@ -31962,6 +32242,11 @@ function App() {
           session: session
         }) : /*#__PURE__*/React.createElement(AccessDenied, {
           label: "Uang Dinas"
+        });
+      case "uang_makan":
+        return /*#__PURE__*/React.createElement(UangMakanModule, {
+          store: store,
+          session: session
         });
       default:
         return /*#__PURE__*/React.createElement(ComingSoon, {
