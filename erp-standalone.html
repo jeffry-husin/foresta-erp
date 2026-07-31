@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-31.2";
+const APP_BUILD = "2026-07-31.3";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -27621,6 +27621,16 @@ function DashboardAbsensiPanel({
     if (rasio >= 0.85) return theme.yellow;
     return theme.red;
   };
+  // Konversi jam Terlambat -> hari ekivalen: 8 jam Terlambat = 1 hari Absen, per aturan HRD.
+  // Ditampilkan sebagai kolom terpisah di samping Terlambat(j) supaya efek akumulasi keterlambatan
+  // terhadap "hari absen ekivalen" langsung terlihat tanpa perlu hitung manual.
+  const absenTerlambatHari = jam => {
+    const hari = (Number(jam) || 0) / 8;
+    if (hari <= 0) return "-";
+    return /*#__PURE__*/React.createElement(Badge, {
+      color: hari >= 1 ? theme.red : theme.yellow
+    }, hari.toFixed(2), " hari");
+  };
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -27680,10 +27690,10 @@ function DashboardAbsensiPanel({
       overflowX: "auto"
     }
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["Nama", "Normal", "Riil", "Dinas Luar", "Absen", "Terlambat(j)", "Lembur(j)", "Cuti", "Cuti Khusus", "Sisa Cuti", "Ijin", "Sakit", "Performa"],
+    headers: ["Nama", "Normal", "Riil", "Dinas Luar", "Absen", "Terlambat(j)", "Absen Terlambat", "Lembur(j)", "Cuti", "Cuti Khusus", "Sisa Cuti", "Ijin", "Sakit", "Performa"],
     rows: ytdStaffList.map(s => {
       const sisa = sisaCutiForNama(s.nama);
-      return [s.nama, s.normal, s.riil, s.dinasLuar, s.absen, s.terlambat.toFixed(1), s.lembur.toFixed(1), s.cuti, s.cutiKhusus, sisa === null ? "-" : /*#__PURE__*/React.createElement(Badge, {
+      return [s.nama, s.normal, s.riil, s.dinasLuar, s.absen, s.terlambat.toFixed(1), absenTerlambatHari(s.terlambat), s.lembur.toFixed(1), s.cuti, s.cutiKhusus, sisa === null ? "-" : /*#__PURE__*/React.createElement(Badge, {
         color: sisa > 3 ? theme.green : sisa > 0 ? theme.yellow : theme.red
       }, sisa, " hari"), s.ijin, s.sakit, /*#__PURE__*/React.createElement(Badge, {
         color: performaColor(s)
@@ -27755,10 +27765,10 @@ function DashboardAbsensiPanel({
       overflowX: "auto"
     }
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["Nama", "Normal", "Riil", "Dinas Luar", "Absen", "Terlambat(j)", "Lembur(j)", "Sisa Lembur(j)", "Cuti", "Cuti Khusus", "Sisa Cuti", "Ijin", "Sakit", "Performa", "Aksi"],
+    headers: ["Nama", "Normal", "Riil", "Dinas Luar", "Absen", "Terlambat(j)", "Absen Terlambat", "Lembur(j)", "Sisa Lembur(j)", "Cuti", "Cuti Khusus", "Sisa Cuti", "Ijin", "Sakit", "Performa", "Aksi"],
     rows: staffList.map(s => {
       const sisa = sisaCutiForNama(s.nama);
-      return [s.nama, s.normal, s.riil, s.dinasLuar, s.absen, s.terlambat.toFixed(1), s.lembur.toFixed(1), sisaLemburFor(s.nama).toFixed(1), s.cuti, s.cutiKhusus, sisa === null ? "-" : /*#__PURE__*/React.createElement(Badge, {
+      return [s.nama, s.normal, s.riil, s.dinasLuar, s.absen, s.terlambat.toFixed(1), absenTerlambatHari(s.terlambat), s.lembur.toFixed(1), sisaLemburFor(s.nama).toFixed(1), s.cuti, s.cutiKhusus, sisa === null ? "-" : /*#__PURE__*/React.createElement(Badge, {
         color: sisa > 3 ? theme.green : sisa > 0 ? theme.yellow : theme.red
       }, sisa, " hari"), s.ijin, s.sakit, /*#__PURE__*/React.createElement(Badge, {
         color: performaColor(s)
