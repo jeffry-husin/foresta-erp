@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-30.3";
+const APP_BUILD = "2026-07-31.2";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -22565,6 +22565,16 @@ function PayrollModule({
     onClick: ev => ev.stopPropagation(),
     style: inlineCellStyle
   });
+  // Status Karyawan (Tetap/Harian) toggle, inline in the Master Gaji & BPJS table — click to
+  // flip. Karyawan "Harian" (belum jadi karyawan tetap) digaji per hari kerja riil (Rekap Absensi
+  // × Rate Harian Kerja di kolom sebelah), bukan gaji pokok bulanan tetap.
+  const toggleStatusKaryawan = (emp, ev) => {
+    ev.stopPropagation();
+    setEmployees(prev => (prev || []).map(e => e.username === emp.username ? {
+      ...e,
+      statusKaryawan: (e.statusKaryawan || "Tetap") === "Harian" ? "Tetap" : "Harian"
+    } : e));
+  };
   const [empForm, setEmpForm] = useState({
     nama: "",
     jabatan: "",
@@ -22658,7 +22668,7 @@ function PayrollModule({
     return new Set(Object.keys(counts).filter(k => counts[k] > 1));
   })();
   const hasDuplicateNama = activeEmployees.some(e => duplicateNamaSet.has(String(e.nama || "").toLowerCase().trim()));
-  const PAYROLL_TEMPLATE_HEADERS = ["username", "nama", "jabatan", "gajiPokok", "tunjangan", "bpjsTkPct", "bpjsKesPct", "uangHarianRate", "uangDinasRate", "uangKerajinanRate", "ktp", "kk", "alamat", "noTelp"];
+  const PAYROLL_TEMPLATE_HEADERS = ["username", "nama", "jabatan", "statusKaryawan", "gajiPokok", "tunjangan", "bpjsTkPct", "bpjsKesPct", "uangHarianRate", "uangHarianKerjaRate", "uangDinasRate", "uangKerajinanRate", "ktp", "kk", "alamat", "noTelp"];
   const KARYAWAN_TEMPLATE_HEADERS = ["username", "nama", "jabatan", "alamat", "noTelp", "ktp", "kk", "statusKaryawan"];
   const FAMILY_TEMPLATE_HEADERS = ["username", "namaAnggota", "hubungan", "tanggalLahir", "ktp", "alamat", "noTelp"];
   const handleImportRows = rows => {
@@ -22682,8 +22692,10 @@ function PayrollModule({
             bpjsTkPct: r.bpjsTkPct !== undefined && r.bpjsTkPct !== "" ? parseFloat(r.bpjsTkPct) : arr[idx].bpjsTkPct ?? 2,
             bpjsKesPct: r.bpjsKesPct !== undefined && r.bpjsKesPct !== "" ? parseFloat(r.bpjsKesPct) : arr[idx].bpjsKesPct ?? 1,
             uangHarianRate: r.uangHarianRate !== undefined && r.uangHarianRate !== "" ? parseFloat(r.uangHarianRate) : arr[idx].uangHarianRate ?? 50000,
+            uangHarianKerjaRate: r.uangHarianKerjaRate !== undefined && r.uangHarianKerjaRate !== "" ? parseFloat(r.uangHarianKerjaRate) : arr[idx].uangHarianKerjaRate ?? 0,
             uangDinasRate: r.uangDinasRate !== undefined && r.uangDinasRate !== "" ? parseFloat(r.uangDinasRate) : arr[idx].uangDinasRate ?? 100000,
             uangKerajinanRate: r.uangKerajinanRate !== undefined && r.uangKerajinanRate !== "" ? parseFloat(r.uangKerajinanRate) : arr[idx].uangKerajinanRate ?? 0,
+            statusKaryawan: r.statusKaryawan || arr[idx].statusKaryawan || "Tetap",
             ktp: r.ktp || arr[idx].ktp || "",
             kk: r.kk || arr[idx].kk || "",
             alamat: r.alamat || arr[idx].alamat || "",
@@ -23135,11 +23147,13 @@ function PayrollModule({
       nama: e.nama,
       jabatan: e.jabatan || "-",
       role: ROLE_DEFS[e.role]?.label || e.role,
+      statusKaryawan: e.statusKaryawan || "Tetap",
       gajiPokok: e.gajiPokok || 0,
       tunjangan: e.tunjangan || 0,
       bpjsTkPct: e.bpjsTkPct || 0,
       bpjsKesPct: e.bpjsKesPct || 0,
       uangHarianRate: e.uangHarianRate || 0,
+      uangHarianKerjaRate: e.uangHarianKerjaRate || 0,
       uangDinasRate: e.uangDinasRate || 0,
       uangKerajinanRate: e.uangKerajinanRate || 0
     })), "Gaji_BPJS.xlsx", "Gaji & BPJS"),
@@ -23156,11 +23170,19 @@ function PayrollModule({
       color: theme.muted,
       margin: "0 0 10px"
     }
-  }, "Gaji Pokok, Tunjangan, BPJS %, Uang Harian, Uang Dinas, dan Uang Kerajinan bisa langsung diedit di tabel (klik sel, ubah, klik di luar untuk simpan). Untuk data lengkap (KTP/KK/Keluarga/dll) gunakan tombol Edit."), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Nama", "Jabatan", "Role", "Gaji Pokok", "Tunjangan", "BPJS TK %", "BPJS Kes %", "Uang Harian (Rp)", "Uang Dinas (Rp/hari)", "Uang Kerajinan (Rp/mgg)"],
+  }, "Gaji Pokok, Tunjangan, BPJS %, Uang Harian, Uang Dinas, dan Uang Kerajinan bisa langsung diedit di tabel (klik sel, ubah, klik di luar untuk simpan). Klik badge Status untuk toggle Tetap/Harian. Kolom \"Rate Harian Kerja\" dipakai untuk menghitung gaji karyawan yang masih berstatus Harian (belum jadi karyawan tetap) = Riil Hari (Rekap Absensi) × Rate Harian Kerja. Untuk data lengkap (KTP/KK/Keluarga/dll) gunakan tombol Edit."), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Nama", "Jabatan", "Role", "Status", "Gaji Pokok", "Tunjangan", "BPJS TK %", "BPJS Kes %", "Uang Harian (Rp)", "Rate Harian Kerja (Rp/hari)", "Uang Dinas (Rp/hari)", "Uang Kerajinan (Rp/mgg)"],
     rows: empFiltered.map(e => [e.nama, e.jabatan || "-", /*#__PURE__*/React.createElement(Badge, {
       color: ROLE_DEFS[e.role]?.color
-    }, ROLE_DEFS[e.role]?.label), inlineNumCell(e, "gajiPokok"), inlineNumCell(e, "tunjangan"), inlineNumCell(e, "bpjsTkPct"), inlineNumCell(e, "bpjsKesPct"), inlineNumCell(e, "uangHarianRate"), inlineNumCell(e, "uangDinasRate"), inlineNumCell(e, "uangKerajinanRate")]),
+    }, ROLE_DEFS[e.role]?.label), /*#__PURE__*/React.createElement("span", {
+      onClick: ev => toggleStatusKaryawan(e, ev),
+      style: {
+        cursor: "pointer"
+      },
+      title: "Klik untuk toggle Tetap/Harian"
+    }, /*#__PURE__*/React.createElement(Badge, {
+      color: (e.statusKaryawan || "Tetap") === "Harian" ? theme.yellow : theme.green
+    }, e.statusKaryawan || "Tetap")), inlineNumCell(e, "gajiPokok"), inlineNumCell(e, "tunjangan"), inlineNumCell(e, "bpjsTkPct"), inlineNumCell(e, "bpjsKesPct"), inlineNumCell(e, "uangHarianRate"), inlineNumCell(e, "uangHarianKerjaRate"), inlineNumCell(e, "uangDinasRate"), inlineNumCell(e, "uangKerajinanRate")]),
     onEdit: i => {
       const emp = empFiltered[i];
       setEditEmp(emp);
@@ -24013,25 +24035,87 @@ function UangMakanModule({
     rekapAbsensi
   } = store;
   const isAdmin = hasPayrollAccess(session.role);
-  const [bulanFilter, setBulanFilter] = useState(today().slice(0, 7));
   const myEmp = (employees || []).find(e => e.username === session.username);
-  const calcUangMakan = (empNama, bulanStr) => {
-    const rows = (rekapAbsensi || []).filter(r => r.periodeMulai && r.periodeMulai.slice(0, 7) === bulanStr && String(r.namaKaryawan || "").toLowerCase().trim() === String(empNama || "").toLowerCase().trim());
-    const rate = (employees.find(e => e.nama === empNama) || {}).uangHarianRate || 0;
-    const totalRiil = rows.reduce((s, r) => s + (Number(r.riilHari) || 0), 0);
+  // Rekap Absensi is saved PER PERIODE (weekly, Kamis–Rabu per HRD's fingerprint-machine cutoff —
+  // same convention already used by Laporan Mingguan Mekanik in Rekap Absensi). Uang Makan is a
+  // per-periode thing too (dibayar per minggu berjalan), so filter/report by periode, not by
+  // calendar month — matches how HRD actually saves the data and lets Uang Makan be requested /
+  // printed per minggu as requested.
+  const periodeOptions = Array.from(new Set((rekapAbsensi || []).map(r => `${r.periodeMulai}|${r.periodeSelesai}`))).sort().reverse().map(key => {
+    const [mulai, selesai] = key.split("|");
     return {
-      totalRiil,
+      value: key,
+      label: `${mulai} s/d ${selesai}`
+    };
+  });
+  const [periodeFilter, setPeriodeFilter] = useState(periodeOptions[0]?.value || "");
+  const [selMulai, selSelesai] = periodeFilter ? periodeFilter.split("|") : ["", ""];
+  // Uang Kerajinan bonus: hadir penuh (tidak ada hari Absen) sepanjang periode Kamis–Rabu berjalan
+  // ini — sama persis dengan rule & pendekatan (absenHari === 0) yang sudah dipakai di Laporan
+  // Mingguan Mekanik, supaya tidak ada 2 logika berbeda untuk hal yang sama. Bedanya di sini
+  // berlaku untuk SEMUA karyawan yang punya uangKerajinanRate > 0, bukan cuma roster mekanik.
+  const calcUangMakanPeriode = (empNama, mulai, selesai) => {
+    const rekap = (rekapAbsensi || []).find(r => r.periodeMulai === mulai && r.periodeSelesai === selesai && String(r.namaKaryawan || "").toLowerCase().trim() === String(empNama || "").toLowerCase().trim());
+    const emp = employees.find(e => e.nama === empNama) || {};
+    const rate = emp.uangHarianRate || 0;
+    const riilHari = rekap ? Number(rekap.riilHari) || 0 : 0;
+    const absenHari = rekap ? Number(rekap.absenHari) || 0 : 0;
+    const kerajinanRate = Number(emp.uangKerajinanRate) || 0;
+    const kerajinanEligible = kerajinanRate > 0 && !!rekap && absenHari === 0;
+    const uangKerajinan = kerajinanEligible ? kerajinanRate : 0;
+    const uangMakan = riilHari * rate;
+    return {
+      ada: !!rekap,
+      riilHari,
+      absenHari,
       rate,
-      uangMakan: totalRiil * rate,
-      periodeCount: rows.length
+      uangMakan,
+      kerajinanEligible,
+      uangKerajinan,
+      total: uangMakan + uangKerajinan
     };
   };
   const visibleEmployees = isAdmin ? (employees || []).slice().sort((a, b) => (a.nama || "").localeCompare(b.nama || "")) : myEmp ? [myEmp] : [];
   const rows = visibleEmployees.map(e => ({
     emp: e,
-    ...calcUangMakan(e.nama, bulanFilter)
+    ...calcUangMakanPeriode(e.nama, selMulai, selSelesai)
   }));
-  const totalSemua = rows.reduce((s, r) => s + r.uangMakan, 0);
+  const totalSemua = rows.reduce((s, r) => s + r.total, 0);
+  const periodeLabel = selMulai && selSelesai ? `${selMulai} s/d ${selSelesai}` : "-";
+  const exportRows = () => exportToExcel(rows.map(r => ({
+    nama: r.emp.nama,
+    jabatan: r.emp.jabatan || "-",
+    periode: periodeLabel,
+    riilHari: r.riilHari,
+    absenHari: r.absenHari,
+    rateHarian: r.rate,
+    uangMakan: r.uangMakan,
+    uangKerajinan: r.uangKerajinan,
+    total: r.total
+  })), `Uang_Makan_${selMulai || "periode"}_${selSelesai || ""}.xlsx`, "Uang Makan");
+  const printLaporan = () => {
+    if (!selMulai || !selSelesai) return alert("Pilih periode terlebih dahulu.");
+    printDocument({
+      docType: "laporan",
+      docTitle: "Laporan Uang Makan",
+      nomor: periodeLabel,
+      tanggal: today(),
+      tanggalLabel: "Dicetak Tanggal",
+      partyLabel: "Periode",
+      partyName: periodeLabel,
+      itemHeaders: ["Nama", "Jabatan", "Riil Hari", "Absen Hari", "Uang Makan", "Uang Kerajinan", "Total"],
+      items: rows.map(r => [r.emp.nama, r.emp.jabatan || "-", r.riilHari, r.absenHari, fmt(r.uangMakan), fmt(r.uangKerajinan), fmt(r.total)]),
+      subtotal: totalSemua,
+      total: totalSemua,
+      extraInfoRows: [["Jumlah Karyawan", rows.length], ["Total Periode Ini", fmt(totalSemua)]],
+      dibuatOleh: {
+        nama: session.nama,
+        jabatan: session.jabatan || ""
+      },
+      hideCreatedBy: false,
+      disetujuiLabel: "Mengetahui Finance"
+    });
+  };
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -24055,24 +24139,20 @@ function UangMakanModule({
     style: {
       display: "flex",
       gap: 10,
-      alignItems: "center"
+      alignItems: "center",
+      flexWrap: "wrap"
     }
-  }, /*#__PURE__*/React.createElement(Input, {
-    type: "month",
-    value: bulanFilter,
-    onChange: setBulanFilter,
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: periodeFilter,
+    onChange: setPeriodeFilter,
+    options: periodeOptions,
     style: {
-      width: 180
+      width: 220
     }
+  }), isAdmin && /*#__PURE__*/React.createElement(PrintBtn, {
+    onClick: printLaporan
   }), isAdmin && /*#__PURE__*/React.createElement(ExportExcelBtn, {
-    onClick: () => exportToExcel(rows.map(r => ({
-      nama: r.emp.nama,
-      jabatan: r.emp.jabatan || "-",
-      bulan: bulanFilter,
-      totalRiilHari: r.totalRiil,
-      rateHarian: r.rate,
-      uangMakan: r.uangMakan
-    })), "Uang_Makan.xlsx", "Uang Makan")
+    onClick: exportRows
   }))), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
@@ -24082,14 +24162,21 @@ function UangMakanModule({
       borderRadius: 8,
       border: `1px dashed ${theme.border}`
     }
-  }, "ℹ️ Uang Makan Harian = total hari riil hadir (Rekap Absensi bulan terpilih) × rate Uang Makan Harian per karyawan (Master Karyawan). Laporan ini read-only — untuk koreksi hari hadir, edit di Rekap Absensi; untuk koreksi rate, edit di Manajemen User."), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
-    headers: ["Nama", "Jabatan", "Total Hari Riil", "Rate Harian", "Uang Makan"],
-    rows: rows.map(r => [r.emp.nama, r.emp.jabatan || "-", fmtNum(r.totalRiil), fmt(r.rate), /*#__PURE__*/React.createElement("strong", {
+  }, "ℹ️ Uang Makan dihitung PER PERIODE (mingguan, Kamis–Rabu, sesuai periode Rekap Absensi yang tersimpan): Riil Hari × rate Uang Makan Harian. Uang Kerajinan (rate per karyawan, default Rp 50.000 — diatur di Manajemen User) diberikan bila hadir penuh (tidak ada hari Absen) sepanjang periode tersebut. Laporan ini read-only — untuk koreksi hari hadir, edit di Rekap Absensi; untuk koreksi rate, edit di Manajemen User."), periodeOptions.length === 0 ? /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: theme.muted,
+      margin: 0
+    }
+  }, "Belum ada periode Rekap Absensi tersimpan.")) : /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
+    headers: ["Nama", "Jabatan", "Riil Hari", "Absen Hari", "Uang Makan", "Uang Kerajinan", "Total"],
+    rows: rows.map(r => [r.emp.nama, r.emp.jabatan || "-", fmtNum(r.riilHari), fmtNum(r.absenHari), fmt(r.uangMakan), r.kerajinanEligible ? /*#__PURE__*/React.createElement(Badge, {
+      color: theme.green
+    }, fmt(r.uangKerajinan), " ✓ Hadir Penuh") : r.uangKerajinan > 0 ? fmt(r.uangKerajinan) : "-", /*#__PURE__*/React.createElement("strong", {
       style: {
         color: theme.green
       }
-    }, fmt(r.uangMakan))]),
-    emptyMsg: isAdmin ? "Belum ada data Rekap Absensi untuk bulan ini." : "Belum ada data Rekap Absensi kamu untuk bulan ini — pastikan Rekap Absensi bulan ini sudah disimpan HRD."
+    }, fmt(r.total))]),
+    emptyMsg: isAdmin ? "Belum ada data Rekap Absensi untuk periode ini." : "Belum ada data Rekap Absensi kamu untuk periode ini — pastikan Rekap Absensi periode ini sudah disimpan HRD."
   }), isAdmin && rows.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -24988,7 +25075,7 @@ function printDocument({
       ${catatan ? `<div style="margin-top:24px;font-size:12px;color:#666;white-space:pre-wrap;word-break:break-word;"><strong>Catatan:</strong> ${String(catatan).replace(/</g, "&lt;")}</div>` : ""}
       <div style="margin-top:60px;display:flex;justify-content:${disetujuiAlign === "left" ? "flex-start" : hideCreatedBy ? "center" : "space-between"};font-size:12px;">
         ${hideCreatedBy ? "" : `<div style="text-align:center;width:200px;">${dibuatOlehLabel}<br/><br/>${sigBlock(dibuatOleh)}</div>`}
-        <div style="text-align:center;width:200px;">${disetujuiLabel}${showMateraiSpace ? `<div style="width:3cm;height:4cm;margin:4px auto 0;"></div>` : "<br/><br/><br/>"}${sigBlock(disetujuiOleh, showMateraiSpace)}</div>
+        <div style="text-align:center;width:200px;">${disetujuiLabel}${showMateraiSpace ? `<div style="width:3cm;height:4cm;margin:4px auto 0;"></div>` : "<br/>"}${sigBlock(disetujuiOleh, showMateraiSpace)}</div>
       </div>
       <div style="margin-top:40px;text-align:center;font-style:italic;font-size:7px;color:#888;border-top:1px solid #ddd;padding-top:10px;line-height:1.5;">
         DISCLAIMER<br/>
