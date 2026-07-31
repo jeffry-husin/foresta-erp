@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-01.2";
+const APP_BUILD = "2026-08-01.3";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -31007,7 +31007,7 @@ function KPISalesModule({
     style: {
       color: theme.text
     }
-  }, r[1], r[2] !== "-" && ` / target ${r[2]}`))))))))), /*#__PURE__*/React.createElement(Modal, {
+  }, r[1], r[2] !== "-" && ` / target ${r[2]}`)))))))), /*#__PURE__*/React.createElement(Modal, {
     open: !!targetModalNama,
     title: targetModalNama ? `Atur Target KPI — ${targetModalNama}` : "",
     onClose: () => setTargetModalNama(null),
@@ -31075,7 +31075,7 @@ function KPISalesModule({
     onClick: () => setTargetModalNama(null)
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     onClick: saveTargets
-  }, "Simpan Target"))));
+  }, "Simpan Target")))));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
