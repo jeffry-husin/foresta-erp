@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-31.6";
+const APP_BUILD = "2026-07-31.7";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -12305,7 +12305,10 @@ function QuotationPS({
       pajak: q.pajakPct ?? 11,
       clientDiskonMode: q.clientDiskonMode || "persen",
       clientDiskonValue: q.clientDiskonPersen != null ? String(q.clientDiskonPersen) : q.clientDiskon ? String(q.clientDiskon) : "0",
-      fromRecIds: [],
+      // Preserve the Part Recommendation link when re-editing a quotation (e.g. a Draft that
+      // was pulled from a rec) — resetting this to [] silently broke the "mark rec as consumed"
+      // step whenever a pulled quotation was edited/submitted instead of submitted immediately.
+      fromRecIds: q.fromRecIds || [],
       termOfPayment: (q.termOfPayment || []).map(t => ({
         ...t
       }))
@@ -12496,7 +12499,10 @@ function QuotationPS({
       action: asDraft ? "Simpan Draft" : revisionOf ? "Ajukan Revisi" : "Ajukan Tambah",
       detail: `${cust?.nama || "-"} — ${fmt(total)}`
     });
-    if (!asDraft && form.fromRecIds.length) {
+    if (form.fromRecIds.length) {
+      // Mark the source Part Recommendation as consumed as soon as it's pulled into a
+      // Quotation — whether saved as Draft or submitted straight away — so it stops
+      // reappearing in "Tarik dari Part Recommendation" and can't be pulled twice.
       const arr = [...partRecs];
       form.fromRecIds.forEach(id => {
         const idx = arr.findIndex(r => r.id === id);
@@ -22039,8 +22045,8 @@ function InvoiceModule({
       color: theme.text
     }
   }, detail.noFakturPajak)), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Nama Barang/Jasa", "Qty", "Harga", "Subtotal"],
-    rows: detail.items.map(it => [it.unitName || it.partName, fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)])
+    headers: ["PN", "Nama Barang/Jasa", "Qty", "Harga", "Subtotal"],
+    rows: detail.items.map(it => [it.partNumber || it.unitCode || "-", it.unitName || it.partName, fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)])
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       background: theme.surface,
@@ -22122,8 +22128,8 @@ function InvoiceModule({
       partyLabel: "Kepada:",
       partyName: detail.customerNama,
       partyExtra: customers.find(c => c.nama === detail.customerNama)?.alamat || "",
-      itemHeaders: ["Nama Barang/Jasa", "Qty", "Harga", "Subtotal"],
-      items: detail.items.map(it => [it.unitName || it.partName, fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)]),
+      itemHeaders: ["PN", "Nama Barang/Jasa", "Qty", "Harga", "Subtotal"],
+      items: detail.items.map(it => [it.partNumber || it.unitCode || "-", it.unitName || it.partName, fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)]),
       subtotal: detail.subtotal,
       diskon: detail.diskon,
       diskonLabel: detail.diskonPersen ? `Discount (${detail.diskonPersen}%)` : "Discount",
@@ -23750,21 +23756,7 @@ function PayrollModule({
       ...empForm,
       kk: v
     })
-  })), /*#__PURE__*/React.createElement(Input, {
-    label: "Alamat Tempat Tinggal",
-    value: empForm.alamat,
-    onChange: v => setEmpForm({
-      ...empForm,
-      alamat: v
-    })
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "No. Telp",
-    value: empForm.noTelp,
-    onChange: v => setEmpForm({
-      ...empForm,
-      noTelp: v
-    })
-  }), /*#__PURE__*/React.createElement("div", {
+  })), /*#__PURE__*/React.createElement("div", {
     style: {
       border: `1px solid ${theme.border}`,
       borderRadius: 10,
@@ -23778,6 +23770,27 @@ function PayrollModule({
       fontWeight: 600
     }
   }, "DATA PRIBADI & DOMISILI"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 10,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Alamat Tempat Tinggal",
+    value: empForm.alamat,
+    onChange: v => setEmpForm({
+      ...empForm,
+      alamat: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "No. Telp",
+    value: empForm.noTelp,
+    onChange: v => setEmpForm({
+      ...empForm,
+      noTelp: v
+    })
+  })), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
       gridTemplateColumns: "1fr 1fr 1fr",
@@ -25313,15 +25326,16 @@ function printDocument({
   win.document.write(`
     <html><head><title>${docTitle} - ${nomor}</title>
     <style>
-      body { font-family: 'Segoe UI', Arial, sans-serif; margin: 40px; color: #1a1a1a; }
+      @page { size: A4 portrait; margin: 12mm; }
+      body { font-family: 'Segoe UI', Arial, sans-serif; margin: 20px; color: #1a1a1a; }
       .header { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 3px solid #1a1a1a; padding-bottom: 16px; margin-bottom: 24px; }
-      .company { font-size: 20px; font-weight: 800; }
+      .company { font-size: 20px; font-weight: 800; white-space: nowrap; }
       .doctitle { font-size: 26px; font-weight: 800; text-align: right; color: #2563eb; }
       table { width: 100%; border-collapse: collapse; margin: 20px 0; }
       .totals { margin-top: 16px; width: 320px; margin-left: auto; }
       .totals .row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; }
       .totals .final { font-size: 18px; font-weight: 800; border-top: 2px solid #333; padding-top: 8px; margin-top: 6px; color: #16a34a; }
-      @media print { body { margin: 15mm; } }
+      @media print { body { margin: 0; } }
     </style></head>
     <body>
       <div class="header">
@@ -25360,7 +25374,7 @@ function printDocument({
       ${bankInfoText ? `<div style="margin-top:16px;background:#f5f5f5;border-radius:8px;padding:10px 14px;font-size:12px;"><strong>Informasi Pembayaran:</strong><br/>${bankInfoText}</div>` : ""}
       ${paymentTermsHtml}
       ${catatan ? `<div style="margin-top:24px;font-size:12px;color:#666;white-space:pre-wrap;word-break:break-word;"><strong>Catatan:</strong> ${String(catatan).replace(/</g, "&lt;")}</div>` : ""}
-      <div style="margin-top:60px;display:flex;justify-content:${disetujuiAlign === "left" ? "flex-start" : hideCreatedBy ? "center" : "space-between"};font-size:12px;">
+      <div style="margin-top:20px;display:flex;justify-content:${disetujuiAlign === "left" ? "flex-start" : hideCreatedBy ? "center" : "space-between"};font-size:12px;">
         ${hideCreatedBy ? "" : `<div style="text-align:center;width:200px;">${dibuatOlehLabel}<br/><br/>${sigBlock(dibuatOleh)}</div>`}
         <div style="text-align:center;width:200px;">${disetujuiLabel}${showMateraiSpace ? `<div style="width:3cm;height:4cm;margin:4px auto 0;"></div>` : "<br/>"}${sigBlock(disetujuiOleh, showMateraiSpace)}</div>
       </div>
