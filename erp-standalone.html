@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-31.8";
+const APP_BUILD = "2026-07-31.9";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -790,7 +790,7 @@ const ROLE_DEFS = {
   finance_director: {
     label: "Finance Director",
     color: "#f59e0b",
-    modules: ["dashboard", "invoice", "payroll", "customer", "supplier", "financial_dashboard", "client_history", "attendance", "jurnal", "price_analysis"]
+    modules: ["dashboard", "invoice", "payroll", "customer", "supplier", "financial_dashboard", "client_history", "attendance", "jurnal", "price_analysis", "price_analysis_purchase"]
   },
   sales_manager: {
     label: "Sales Manager",
@@ -815,12 +815,12 @@ const ROLE_DEFS = {
   purchasing: {
     label: "Purchasing",
     color: "#f97316",
-    modules: ["dashboard", "po_local", "supplier", "part_request", "attendance", "mutasi_barang"]
+    modules: ["dashboard", "po_local", "supplier", "part_request", "attendance", "mutasi_barang", "price_analysis_purchase"]
   },
   purchasing_overseas: {
     label: "Purchasing Overseas",
     color: "#fb923c",
-    modules: ["dashboard", "po_overseas", "supplier", "part_request", "attendance", "mutasi_barang"]
+    modules: ["dashboard", "po_overseas", "supplier", "part_request", "attendance", "mutasi_barang", "price_analysis_purchase"]
   },
   storage: {
     label: "Storage / Gudang",
@@ -1082,6 +1082,10 @@ const ALL_MODULES = [{
   icon: "📈",
   label: "Analisa Harga"
 }, {
+  id: "price_analysis_purchase",
+  icon: "📉",
+  label: "Analisa Harga Pembelian"
+}, {
   id: "payroll",
   icon: "💵",
   label: "Payroll (Akses Terbatas)"
@@ -1126,7 +1130,7 @@ const SIDEBAR_GROUPS = [{
 }, {
   key: "operation",
   label: "OPERATION",
-  moduleIds: ["sales_order", "item_requisition", "po_local", "po_overseas"]
+  moduleIds: ["sales_order", "item_requisition", "po_local", "po_overseas", "price_analysis_purchase"]
 }, {
   key: "logistik",
   label: "LOGISTIK",
@@ -22144,7 +22148,7 @@ function InvoiceModule({
       hideCreatedBy: true,
       disetujuiAlign: "left",
       showMateraiSpace: true,
-      materaiSpasi: 5,
+      materaiSpasi: 6,
       disetujuiLabel: "Disetujui Oleh",
       disetujuiOleh: {
         nama: "Effendi Husin",
@@ -27395,6 +27399,331 @@ function PriceAnalysisModule({
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// ANALISA HARGA PEMBELIAN — purchase-price-history / fluctuation comparison for the
+// Purchasing team, mirroring PriceAnalysisModule above but pulled from PO Local + PO
+// Overseas line items (unified system, per explicit request) instead of Sales quotations.
+// Read-only over derived data; supplier takes the place of customer. Because PO Overseas
+// items can be priced in USD/SGD as well as IDR, price points are also tagged with their
+// currency and origin (Lokal/Overseas) so stats aren't blended across currencies.
+// ════════════════════════════════════════════════════════════════════════════
+function PurchasePriceAnalysisModule({
+  store,
+  session
+}) {
+  const {
+    poLocal,
+    poOverseas
+  } = store;
+  const allPoints = [];
+  (poLocal || []).forEach(p => {
+    if (p.status === "Ditolak GM") return;
+    (p.items || []).forEach(it => {
+      if (!it.partNumber) return;
+      allPoints.push({
+        jenis: "Lokal",
+        poNomor: p.nomor,
+        tanggal: p.tanggal,
+        status: p.status,
+        supplierNama: p.supplierNama || "-",
+        code: it.partNumber,
+        name: it.partName || "",
+        harga: it.harga || 0,
+        qty: it.qty || 0,
+        currency: p.currency || "IDR"
+      });
+    });
+  });
+  (poOverseas || []).forEach(p => {
+    if (p.status === "Ditolak GM") return;
+    (p.items || []).forEach(it => {
+      if (!it.partNumber) return;
+      allPoints.push({
+        jenis: "Overseas",
+        poNomor: p.nomor,
+        tanggal: p.tanggal,
+        status: p.status,
+        supplierNama: p.supplierNama || "-",
+        code: it.partNumber,
+        name: it.partName || "",
+        harga: it.harga || 0,
+        qty: it.qty || 0,
+        currency: p.currency || "USD"
+      });
+    });
+  });
+  const codeMap = new Map();
+  allPoints.forEach(p => {
+    if (!codeMap.has(p.code)) codeMap.set(p.code, {
+      code: p.code,
+      name: p.name,
+      count: 0
+    });
+    codeMap.get(p.code).count++;
+  });
+  const codeOptions = [...codeMap.values()].sort((a, b) => b.count - a.count);
+  const [search, setSearch] = useState("");
+  const filteredCodeOptions = search.trim() ? codeOptions.filter(c => [c.code, c.name].filter(Boolean).some(x => String(x).toLowerCase().includes(search.trim().toLowerCase()))) : codeOptions;
+  const [selectedCode, setSelectedCode] = useState("");
+  const selectedInfo = codeOptions.find(c => c.code === selectedCode);
+  const historyAll = selectedCode ? allPoints.filter(p => p.code === selectedCode).slice().sort((a, b) => (a.tanggal || "").localeCompare(b.tanggal || "")) : [];
+  // A given part is normally sourced in one currency; if a code has ever been bought in more
+  // than one, blending min/max/avg across them would be misleading, so stats are computed per
+  // the most-used currency for this code, with a note if other currencies also exist.
+  const currencyCounts = new Map();
+  historyAll.forEach(p => currencyCounts.set(p.currency, (currencyCounts.get(p.currency) || 0) + 1));
+  const currencyList = [...currencyCounts.keys()].sort((a, b) => currencyCounts.get(b) - currencyCounts.get(a));
+  const [currencyFilter, setCurrencyFilter] = useState("");
+  const activeCurrency = currencyFilter || currencyList[0] || "IDR";
+  const history = historyAll.filter(p => p.currency === activeCurrency);
+  const historyDesc = history.slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  const supMap = new Map();
+  history.forEach(p => {
+    const key = p.supplierNama || "-";
+    if (!supMap.has(key)) supMap.set(key, {
+      supplierNama: key,
+      count: 0,
+      min: Infinity,
+      max: -Infinity,
+      sum: 0,
+      lastTanggal: "",
+      lastHarga: 0
+    });
+    const c = supMap.get(key);
+    c.count++;
+    c.min = Math.min(c.min, p.harga);
+    c.max = Math.max(c.max, p.harga);
+    c.sum += p.harga;
+    if (p.tanggal >= c.lastTanggal) {
+      c.lastTanggal = p.tanggal;
+      c.lastHarga = p.harga;
+    }
+  });
+  const perSupplier = [...supMap.values()].sort((a, b) => (b.lastTanggal || "").localeCompare(a.lastTanggal || ""));
+  const overallMin = history.length ? Math.min(...history.map(p => p.harga)) : 0;
+  const overallMax = history.length ? Math.max(...history.map(p => p.harga)) : 0;
+  const overallAvg = history.length ? history.reduce((s, p) => s + p.harga, 0) / history.length : 0;
+  const fluctuationPct = overallMin ? (overallMax - overallMin) / overallMin * 100 : 0;
+  const fmtCcy = n => activeCurrency === "IDR" ? fmt(n) : `${activeCurrency} ${fmtNum(n)}`;
+
+  // Simple inline SVG chart — no external charting library available in this single-file app.
+  const chartW = 820,
+    chartH = 260,
+    padL = 90,
+    padR = 24,
+    padT = 20,
+    padB = 40;
+  const plotW = chartW - padL - padR,
+    plotH = chartH - padT - padB;
+  const xFor = i => history.length <= 1 ? padL + plotW / 2 : padL + i / (history.length - 1) * plotW;
+  const priceRange = overallMax - overallMin || 1;
+  const yFor = h => padT + plotH - (h - overallMin) / priceRange * plotH;
+  const palette = [theme.accent, theme.green, theme.purple, theme.red, theme.cyan, theme.yellow, "#ec4899", "#14b8a6"];
+  const supNames = [...new Set(history.map(p => p.supplierNama))];
+  const supColor = {};
+  supNames.forEach((n, i) => supColor[n] = palette[i % palette.length]);
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      flexWrap: "wrap",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("h2", {
+    style: {
+      margin: 0,
+      color: theme.text
+    }
+  }, "Analisa Harga Pembelian"), selectedCode && /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => {
+      setSelectedCode("");
+      setCurrencyFilter("");
+    }
+  }, "← Kembali ke daftar part")), !selectedCode && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      background: theme.surface,
+      padding: "8px 14px",
+      borderRadius: 8,
+      border: `1px dashed ${theme.border}`
+    }
+  }, "ℹ️ Data harga ditarik dari seluruh riwayat PO Local dan PO Overseas (kecuali yang Ditolak GM). Pilih satu part untuk melihat fluktuasi harga pembelian antar waktu dan antar supplier."), !selectedCode && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari Part Number / Nama...",
+    value: search,
+    onChange: setSearch,
+    style: {
+      marginBottom: 12
+    }
+  }), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Kode", "Nama", "Jumlah Transaksi"],
+    rows: filteredCodeOptions.map(c => [/*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.accentLight,
+        fontWeight: 600,
+        cursor: "pointer"
+      },
+      onClick: () => setSelectedCode(c.code)
+    }, c.code), c.name, c.count]),
+    emptyMsg: "Belum ada data harga dari PO."
+  })), selectedCode && history.length === 0 && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: theme.muted,
+      margin: 0
+    }
+  }, "Tidak ada riwayat harga untuk part ini.")), selectedCode && historyAll.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 4px",
+      color: theme.text
+    }
+  }, selectedInfo?.code, " — ", selectedInfo?.name), currencyList.length > 1 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      alignItems: "center",
+      margin: "10px 0 0"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "⚠️ Part ini pernah dibeli dalam beberapa mata uang berbeda — pilih mata uang untuk melihat statistiknya:"), currencyList.map(c => /*#__PURE__*/React.createElement(Btn, {
+    key: c,
+    size: "sm",
+    variant: c === activeCurrency ? "primary" : "ghost",
+    onClick: () => setCurrencyFilter(c)
+  }, c))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
+      gap: 12,
+      marginTop: 14
+    }
+  }, [["Harga Terendah", fmtCcy(overallMin), theme.green], ["Harga Tertinggi", fmtCcy(overallMax), theme.red], ["Harga Rata-rata", fmtCcy(overallAvg), theme.text], ["Fluktuasi", fluctuationPct.toFixed(1) + "%", theme.yellow], ["Jumlah Supplier", supNames.length, theme.text], ["Jumlah Transaksi", history.length, theme.text]].map(([label, val, color], i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      background: theme.surface,
+      borderRadius: 8,
+      padding: "10px 14px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: theme.muted,
+      marginBottom: 4
+    }
+  }, label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 700,
+      color: color
+    }
+  }, val)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 18,
+      overflowX: "auto"
+    }
+  }, /*#__PURE__*/React.createElement("svg", {
+    width: chartW,
+    height: chartH,
+    style: {
+      display: "block"
+    }
+  }, [0, 0.25, 0.5, 0.75, 1].map((t, i) => {
+    const h = overallMin + t * priceRange;
+    const y = yFor(h);
+    return /*#__PURE__*/React.createElement("g", {
+      key: i
+    }, /*#__PURE__*/React.createElement("line", {
+      x1: padL,
+      y1: y,
+      x2: chartW - padR,
+      y2: y,
+      stroke: theme.border,
+      strokeWidth: 1
+    }), /*#__PURE__*/React.createElement("text", {
+      x: padL - 10,
+      y: y + 4,
+      textAnchor: "end",
+      fontSize: 10,
+      fill: theme.muted
+    }, fmtCcy(h)));
+  }), history.length > 1 && /*#__PURE__*/React.createElement("polyline", {
+    points: history.map((p, i) => `${xFor(i)},${yFor(p.harga)}`).join(" "),
+    fill: "none",
+    stroke: theme.accent,
+    strokeWidth: 1.5,
+    opacity: 0.5
+  }), history.map((p, i) => /*#__PURE__*/React.createElement("circle", {
+    key: i,
+    cx: xFor(i),
+    cy: yFor(p.harga),
+    r: 5,
+    fill: supColor[p.supplierNama] || theme.accent,
+    stroke: theme.bg,
+    strokeWidth: 1.5
+  })), history.map((p, i) => /*#__PURE__*/React.createElement("title", {
+    key: "t" + i
+  }, `${p.tanggal} — ${p.supplierNama} — ${fmtCcy(p.harga)}`))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 12,
+      marginTop: 10
+    }
+  }, supNames.map((n, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 10,
+      height: 10,
+      borderRadius: "50%",
+      background: supColor[n],
+      display: "inline-block"
+    }
+  }), n)))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.text,
+      fontSize: 15
+    }
+  }, "Perbandingan Antar Supplier"), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Supplier", "Jumlah Transaksi", "Harga Terendah", "Harga Tertinggi", "Harga Terakhir", "Tanggal Terakhir"],
+    rows: perSupplier.map(c => [c.supplierNama, c.count, fmtCcy(c.min), fmtCcy(c.max), fmtCcy(c.lastHarga), c.lastTanggal]),
+    emptyMsg: "-"
+  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.text,
+      fontSize: 15
+    }
+  }, "Riwayat Lengkap"), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Tanggal", "No. PO", "Jenis", "Supplier", "Status", "Qty", "Mata Uang", "Harga"],
+    rows: historyAll.slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || "")).map(p => [p.tanggal, p.poNomor, /*#__PURE__*/React.createElement(Badge, {
+      color: p.jenis === "Lokal" ? theme.purple : theme.cyan
+    }, p.jenis), p.supplierNama, /*#__PURE__*/React.createElement(Badge, {
+      color: p.status === "Sudah Diterima" ? theme.green : p.status === "Ditolak GM" ? theme.red : theme.yellow
+    }, p.status), fmtNum(p.qty), p.currency, p.currency === "IDR" ? fmt(p.harga) : fmtNum(p.harga)]),
+    emptyMsg: "-"
+  })))));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // ABSENSI — daily attendance for uang makan/harian + lembur calculation
 // ════════════════════════════════════════════════════════════════════════════
 function AttendanceModule({
@@ -32600,6 +32929,11 @@ function App() {
         });
       case "price_analysis":
         return /*#__PURE__*/React.createElement(PriceAnalysisModule, {
+          store: store,
+          session: session
+        });
+      case "price_analysis_purchase":
+        return /*#__PURE__*/React.createElement(PurchasePriceAnalysisModule, {
           store: store,
           session: session
         });
