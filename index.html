@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-31.10";
+const APP_BUILD = "2026-07-31.11";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -157,27 +157,31 @@ const fmtMoney = (n, currency) => !currency || currency === "IDR" ? fmt(n) : `${
 const payLabel = tp => tp === "TEMPO" ? "CREDIT" : tp;
 // GLOBAL stock-reservation helper — shared by ItemRequisitionModule and PurchaseOrderModule.
 // Master Part stock (part.stok) only ever rises on actual Goods Receipt; it is NOT decremented
-// the moment an Item Requisition is created or turned into a PO. That means once a part's IR
-// is outstanding (created but not yet fully received), that qty is effectively already spoken
-// for — but nothing was subtracting it before this fix, so a SECOND, unrelated IR for the same
-// part (different SO) would see the full raw stock as "available" and get silently skipped,
-// even though it was already reserved by the first IR. Root cause of the reported PN 93093*
-// case: stock=1, IR-008 already turned into PO (reserving that 1 unit), then IR-064 also needed
-// it but was judged "stock cukup" because nothing tracked IR-008's claim on that unit.
-// Sums remaining (requested - already received via linked PO receivedMap) qty for a part across
+// the moment an Item Requisition is created, turned into a PO, or even physically handed out to
+// a workshop job (Parts Use "release" doesn't touch part.stok either — see PartsUseModule). That
+// means a part can sit in raw part.stok as "available" through its ENTIRE lifecycle — requested,
+// ordered, received into the warehouse, and even released to a specific SO's job — right up
+// until it actually ships out (Delivery Order) or gets consumed some other way. So any IR whose
+// requested qty hasn't yet been released to its own SO (via Parts Use) is still effectively
+// spoken for, REGARDLESS of whether its PO has been received yet. Root cause of the reported PN
+// 93093* case: IR-008 (different SO) already had its PO fully received — so raw stock went up —
+// but that stock was never released to IR-008's SO via Parts Use, meaning it was still earmarked
+// for it; IR-064 nonetheless saw the raw stock as available and was wrongly judged "stock cukup".
+// Sums, per part, (IR qtyButuh − qty already released to that IR's own SO via Parts Use) across
 // every Item Requisition system-wide, excluding IRs that belong to excludeSoNomor (so a
-// shortfall calc for that SO's own IRs isn't double-subtracted against itself).
+// shortfall calc for that SO's own IRs isn't double-subtracted against itself). Once Parts Use
+// shows the qty actually released to its originating SO, it's no longer counted as reserved here.
 const reservedQtyFor = (store, partNumber, excludeSoNomor) => {
-  const { itemRequisitions, poLocal, poOverseas } = store;
-  const receivedForIR = ir => {
-    const linkedPOs = [...(poLocal || []), ...(poOverseas || [])].filter(po => (po.irNomors || []).includes(ir.nomor));
-    return linkedPOs.reduce((s, po) => s + (Number((po.receivedMap || {})[partNumber]) || 0), 0);
+  const { itemRequisitions, partsUse } = store;
+  const releasedFor = soNomor => {
+    const pu = (partsUse || []).find(p => p.soNomor === soNomor);
+    const it = pu?.items?.find(x => x.partNumber === partNumber);
+    return Number(it?.qtyReleased) || 0;
   };
   return (itemRequisitions || []).filter(ir => ir.soNomor !== excludeSoNomor).reduce((sum, ir) => {
     const it = (ir.items || []).find(x => x.partNumber === partNumber);
     if (!it) return sum;
-    const diterima = receivedForIR(ir);
-    return sum + Math.max(0, (it.qtyButuh || 0) - diterima);
+    return sum + Math.max(0, (it.qtyButuh || 0) - releasedFor(ir.soNomor));
   }, 0);
 };
 // Render free-text notes with real line breaks preserved (textarea input already allows multiple
@@ -12436,6 +12440,26 @@ function QuotationPS({
     setPullModal(false);
     setModal(true);
   };
+  // Manual dismiss for a Part Recommendation that's already been handled OUTSIDE the normal
+  // "Tarik Semua" flow — e.g. its items were manually re-entered into a Quotation without ever
+  // using this picker, so fromRecIds never linked back to it and it was left stuck showing
+  // "Menunggu" forever even after the Quotation (and even the resulting SO) was long completed.
+  // The automatic "Ditarik ke Quotation" marking (in save()/submitDraft above) only fires when a
+  // Quotation is actually created THROUGH this picker, so it can't cover that case — this button
+  // lets Asil/Owner/GM manually clear a stale rec instead.
+  const dismissRec = rec => {
+    if (!window.confirm(`Tandai Part Recommendation dari ${rec.customerNama} (${rec.tanggal}) sebagai sudah ditangani dan hilangkan dari daftar ini?`)) return;
+    setPartRecs(prev => prev.map(r => r.id === rec.id ? {
+      ...r,
+      status: "Ditandai Selesai (Manual)"
+    } : r));
+    logAudit(store, session, {
+      module: "Parts & Service Quotation",
+      docNomor: rec.id,
+      action: "Part Recommendation Ditandai Selesai (Manual)",
+      detail: `${rec.customerNama} — ${rec.items.length} item, oleh ${session.nama}`
+    });
+  };
   const subtotal = form.items.reduce((s, i) => s + i.subtotal, 0);
   // Sales Discount is an internal-only kick-back record (GM/finance visibility only). It must
   // NEVER reduce the quotation value shown/printed to the client, and is completely separate/
@@ -12985,10 +13009,19 @@ function QuotationPS({
     }
   }, "· oleh ", rec.mekanikNama, " · ", rec.tanggal), /*#__PURE__*/React.createElement("br", null), /*#__PURE__*/React.createElement(Badge, {
     color: theme.purple
-  }, rec.items.length, " item")), /*#__PURE__*/React.createElement(Btn, {
+  }, rec.items.length, " item")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     onClick: () => pullFromRec(rec)
-  }, "Tarik Semua (", rec.items.length, " item)")), /*#__PURE__*/React.createElement("div", {
+  }, "Tarik Semua (", rec.items.length, " item)"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => dismissRec(rec)
+  }, "✓ Sudah Ditangani"))), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
       color: theme.muted,
@@ -23467,6 +23500,14 @@ function PayrollModule({
     onEdit: i => {
       const emp = empFiltered[i];
       setEditEmp(emp);
+      // Must mirror the "karyawan" tab's onEdit above field-for-field — this second Data
+      // Karyawan table (Import tab) shares the same edit modal/empForm, but this handler had
+      // never been updated when Tanggal Lahir/Jenis Kelamin/Tanggal Masuk/RT-RW/Kelurahan/
+      // Kecamatan/Kabupaten/Provinsi/Status Karyawan were added (task #70) — so opening Edit
+      // from THIS tab silently blanked those fields in the form even though the table's own
+      // columns (line 23465) prove the underlying data was there all along. Root cause of the
+      // reported "Data Karyawan belum terisi" bug: editing via this tab, then saving, would
+      // have overwritten the real DB values with blanks.
       setEmpForm({
         nama: emp.nama,
         jabatan: emp.jabatan || "",
@@ -23480,8 +23521,21 @@ function PayrollModule({
         noTelp: emp.noTelp || "",
         keluarga: emp.keluarga || [],
         uangHarianRate: emp.uangHarianRate ?? 50000,
-        hariKerjaSeminggu: emp.hariKerjaSeminggu ?? 5
+        hariKerjaSeminggu: emp.hariKerjaSeminggu ?? 5,
+        statusKaryawan: emp.statusKaryawan || "Tetap",
+        uangKerajinanRate: emp.uangKerajinanRate ?? 0,
+        uangHarianKerjaRate: emp.uangHarianKerjaRate ?? 0,
+        tanggalLahir: emp.tanggalLahir || "",
+        jenisKelamin: emp.jenisKelamin || "",
+        tanggalMasuk: emp.tanggalMasuk || "",
+        rtRw: emp.rtRw || "",
+        kelDesa: emp.kelDesa || "",
+        kecamatan: emp.kecamatan || "",
+        kabupaten: emp.kabupaten || "",
+        provinsi: emp.provinsi || ""
       });
+      setEditingKeluargaIdx(null);
+      setKeluargaForm(emptyKeluargaForm);
     }
   })), tab === "run" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
     style: {
