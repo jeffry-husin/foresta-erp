@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-01.1";
+const APP_BUILD = "2026-08-01.2";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -904,8 +904,24 @@ const ROLE_DEFS = {
 const CLIENT_FACING_MODULES = ["quotation_unit", "quotation_ps", "sales_order", "invoice", "delivery_order"];
 
 // Database Client category — fixed industry list (was free-text before, which meant it was
-// basically only ever filled in as "Umum" since sales had no real options to pick from).
-const CLIENT_CATEGORIES = ["SAWIT", "MINING", "MARINE", "MANUFACTURE", "GOVERNMENT", "KONTRAKTOR", "UMUM"];
+// basically only ever filled in as "Umum" since sales had no real options to pick from). This
+// doubles as the "Sector" classification used by the KPI Sales 4-pillar scorecard (sector
+// diversification / sectors-approached metrics) — OIL & GAS and UTILITAS/TELCO were added
+// specifically for that, the rest were already in use and kept as-is so no existing customer's
+// tagging breaks.
+const CLIENT_CATEGORIES = ["SAWIT", "MINING", "MARINE", "MANUFACTURE", "GOVERNMENT", "KONTRAKTOR", "OIL & GAS", "UTILITAS/TELCO", "UMUM"];
+
+// KPI Sales — NEW vs RETURNING customer type is intentionally NOT stored on the customer record.
+// It's derived on the fly from that customer's own Sales Order history: a customer is "NEW" as of
+// a given SO if that SO is the earliest (by tanggal, tie-broken by nomor) SO on record for that
+// customerId; every SO after that counts as "RETURNING". This keeps it always correct even when
+// old SOs are edited/added later, with no migration or backfill needed.
+const customerSOHistory = (salesOrders, customerId) => (salesOrders || []).filter(so => so.customerId === customerId).slice().sort((a, b) => (a.tanggal || "").localeCompare(b.tanggal || "") || String(a.nomor || "").localeCompare(String(b.nomor || "")));
+const isNewCustomerAsOf = (salesOrders, customerId, so) => {
+  const hist = customerSOHistory(salesOrders, customerId);
+  return hist.length > 0 && hist[0].nomor === so.nomor;
+};
+const customerTypeForSO = (salesOrders, so) => isNewCustomerAsOf(salesOrders, so.customerId, so) ? "NEW" : "RETURNING";
 
 // Mekanik Report sub-statuses
 const KEPARAHAN_OPTIONS = ["Ringan", "Sedang", "Berat", "Kritikal"];
@@ -2003,6 +2019,19 @@ function useStore() {
   // though their Master User role isn't sales_manager; "excluded" = names hidden from the KPI Sales
   // list. This ONLY affects who is evaluated on the KPI Sales screen — it never changes anyone's
   // actual login role/access in Manajemen User (confirmed business rule).
+  // Per-salesperson monthly targets driving the KPI Sales 4-pillar scorecard (Pillar 1 Prospecting,
+  // Pillar 2 Pipeline Development, Pillar 3 Conversion & Revenue). Keyed by salesperson nama.
+  // Defaults match the recommended scorecard spec; Owner/GM/Finance Director can edit per person.
+  const KPI_TARGET_DEFAULTS = {
+    revenueTarget: 0,
+    // 0 = not set — pipeline coverage / revenue attainment show "Target belum diatur" until an
+    // Owner/GM sets a real number; scoring for those metrics is skipped (not penalized) until then.
+    newContactsTarget: 15,
+    followupTarget: 30,
+    demosTarget: 4,
+    quotationsTarget: 10
+  };
+  const [kpiTargets, setKpiTargets] = usePersisted("erp_kpi_targets", {}); // { [nama]: {revenueTarget, newContactsTarget, followupTarget, demosTarget, quotationsTarget} }
   const [companySettings, setCompanySettings] = usePersisted("erp_company_settings", {
     nama: "PT Heavy Equipment Solutions",
     alamat: "Jl. Industri Raya No. 88, Jakarta",
@@ -2215,6 +2244,9 @@ function useStore() {
     setLeaveRequests,
     kpiSalesRoster,
     setKpiSalesRoster,
+    kpiTargets,
+    setKpiTargets,
+    KPI_TARGET_DEFAULTS,
     mingguanMekanikRoster,
     setMingguanMekanikRoster,
     goodsReceiptReceivers,
@@ -5569,7 +5601,12 @@ function CustomerDB({
     nitku: "",
     taxAddress: "",
     salesManager: session.nama,
-    salesManagerUsernames: session.role === "sales_manager" ? [session.username] : []
+    salesManagerUsernames: session.role === "sales_manager" ? [session.username] : [],
+    // Manual "Key Account" flag for the KPI Sales Customer Health pillar — per business rule, only
+    // Owner/GM/Finance Director can set/unset this (see the isOwnerLike-gated checkbox below).
+    // NEW vs RETURNING customer type is NOT stored here — it's derived automatically from each
+    // customer's own Sales Order history (see customerTypeForSO / isNewCustomerAsOf helpers).
+    keyAccount: false
   };
   const [modal, setModal] = useState(false);
   const [form, setForm] = useState(blankForm);
@@ -6211,7 +6248,25 @@ function CustomerDB({
         variant: "ghost",
         onClick: () => requestAccess(c)
       }, "Request Akses"));
-      return [c.nama, picLabel, categoryCell, /*#__PURE__*/React.createElement(Badge, {
+      const namaCell = c.keyAccount ? /*#__PURE__*/React.createElement("span", {
+        style: {
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6
+        }
+      }, c.nama, /*#__PURE__*/React.createElement("span", {
+        title: "Key Account",
+        style: {
+          fontSize: 11,
+          fontWeight: 700,
+          color: "#a67c00",
+          background: "#fff3cd",
+          border: "1px solid #ffe08a",
+          borderRadius: 6,
+          padding: "1px 6px"
+        }
+      }, "⭐ KA")) : c.nama;
+      return [namaCell, picLabel, categoryCell, /*#__PURE__*/React.createElement(Badge, {
         color: theme.accent
       }, c.salesManager || "-"), accessCell];
     }),
@@ -6303,7 +6358,35 @@ function CustomerDB({
       value: c,
       label: c
     }))
-  })), /*#__PURE__*/React.createElement("div", {
+  })), isOwnerLike && /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      padding: "6px 10px",
+      border: `1px solid ${theme.border}`,
+      borderRadius: 10,
+      cursor: "pointer",
+      width: "fit-content"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: !!form.keyAccount,
+    onChange: e => setForm({
+      ...form,
+      keyAccount: e.target.checked
+    })
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13,
+      fontWeight: 600
+    }
+  }, "⭐ Key Account"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted,
+      fontSize: 12
+    }
+  }, "(untuk perhitungan KPI Sales — Customer Health)")), /*#__PURE__*/React.createElement("div", {
     style: {
       border: `1px solid ${theme.border}`,
       borderRadius: 10,
@@ -27009,6 +27092,8 @@ function SalesActivityModule({
     tanggal: today(),
     jenisAktivitas: "Kunjungan",
     customerId: "",
+    sector: "",
+    isNewContact: false,
     catatan: "",
     biaya: []
   });
@@ -27047,6 +27132,7 @@ function SalesActivityModule({
     setSalesActivities([...salesActivities, {
       id: "SA-" + uid(),
       ...form,
+      sector: form.sector || cust?.category || "",
       customerNama: cust?.nama || "-",
       totalBiaya: form.biaya.reduce((s, b) => s + b.nominal, 0),
       salesUsername: session.username,
@@ -27057,6 +27143,8 @@ function SalesActivityModule({
       tanggal: today(),
       jenisAktivitas: "Kunjungan",
       customerId: "",
+      sector: "",
+      isNewContact: false,
       catatan: "",
       biaya: []
     });
@@ -27106,6 +27194,8 @@ function SalesActivityModule({
         tanggal: today(),
         jenisAktivitas: "Kunjungan",
         customerId: "",
+        sector: "",
+        isNewContact: false,
         catatan: "",
         biaya: []
       });
@@ -27214,23 +27304,64 @@ function SalesActivityModule({
       ...form,
       jenisAktivitas: v
     }),
-    options: ["Kunjungan", "Telepon", "Lainnya"].map(j => ({
+    options: ["Kunjungan", "Telepon", "Demo", "Survey", "WhatsApp", "Quotation", "Client Baru", "Lainnya"].map(j => ({
       value: j,
       label: j
     }))
   })), form.jenisAktivitas !== "Lainnya" && /*#__PURE__*/React.createElement(Select, {
     label: "Client",
     value: form.customerId,
-    onChange: v => setForm({
-      ...form,
-      customerId: v
-    }),
+    onChange: v => {
+      const cust = myCustomers.find(c => c.id === v);
+      setForm({
+        ...form,
+        customerId: v,
+        sector: cust?.category || form.sector
+      });
+    },
     options: myCustomers.map(c => ({
       value: c.id,
       label: c.nama
     })),
     required: true
   }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    label: "Sector",
+    value: form.sector || "",
+    onChange: v => setForm({
+      ...form,
+      sector: v
+    }),
+    options: CLIENT_CATEGORIES.map(c => ({
+      value: c,
+      label: c
+    }))
+  }), /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      padding: "6px 0",
+      cursor: "pointer",
+      marginTop: 20
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: !!form.isNewContact,
+    onChange: e => setForm({
+      ...form,
+      isNewContact: e.target.checked
+    })
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13
+    }
+  }, "Kontak Baru (belum pernah dihubungi sebelumnya)"))), /*#__PURE__*/React.createElement("div", {
     style: {
       border: `1px solid ${theme.border}`,
       borderRadius: 10,
@@ -30306,8 +30437,12 @@ function KPISalesModule({
     invoices,
     deliveryOrders,
     employees,
+    customers,
     kpiSalesRoster,
-    setKpiSalesRoster
+    setKpiSalesRoster,
+    kpiTargets,
+    setKpiTargets,
+    KPI_TARGET_DEFAULTS
   } = store;
   const isSalesManager = session.role === "sales_manager";
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
@@ -30417,6 +30552,27 @@ function KPISalesModule({
       return true; // simplified: assumes payment recorded on time if marked Lunas (exact payment date not tracked per-payment)
     }).length;
     const onTimeRate = myInvoices.length ? Math.round(paidOnTime / myInvoices.length * 100) : 0;
+    // ── 4-Pillar KPI additions ──────────────────────────────────────────────
+    // Pillar 1: Prospecting Activity — drawn from Sales Activity log entries.
+    const myActivitiesAll = salesActivities.filter(a => a.salesNama === nama);
+    const myActivitiesP = kpiPeriodeAktif ? myActivitiesAll.filter(a => inKpiPeriode(a.tanggal)) : myActivitiesAll;
+    const newContactsCount = myActivitiesP.filter(a => a.isNewContact).length;
+    const followupCount = myActivitiesP.filter(a => ["Kunjungan", "Telepon", "WhatsApp"].includes(a.jenisAktivitas)).length;
+    const demosCount = myActivitiesP.filter(a => a.jenisAktivitas === "Demo").length;
+    const sectorsApproached = new Set(myActivitiesP.map(a => a.sector).filter(Boolean)).size;
+    // Pillar 3 add-ons: NEW-customer revenue share, using each successful quotation's linked SO to
+    // determine NEW vs RETURNING (see customerTypeForSO — first-ever SO for that customerId = NEW).
+    let newCustomerRevenue = 0;
+    myQuotSuccess.forEach(q => {
+      const so = salesOrders.find(s => s.sourceNomor === q.nomor);
+      if (so && customerTypeForSO(salesOrders, so) === "NEW") newCustomerRevenue += preTax(q);
+    });
+    const newCustomerRevenuePct = valueQuotationSO ? Math.round(newCustomerRevenue / valueQuotationSO * 100) : 0;
+    const avgDealSize = soDiterimaCount ? Math.round(valueQuotationSO / soDiterimaCount) : 0;
+    // Pillar 4: Customer Health — repeat-order rate & active Key Accounts, from this person's SOs.
+    const mySOs = salesOrders.filter(so => so.salesManagerNama === nama && (!kpiPeriodeAktif || inKpiPeriode(kpiPeriodeBasis === "so" ? so.tanggal : quotDateByNomor(so.sourceNomor) || so.tanggal)));
+    const repeatOrderRate = mySOs.length ? Math.round(mySOs.filter(so => customerTypeForSO(salesOrders, so) === "RETURNING").length / mySOs.length * 100) : 0;
+    const keyAccountsActive = new Set(mySOs.filter(so => (customers || []).find(c => c.id === so.customerId)?.keyAccount).map(so => so.customerId)).size;
     return {
       nama,
       valueQuotation,
@@ -30426,7 +30582,15 @@ function KPISalesModule({
       poClosedCount,
       onTimeRate,
       quotCount,
-      meetingCount
+      meetingCount,
+      newContactsCount,
+      followupCount,
+      demosCount,
+      sectorsApproached,
+      newCustomerRevenuePct,
+      avgDealSize,
+      repeatOrderRate,
+      keyAccountsActive
     };
   });
   // Peer-relative normalization: each SCORED metric is measured against the best performer
@@ -30435,25 +30599,106 @@ function KPISalesModule({
   // Conversion Rate, SO Diterima and PO Closed are shown as reference info but are NOT part of
   // the weighted score.
   const maxValueQuotationSO = Math.max(1, ...rawStats.map(s => s.valueQuotationSO));
+  const maxValueQuotation = Math.max(1, ...rawStats.map(s => s.valueQuotation));
   const maxQuot = Math.max(1, ...rawStats.map(s => s.quotCount));
   const maxMeeting = Math.max(1, ...rawStats.map(s => s.meetingCount));
+  // Minimum sample size before Conversion Rate is trusted as a real score — below this, a single
+  // won/lost deal swings the percentage wildly, so it's treated as a neutral gate (70) instead of
+  // scored, and flagged instead so it doesn't unfairly reward/punish someone with few quotations yet.
+  const MIN_QUOT_SAMPLE = 5;
   const stats = rawStats.map(s => {
+    const targets = { ...KPI_TARGET_DEFAULTS, ...(kpiTargets?.[s.nama] || {}) };
+    // Pillar 1 — Prospecting Activity (15%): kontak baru, follow-up, diversifikasi sector.
+    const p1a = Math.min(100, Math.round(s.newContactsCount / (targets.newContactsTarget || 1) * 100));
+    const p1b = Math.min(100, Math.round(s.followupCount / (targets.followupTarget || 1) * 100));
+    const p1c = Math.min(100, Math.round(s.sectorsApproached / 3 * 100));
+    const pillarProspecting = Math.round((p1a + p1b + p1c) / 3);
+    // Pillar 2 — Pipeline Development (25%): jumlah quotation, nilai pipeline, jumlah demo.
+    const p2a = Math.min(100, Math.round(s.quotCount / (targets.quotationsTarget || 1) * 100));
+    const p2b = Math.round(s.valueQuotation / maxValueQuotation * 100);
+    const p2c = Math.min(100, Math.round(s.demosCount / (targets.demosTarget || 1) * 100));
+    const pillarPipeline = Math.round((p2a + p2b + p2c) / 3);
+    // Pillar 3 — Conversion & Revenue (40%): conversion (cohort-gated), pencapaian target revenue,
+    // porsi revenue dari customer BARU (menghindari over-reliance pada existing account saja).
+    const conversionGated = s.quotCount < MIN_QUOT_SAMPLE;
+    const p3a = conversionGated ? 70 : Math.min(100, s.conversionRate);
+    const p3b = targets.revenueTarget > 0 ? Math.min(100, Math.round(s.valueQuotationSO / targets.revenueTarget * 100)) : Math.round(s.valueQuotationSO / maxValueQuotationSO * 100);
+    const p3c = Math.min(100, s.newCustomerRevenuePct);
+    const pillarConversion = Math.round((p3a + p3b + p3c) / 3);
+    // Pillar 4 — Customer Health (20%): bayar tepat waktu, repeat-order rate, Key Account aktif.
+    const p4a = s.onTimeRate;
+    const p4b = s.repeatOrderRate;
+    const p4c = Math.min(100, Math.round(s.keyAccountsActive / 2 * 100));
+    const pillarHealth = Math.round((p4a + p4b + p4c) / 3);
+    const totalScore = Math.round(pillarProspecting * 0.15 + pillarPipeline * 0.25 + pillarConversion * 0.40 + pillarHealth * 0.20);
+    // Warning flags — informational, shown as badges, don't affect the score.
+    const flags = [];
+    if (conversionGated) flags.push({
+      icon: "🔵",
+      label: "Sample quotation masih sedikit (<5) — conversion rate belum representatif"
+    });
+    if (s.quotCount === 0) flags.push({
+      icon: "🔴",
+      label: "Belum ada quotation pada periode ini"
+    });
+    if (!conversionGated && s.conversionRate === 0) flags.push({
+      icon: "⚠️",
+      label: "Conversion rate 0% — belum ada quotation yang jadi SO"
+    });
+    if (s.soDiterimaCount > 0 && s.newCustomerRevenuePct < 10) flags.push({
+      icon: "🟡",
+      label: "Revenue sangat bergantung pada customer lama (<10% dari customer baru)"
+    });
+    if (totalScore < 40) flags.push({
+      icon: "🔴",
+      label: "Skor KPI keseluruhan rendah"
+    });
+    // Legacy (pre-4-pillar) fields kept for the existing reference columns/export — unchanged math.
     const poScore = Math.round(s.valueQuotationSO / maxValueQuotationSO * 100);
-    const paymentScore = s.onTimeRate; // already 0-100
+    const paymentScore = s.onTimeRate;
     const quotScore = Math.round(s.quotCount / maxQuot * 100);
     const meetingScore = Math.round(s.meetingCount / maxMeeting * 100);
-    const totalScore = Math.round(poScore * 0.40 + paymentScore * 0.25 + quotScore * 0.20 + meetingScore * 0.15);
     return {
       ...s,
       poScore,
       paymentScore,
       quotScore,
       meetingScore,
+      pillarProspecting,
+      pillarPipeline,
+      pillarConversion,
+      pillarHealth,
+      conversionGated,
+      flags,
+      targets,
       totalScore
     };
   }).sort((a, b) => b.totalScore - a.totalScore);
   const [kpiSalesSearch, setKpiSalesSearch] = useState("");
   const statsFiltered = kpiSalesSearch.trim() ? stats.filter(s => String(s.nama).toLowerCase().includes(kpiSalesSearch.trim().toLowerCase())) : stats;
+  // Individual scorecard (4-pillar breakdown) — click a row to open.
+  const [scorecardNama, setScorecardNama] = useState(null);
+  const scorecardStat = scorecardNama ? stats.find(s => s.nama === scorecardNama) : null;
+  // Target editing — Owner/GM/Finance Director only, per-salesperson, stored in kpiTargets.
+  const [targetModalNama, setTargetModalNama] = useState(null);
+  const [targetForm, setTargetForm] = useState(KPI_TARGET_DEFAULTS);
+  const openTargetModal = nama => {
+    setTargetForm({ ...KPI_TARGET_DEFAULTS, ...(kpiTargets?.[nama] || {}) });
+    setTargetModalNama(nama);
+  };
+  const saveTargets = () => {
+    setKpiTargets(prev => ({
+      ...(prev || {}),
+      [targetModalNama]: {
+        revenueTarget: Number(targetForm.revenueTarget) || 0,
+        newContactsTarget: Number(targetForm.newContactsTarget) || 0,
+        followupTarget: Number(targetForm.followupTarget) || 0,
+        demosTarget: Number(targetForm.demosTarget) || 0,
+        quotationsTarget: Number(targetForm.quotationsTarget) || 0
+      }
+    }));
+    setTargetModalNama(null);
+  };
   const [addRosterName, setAddRosterName] = useState("");
   const rosterOptions = (employees || []).filter(e => !salesManagerNames.includes(e.nama)).map(e => ({
     value: e.nama,
@@ -30625,21 +30870,212 @@ function KPISalesModule({
       marginBottom: 12
     }
   }), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Rank", "Sales Manager", "Value Quotation (Sebelum Pajak)", "Value Quotation → SO (Sebelum Pajak)", "Conversion Rate", "SO/PO Diterima", "PO Closed", "Bayar Tepat Waktu", "Quotation", "Meeting", "KPI Score"],
+    resizable: true,
+    storageKey: "erp_kpi_sales_colwidths",
+    headers: ["Rank", "Sales Manager", "P1 Prospecting (15%)", "P2 Pipeline (25%)", "P3 Conversion & Revenue (40%)", "P4 Customer Health (20%)", "KPI Score", "Value Quotation → SO", "Conversion Rate", "Flags", "Aksi"],
     rows: statsFiltered.map((s, i) => [/*#__PURE__*/React.createElement(Badge, {
       color: i === 0 ? theme.yellow : theme.muted
-    }, i === 0 ? "🏆 #1" : `#${i + 1}`), s.nama, fmtMoney(s.valueQuotation, "IDR"), fmtMoney(s.valueQuotationSO, "IDR"), /*#__PURE__*/React.createElement(Badge, {
-      color: s.conversionRate >= 50 ? theme.green : s.conversionRate >= 25 ? theme.yellow : theme.red
-    }, s.conversionRate, "%"), s.soDiterimaCount, s.poClosedCount, /*#__PURE__*/React.createElement(Badge, {
-      color: s.onTimeRate >= 80 ? theme.green : s.onTimeRate >= 50 ? theme.yellow : theme.red
-    }, s.onTimeRate, "%"), s.quotCount, s.meetingCount, /*#__PURE__*/React.createElement("strong", {
+    }, i === 0 ? "🏆 #1" : `#${i + 1}`), s.nama, /*#__PURE__*/React.createElement(Badge, {
+      color: s.pillarProspecting >= 70 ? theme.green : s.pillarProspecting >= 40 ? theme.yellow : theme.red
+    }, s.pillarProspecting), /*#__PURE__*/React.createElement(Badge, {
+      color: s.pillarPipeline >= 70 ? theme.green : s.pillarPipeline >= 40 ? theme.yellow : theme.red
+    }, s.pillarPipeline), /*#__PURE__*/React.createElement(Badge, {
+      color: s.pillarConversion >= 70 ? theme.green : s.pillarConversion >= 40 ? theme.yellow : theme.red
+    }, s.pillarConversion), /*#__PURE__*/React.createElement(Badge, {
+      color: s.pillarHealth >= 70 ? theme.green : s.pillarHealth >= 40 ? theme.yellow : theme.red
+    }, s.pillarHealth), /*#__PURE__*/React.createElement("strong", {
       style: {
         color: theme.accentLight,
         fontSize: 15
       }
-    }, s.totalScore)]),
+    }, s.totalScore), fmtMoney(s.valueQuotationSO, "IDR"), /*#__PURE__*/React.createElement(Badge, {
+      color: s.conversionRate >= 50 ? theme.green : s.conversionRate >= 25 ? theme.yellow : theme.red
+    }, s.conversionRate, "%"), s.flags.length === 0 ? "-" : /*#__PURE__*/React.createElement("span", {
+      title: s.flags.map(f => f.label).join(" · ")
+    }, s.flags.map(f => f.icon).join(" ")), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => setScorecardNama(s.nama)
+    }, "🔍 Detail"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => openTargetModal(s.nama)
+    }, "🎯 Target"))]),
     emptyMsg: "Belum ada data"
-  })));
+  })), /*#__PURE__*/React.createElement(Modal, {
+    open: !!scorecardStat,
+    title: scorecardStat ? `Scorecard KPI — ${scorecardStat.nama}` : "",
+    onClose: () => setScorecardNama(null),
+    width: 720
+  }, scorecardStat && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      padding: "10px 0"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 40,
+      fontWeight: 800,
+      color: theme.accentLight
+    }
+  }, scorecardStat.totalScore), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "Skor KPI Komposit")), scorecardStat.flags.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6
+    }
+  }, scorecardStat.flags.map((f, idx) => /*#__PURE__*/React.createElement("div", {
+    key: idx,
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      background: theme.surface,
+      padding: "6px 10px",
+      borderRadius: 8,
+      border: `1px dashed ${theme.border}`
+    }
+  }, f.icon, " ", f.label))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 14
+    }
+  }, [{
+    title: "Pillar 1 — Prospecting Activity (bobot 15%)",
+    score: scorecardStat.pillarProspecting,
+    rows: [["Kontak Baru", scorecardStat.newContactsCount, scorecardStat.targets.newContactsTarget], ["Follow-up (Kunjungan/Telepon/WA)", scorecardStat.followupCount, scorecardStat.targets.followupTarget], ["Sector Didekati", scorecardStat.sectorsApproached, 3]]
+  }, {
+    title: "Pillar 2 — Pipeline Development (bobot 25%)",
+    score: scorecardStat.pillarPipeline,
+    rows: [["Jumlah Quotation", scorecardStat.quotCount, scorecardStat.targets.quotationsTarget], ["Value Quotation", fmtMoney(scorecardStat.valueQuotation, "IDR"), "-"], ["Jumlah Demo", scorecardStat.demosCount, scorecardStat.targets.demosTarget]]
+  }, {
+    title: "Pillar 3 — Conversion & Revenue (bobot 40%)",
+    score: scorecardStat.pillarConversion,
+    rows: [["Conversion Rate", `${scorecardStat.conversionRate}%${scorecardStat.conversionGated ? " (sample kecil)" : ""}`, "-"], ["Value Quotation → SO", fmtMoney(scorecardStat.valueQuotationSO, "IDR"), scorecardStat.targets.revenueTarget ? fmtMoney(scorecardStat.targets.revenueTarget, "IDR") : "-"], ["Avg Deal Size", fmtMoney(scorecardStat.avgDealSize, "IDR"), "-"], ["Revenue dari Customer Baru", `${scorecardStat.newCustomerRevenuePct}%`, "-"]]
+  }, {
+    title: "Pillar 4 — Customer Health (bobot 20%)",
+    score: scorecardStat.pillarHealth,
+    rows: [["Bayar Tepat Waktu", `${scorecardStat.onTimeRate}%`, "-"], ["Repeat Order Rate", `${scorecardStat.repeatOrderRate}%`, "-"], ["Key Account Aktif", scorecardStat.keyAccountsActive, "-"]]
+  }].map((pillar, pi) => /*#__PURE__*/React.createElement("div", {
+    key: pi,
+    style: {
+      border: `1px solid ${theme.border}`,
+      borderRadius: 10,
+      padding: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      fontWeight: 600,
+      color: theme.text
+    }
+  }, pillar.title), /*#__PURE__*/React.createElement(Badge, {
+    color: pillar.score >= 70 ? theme.green : pillar.score >= 40 ? theme.yellow : theme.red
+  }, pillar.score)), pillar.rows.map((r, ri) => /*#__PURE__*/React.createElement("div", {
+    key: ri,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      fontSize: 12,
+      color: theme.muted,
+      padding: "3px 0"
+    }
+  }, /*#__PURE__*/React.createElement("span", null, r[0]), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.text
+    }
+  }, r[1], r[2] !== "-" && ` / target ${r[2]}`))))))))), /*#__PURE__*/React.createElement(Modal, {
+    open: !!targetModalNama,
+    title: targetModalNama ? `Atur Target KPI — ${targetModalNama}` : "",
+    onClose: () => setTargetModalNama(null),
+    width: 480
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Target dipakai untuk menghitung skor Pillar 2 & 3. Kosongkan/0 pada Target Revenue untuk kembali ke perhitungan relatif-terhadap-rekan (default)."), /*#__PURE__*/React.createElement(Input, {
+    label: "Target Revenue (Value Quotation → SO, Rp)",
+    type: "number",
+    value: targetForm.revenueTarget,
+    onChange: v => setTargetForm({
+      ...targetForm,
+      revenueTarget: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Target Kontak Baru",
+    type: "number",
+    value: targetForm.newContactsTarget,
+    onChange: v => setTargetForm({
+      ...targetForm,
+      newContactsTarget: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Target Follow-up",
+    type: "number",
+    value: targetForm.followupTarget,
+    onChange: v => setTargetForm({
+      ...targetForm,
+      followupTarget: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Target Demo",
+    type: "number",
+    value: targetForm.demosTarget,
+    onChange: v => setTargetForm({
+      ...targetForm,
+      demosTarget: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Target Jumlah Quotation",
+    type: "number",
+    value: targetForm.quotationsTarget,
+    onChange: v => setTargetForm({
+      ...targetForm,
+      quotationsTarget: v
+    })
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setTargetModalNama(null)
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: saveTargets
+  }, "Simpan Target"))));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
