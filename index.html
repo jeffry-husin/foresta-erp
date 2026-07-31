@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-31.5";
+const APP_BUILD = "2026-07-31.6";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -7868,7 +7868,10 @@ function MekanikReport({
   const printInspection = r => {
     const rows = r.items.filter(it => it.kondisi).map(it => [it.category, it.item, it.kondisi, it.deskripsi || "-"]);
     const hidraulik = r.hidraulik || {};
-    const hidraulikRows = getInspectionHydraulicFields(r.tipeCrane || "Static Crane").map(([key, label]) => [`${label} (BAR)`, hidraulik[key] ? `${hidraulik[key]} BAR` : "-"]);
+    // Hydraulic pressure (BAR) readings print as the LAST section of the checklist (after HOOK/WINCH
+    // items), not as a header block under the customer name — matches the physical inspection form
+    // layout HRD/mekanik actually uses.
+    const hidraulikRows = getInspectionHydraulicFields(r.tipeCrane || "Static Crane").map(([key, label]) => ["HYDRAULIC PRESSURE", label, hidraulik[key] ? `${hidraulik[key]} BAR` : "-", "-"]);
     printDocument({
       company: store.companySettings,
       docTitle: `INSPECTION REPORT — ${r.tipeCrane || "Static Crane"}`,
@@ -7877,9 +7880,8 @@ function MekanikReport({
       partyLabel: "Customer:",
       partyName: detailVisit?.customerNama || "-",
       partyExtra: `Lokasi: ${detailVisit?.lokasi || "-"} · Unit: ${detailVisit?.unitTerkait || "-"}`,
-      extraInfoRows: hidraulikRows,
       itemHeaders: ["Kategori", "Komponen", "Kondisi", "Deskripsi"],
-      items: rows,
+      items: [...rows, ...hidraulikRows],
       showPrice: false,
       catatan: r.catatan,
       dibuatOleh: {
@@ -22969,27 +22971,59 @@ function PayrollModule({
     } : e));
     setEditEmp(null);
   };
-  const addKeluarga = () => {
-    if (!keluargaForm.nama) return alert("Nama anggota keluarga wajib diisi");
-    setEmpForm(f => ({
-      ...f,
-      keluarga: [...(f.keluarga || []), {
-        ...keluargaForm
-      }]
-    }));
+  const emptyKeluargaForm = {
+    nama: "",
+    hubungan: "",
+    tanggalLahir: "",
+    ktp: "",
+    alamat: "",
+    noTelp: ""
+  };
+  const [editingKeluargaIdx, setEditingKeluargaIdx] = useState(null);
+  // Single form used for both adding a new family member AND editing an existing one — clicking
+  // a row in the DATA KELUARGA table loads that member's full record back into this form (nama,
+  // hubungan, tanggal lahir, KTP, alamat, no telp all visible/editable at once) instead of the
+  // previous add-only/delete-only flow that had no way to fix a typo without deleting and
+  // re-adding from scratch.
+  const editKeluarga = i => {
+    setEditingKeluargaIdx(i);
     setKeluargaForm({
-      nama: "",
-      hubungan: "",
-      tanggalLahir: "",
-      ktp: "",
-      alamat: "",
-      noTelp: ""
+      ...emptyKeluargaForm,
+      ...empForm.keluarga[i]
     });
   };
-  const removeKeluarga = i => setEmpForm(f => ({
-    ...f,
-    keluarga: f.keluarga.filter((_, j) => j !== i)
-  }));
+  const cancelEditKeluarga = () => {
+    setEditingKeluargaIdx(null);
+    setKeluargaForm(emptyKeluargaForm);
+  };
+  const addKeluarga = () => {
+    if (!keluargaForm.nama) return alert("Nama anggota keluarga wajib diisi");
+    setEmpForm(f => {
+      const keluarga = [...(f.keluarga || [])];
+      if (editingKeluargaIdx !== null) {
+        keluarga[editingKeluargaIdx] = {
+          ...keluargaForm
+        };
+      } else {
+        keluarga.push({
+          ...keluargaForm
+        });
+      }
+      return {
+        ...f,
+        keluarga
+      };
+    });
+    setEditingKeluargaIdx(null);
+    setKeluargaForm(emptyKeluargaForm);
+  };
+  const removeKeluarga = i => {
+    setEmpForm(f => ({
+      ...f,
+      keluarga: f.keluarga.filter((_, j) => j !== i)
+    }));
+    if (editingKeluargaIdx === i) cancelEditKeluarga();
+  };
   const generatePayroll = () => {
     // Only active (aktif !== false) Manajemen User accounts are paid — a deactivated user's
     // historical payroll runs stay intact, but Generate Payroll no longer creates new rows for them.
@@ -23269,6 +23303,8 @@ function PayrollModule({
         kabupaten: emp.kabupaten || "",
         provinsi: emp.provinsi || ""
       });
+      setEditingKeluargaIdx(null);
+      setKeluargaForm(emptyKeluargaForm);
     }
   })), tab === "karyawan" && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -23896,12 +23932,28 @@ function PayrollModule({
       noTelp: v
     }),
     placeholder: "No. Telp"
-  }), /*#__PURE__*/React.createElement(Btn, {
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     onClick: addKeluarga
-  }, "+ Add")), (empForm.keluarga || []).length > 0 && /*#__PURE__*/React.createElement(Table, {
-    headers: ["Nama", "Hubungan", "Tanggal Lahir", "No. KTP", "Alamat", "No. Telp", ""],
-    rows: empForm.keluarga.map((k, i) => [k.nama, k.hubungan, k.tanggalLahir, k.ktp || "-", k.alamat || "-", k.noTelp || "-", /*#__PURE__*/React.createElement(Btn, {
+  }, editingKeluargaIdx !== null ? "💾 Update" : "+ Add"), editingKeluargaIdx !== null && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: cancelEditKeluarga
+  }, "Batal"))), (empForm.keluarga || []).length > 0 && /*#__PURE__*/React.createElement(Table, {
+    headers: ["Nama (klik untuk edit)", "Hubungan", "Tanggal Lahir", "No. KTP", "Alamat", "No. Telp", ""],
+    rows: empForm.keluarga.map((k, i) => [/*#__PURE__*/React.createElement("span", {
+      onClick: () => editKeluarga(i),
+      style: {
+        cursor: "pointer",
+        color: theme.accent,
+        textDecoration: "underline"
+      }
+    }, k.nama), k.hubungan, k.tanggalLahir || "-", k.ktp || "-", k.alamat || "-", k.noTelp || "-", /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "danger",
       onClick: () => removeKeluarga(i)
