@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-31.4";
+const APP_BUILD = "2026-07-31.5";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -1769,6 +1769,17 @@ const seedEmployees = [...DEFAULT_USER_SEED, ...USER_DAN_AKSES_SEED].map(u => ({
 // name in Supabase `profiles`, plus a default value used until the DB migration (see
 // sql/01_schema_alter_profiles.sql) actually adds these columns — so the app keeps working
 // even before the schema change is applied.
+// Canonical Status Karyawan values — old data (entered before this was a controlled Select) may
+// have inconsistent casing like "TETAP"/"tetap"/"Harian "/"HARIAN" saved directly in the DB.
+// Normalize case-insensitively (and trim whitespace) to one of exactly 3 canonical labels
+// everywhere the value is read, so "Tetap" and "TETAP" are always treated as the same status
+// instead of silently being 2 different values.
+const normalizeStatusKaryawan = v => {
+  const s = String(v || "").trim().toLowerCase();
+  if (s === "harian") return "Harian";
+  if (s === "freelance") return "Freelance";
+  return "Tetap";
+};
 const EMPLOYEE_FIELD_MAP = [["jabatan", "jabatan", ""], ["gajiPokok", "gaji_pokok", 5000000], ["tunjangan", "tunjangan", 500000], ["bpjsTkPct", "bpjs_tk_pct", 2], ["bpjsKesPct", "bpjs_kes_pct", 1], ["ktp", "ktp", ""], ["signature", "signature", null], ["uangHarianRate", "uang_harian_rate", 50000], ["uangDinasRate", "uang_dinas_rate", 100000], ["lemburDibayarJam", "lembur_dibayar_jam", 0], ["absenTerlambatJamSisa", "absen_terlambat_jam_sisa", 0], ["hariKerjaSeminggu", "hari_kerja_seminggu", 5], ["statusKaryawan", "status_kepegawaian", "Tetap"], ["jenisKelamin", "jenis_kelamin", ""], ["tanggalLahir", "tanggal_lahir", ""], ["alamat", "alamat", ""], ["rtRw", "rt_rw", ""], ["kelDesa", "kel_desa", ""], ["kecamatan", "kecamatan", ""], ["kabupaten", "kabupaten", ""], ["provinsi", "provinsi", ""], ["noTelp", "no_telp", ""], ["keluarga", "keluarga", []], ["kontakDarurat", "kontak_darurat", []], ["jknPekerja", "jkn_pekerja", ""], ["jknPeserta", "jkn_peserta", ""], ["npp", "npp", ""], ["kk", "kk", ""], ["uangKerajinanRate", "uang_kerajinan_rate", 0], ["uangHarianKerjaRate", "uang_harian_kerja_rate", 0], ["tanggalMasuk", "tanggal_masuk", ""], ["uangMakanAktif", "uang_makan_aktif", true]];
 const seedCOA = [{
   kode: "OPS-001",
@@ -1990,6 +2001,7 @@ function useStore() {
       EMPLOYEE_FIELD_MAP.forEach(([camel, snake, def]) => {
         row[camel] = p[snake] !== undefined && p[snake] !== null ? p[snake] : def;
       });
+      row.statusKaryawan = normalizeStatusKaryawan(row.statusKaryawan);
       return row;
     }));
   });
@@ -22724,7 +22736,7 @@ function PayrollModule({
             uangHarianKerjaRate: r.uangHarianKerjaRate !== undefined && r.uangHarianKerjaRate !== "" ? parseFloat(r.uangHarianKerjaRate) : arr[idx].uangHarianKerjaRate ?? 0,
             uangDinasRate: r.uangDinasRate !== undefined && r.uangDinasRate !== "" ? parseFloat(r.uangDinasRate) : arr[idx].uangDinasRate ?? 100000,
             uangKerajinanRate: r.uangKerajinanRate !== undefined && r.uangKerajinanRate !== "" ? parseFloat(r.uangKerajinanRate) : arr[idx].uangKerajinanRate ?? 0,
-            statusKaryawan: r.statusKaryawan || arr[idx].statusKaryawan || "Tetap",
+            statusKaryawan: normalizeStatusKaryawan(r.statusKaryawan || arr[idx].statusKaryawan),
             ktp: r.ktp || arr[idx].ktp || "",
             kk: r.kk || arr[idx].kk || "",
             alamat: r.alamat || arr[idx].alamat || "",
@@ -22761,7 +22773,7 @@ function PayrollModule({
             noTelp: r.noTelp || arr[idx].noTelp || "",
             ktp: r.ktp || arr[idx].ktp || "",
             kk: r.kk || arr[idx].kk || "",
-            statusKaryawan: r.statusKaryawan || arr[idx].statusKaryawan || "Tetap"
+            statusKaryawan: normalizeStatusKaryawan(r.statusKaryawan || arr[idx].statusKaryawan)
           };
           updated++;
         } else notFoundUsernames.push(r.username || username);
@@ -22815,7 +22827,7 @@ function PayrollModule({
             noTelp: r.noTelp || arr[idx].noTelp || "",
             ktp: r.ktp || arr[idx].ktp || "",
             kk: r.kk || arr[idx].kk || "",
-            statusKaryawan: r.statusKaryawan || arr[idx].statusKaryawan || "Tetap",
+            statusKaryawan: normalizeStatusKaryawan(r.statusKaryawan || arr[idx].statusKaryawan),
             tanggalLahir: r.tanggalLahir || arr[idx].tanggalLahir || "",
             jenisKelamin: r.jenisKelamin || arr[idx].jenisKelamin || "",
             tanggalMasuk: r.tanggalMasuk || arr[idx].tanggalMasuk || "",
@@ -22943,7 +22955,7 @@ function PayrollModule({
       keluarga: empForm.keluarga,
       uangHarianRate: parseFloat(empForm.uangHarianRate) || 0,
       hariKerjaSeminggu: parseFloat(empForm.hariKerjaSeminggu) || 5,
-      statusKaryawan: empForm.statusKaryawan || "Tetap",
+      statusKaryawan: normalizeStatusKaryawan(empForm.statusKaryawan),
       uangKerajinanRate: parseFloat(empForm.uangKerajinanRate) || 0,
       uangHarianKerjaRate: parseFloat(empForm.uangHarianKerjaRate) || 0,
       tanggalLahir: empForm.tanggalLahir || "",
@@ -24239,24 +24251,28 @@ function UangMakanModule({
       total: uangMakan + uangKerajinan
     };
   };
-  const toggleUangMakanAktif = (emp, ev) => {
-    ev.stopPropagation();
+  const setUangMakanAktif = (emp, aktif, ev) => {
+    if (ev) ev.stopPropagation();
     setEmployees(prev => (prev || []).map(e => e.username === emp.username ? {
       ...e,
-      uangMakanAktif: e.uangMakanAktif === false ? true : false
+      uangMakanAktif: aktif
     } : e));
   };
-  // Admin melihat SEMUA karyawan (termasuk yang di-nonaktifkan dari laporan ini, ditandai
-  // abu-abu) supaya bisa diaktifkan lagi kapan saja — hanya yang aktif yang masuk hitungan
-  // total/print/export. Karyawan non-admin (self-service) hanya melihat dirinya sendiri, dan
-  // hanya bila masih aktif.
-  const visibleEmployees = isAdmin ? (employees || []).slice().sort((a, b) => (a.nama || "").localeCompare(b.nama || "")) : myEmp && myEmp.uangMakanAktif !== false ? [myEmp] : [];
+  const [tambahKaryawanUsername, setTambahKaryawanUsername] = useState("");
+  // Admin hanya melihat karyawan yang AKTIF di laporan ini — karyawan yang dikeluarkan langsung
+  // hilang dari daftar (bukan cuma ditandai abu-abu) supaya daftar tidak penuh/membingungkan.
+  // Untuk memasukkan karyawan yang sebelumnya dikeluarkan (atau karyawan baru), gunakan dropdown
+  // "+ Tambah Karyawan" di atas tabel. Karyawan non-admin (self-service) hanya melihat dirinya
+  // sendiri, dan hanya bila masih aktif.
+  const activeEmployees = (employees || []).filter(e => e.uangMakanAktif !== false);
+  const inactiveEmployees = (employees || []).filter(e => e.uangMakanAktif === false).slice().sort((a, b) => (a.nama || "").localeCompare(b.nama || ""));
+  const visibleEmployees = isAdmin ? activeEmployees.slice().sort((a, b) => (a.nama || "").localeCompare(b.nama || "")) : myEmp && myEmp.uangMakanAktif !== false ? [myEmp] : [];
   const rows = visibleEmployees.map(e => ({
     emp: e,
-    aktif: e.uangMakanAktif !== false,
+    aktif: true,
     ...calcUangMakanPeriode(e.nama, selMulai, selSelesai)
   }));
-  const activeRows = rows.filter(r => r.aktif);
+  const activeRows = rows;
   const totalSemua = activeRows.reduce((s, r) => s + r.total, 0);
   const periodeLabel = selMulai && selSelesai ? `${selMulai} s/d ${selSelesai}` : "-";
   const exportRows = () => exportToExcel(activeRows.map(r => ({
@@ -24330,7 +24346,41 @@ function UangMakanModule({
     onClick: printLaporan
   }), isAdmin && /*#__PURE__*/React.createElement(ExportExcelBtn, {
     onClick: exportRows
-  }))), /*#__PURE__*/React.createElement("div", {
+  }))), isAdmin && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      alignItems: "center",
+      flexWrap: "wrap",
+      background: theme.surface,
+      padding: "10px 14px",
+      borderRadius: 8,
+      border: `1px dashed ${theme.border}`
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      fontWeight: 600
+    }
+  }, "+ Tambah Karyawan ke Laporan:"), /*#__PURE__*/React.createElement(Select, {
+    value: tambahKaryawanUsername,
+    onChange: v => {
+      setTambahKaryawanUsername("");
+      const emp = inactiveEmployees.find(e => e.username === v);
+      if (emp) setUangMakanAktif(emp, true);
+    },
+    options: [{
+      value: "",
+      label: inactiveEmployees.length ? "Pilih karyawan..." : "Semua karyawan sudah masuk daftar"
+    }, ...inactiveEmployees.map(e => ({
+      value: e.username,
+      label: e.nama
+    }))],
+    style: {
+      width: 260
+    }
+  })), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
       color: theme.muted,
@@ -24339,34 +24389,26 @@ function UangMakanModule({
       borderRadius: 8,
       border: `1px dashed ${theme.border}`
     }
-  }, "ℹ️ Uang Makan dihitung PER PERIODE (mingguan, Kamis–Rabu, sesuai periode Rekap Absensi yang tersimpan): Riil Hari × rate Uang Makan Harian. Uang Kerajinan (rate per karyawan, default Rp 50.000 — diatur di Manajemen User) diberikan bila hadir penuh (tidak ada hari Absen) sepanjang periode tersebut. Untuk koreksi hari hadir, edit di Rekap Absensi; untuk koreksi rate, edit di Manajemen User.", isAdmin ? " Klik badge \"Aktif/Nonaktif\" untuk memasukkan/mengeluarkan karyawan dari laporan & total Uang Makan ini (mis. karyawan yang tidak dapat uang makan/kerajinan sama sekali) — baris abu-abu berarti dikeluarkan dari total." : ""), periodeOptions.length === 0 ? /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("p", {
+  }, "ℹ️ Uang Makan dihitung PER PERIODE (mingguan, Kamis–Rabu, sesuai periode Rekap Absensi yang tersimpan): Riil Hari × rate Uang Makan Harian. Uang Kerajinan (rate per karyawan, default Rp 50.000 — diatur di Manajemen User) diberikan bila hadir penuh (tidak ada hari Absen) sepanjang periode tersebut. Untuk koreksi hari hadir, edit di Rekap Absensi; untuk koreksi rate, edit di Manajemen User.", isAdmin ? " Hanya karyawan yang aktif di laporan ini yang muncul di daftar & total — klik \"Keluarkan\" untuk menghilangkan seseorang dari laporan, atau gunakan \"+ Tambah Karyawan\" di atas untuk memasukkannya kembali." : ""), periodeOptions.length === 0 ? /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("p", {
     style: {
       color: theme.muted,
       margin: 0
     }
   }, "Belum ada periode Rekap Absensi tersimpan.")) : /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
-    headers: isAdmin ? ["Nama", "Jabatan", "Riil Hari", "Absen Hari", "Uang Makan", "Uang Kerajinan", "Total", "Status"] : ["Nama", "Jabatan", "Riil Hari", "Absen Hari", "Uang Makan", "Uang Kerajinan", "Total"],
+    headers: isAdmin ? ["Nama", "Jabatan", "Riil Hari", "Absen Hari", "Uang Makan", "Uang Kerajinan", "Total", "Aksi"] : ["Nama", "Jabatan", "Riil Hari", "Absen Hari", "Uang Makan", "Uang Kerajinan", "Total"],
     rows: rows.map(r => {
-      const base = [/*#__PURE__*/React.createElement("span", {
-        style: {
-          opacity: r.aktif ? 1 : 0.45
-        }
-      }, r.emp.nama), r.emp.jabatan || "-", fmtNum(r.riilHari), fmtNum(r.absenHari), fmt(r.uangMakan), r.kerajinanEligible ? /*#__PURE__*/React.createElement(Badge, {
+      const base = [r.emp.nama, r.emp.jabatan || "-", fmtNum(r.riilHari), fmtNum(r.absenHari), fmt(r.uangMakan), r.kerajinanEligible ? /*#__PURE__*/React.createElement(Badge, {
         color: theme.green
       }, fmt(r.uangKerajinan), " ✓ Hadir Penuh") : r.uangKerajinan > 0 ? fmt(r.uangKerajinan) : "-", /*#__PURE__*/React.createElement("strong", {
         style: {
-          color: r.aktif ? theme.green : theme.muted
+          color: theme.green
         }
       }, fmt(r.total))];
-      if (isAdmin) base.push( /*#__PURE__*/React.createElement("span", {
-        onClick: ev => toggleUangMakanAktif(r.emp, ev),
-        style: {
-          cursor: "pointer"
-        },
-        title: "Klik untuk aktifkan/nonaktifkan dari laporan Uang Makan"
-      }, /*#__PURE__*/React.createElement(Badge, {
-        color: r.aktif ? theme.green : theme.red
-      }, r.aktif ? "Aktif" : "Nonaktif")));
+      if (isAdmin) base.push( /*#__PURE__*/React.createElement(Btn, {
+        variant: "ghost",
+        size: "sm",
+        onClick: ev => setUangMakanAktif(r.emp, false, ev)
+      }, "Keluarkan"));
       return base;
     }),
     emptyMsg: isAdmin ? "Belum ada data Rekap Absensi untuk periode ini." : "Belum ada data Rekap Absensi kamu untuk periode ini — pastikan Rekap Absensi periode ini sudah disimpan HRD."
@@ -28923,6 +28965,11 @@ function FormCutiModule({
     }
     return out;
   };
+  // 3 pilihan jenis saat HRD approve: "Cuti" (Cuti Biasa, potong kuota 12 hari/tahun), "Cuti
+  // Khusus" (di luar kuota), atau "Ijin" (bukan cuti sama sekali — ditulis ke attendance dengan
+  // status "Izin", vocabulary yang sama dipakai di editor Absensi manual, dan tidak memotong
+  // kuota cuti).
+  const resolveJenisCuti = v => v === "Cuti Khusus" ? "Cuti Khusus" : v === "Ijin" ? "Izin" : "Cuti";
   const currentYear = today().slice(0, 4);
   const cutiTerpakai = username => attendance.filter(a => a.username === username && a.status === "Cuti" && a.tanggal.startsWith(currentYear)).length;
   const sisaCuti = username => Math.max(0, 12 - cutiTerpakai(username));
@@ -29016,10 +29063,13 @@ function FormCutiModule({
       ...formOverride,
       jumlahHari: countDays(formOverride.dariTanggal || req.dariTanggal, formOverride.sampaiTanggal || req.sampaiTanggal)
     } : req;
-    // HRD chooses at approval time whether this is Cuti Biasa (potong kuota 12 hari/tahun) atau
-    // Cuti Khusus (di luar kuota — menikah, keluarga meninggal, dll). Writes to the same
-    // attendance "status" vocabulary already used across Absensi ("Cuti" / "Cuti Khusus").
-    const jenisCuti = merged.jenisCuti === "Cuti Khusus" ? "Cuti Khusus" : "Cuti";
+    // HRD chooses at approval time: Cuti Biasa (potong kuota 12 hari/tahun), Cuti Khusus (di luar
+    // kuota — menikah, keluarga meninggal, dll), atau Ijin (bukan cuti, tidak potong kuota).
+    // reqJenis is what's saved/displayed on the request itself; attendanceStatus is what's
+    // written into Absensi (uses "Izin" to match the vocabulary already used by the manual
+    // attendance-status editor).
+    const reqJenis = merged.jenisCuti === "Cuti Khusus" ? "Cuti Khusus" : merged.jenisCuti === "Ijin" ? "Ijin" : "Cuti";
+    const jenisCuti = resolveJenisCuti(reqJenis);
     const dates = dateRange(merged.dariTanggal, merged.sampaiTanggal);
     // Bug fix: previously any pre-existing attendance row for the date (regardless of status —
     // e.g. a blank/"Hadir" row already uploaded via Rekap Mesin before the leave was approved)
@@ -29055,7 +29105,7 @@ function FormCutiModule({
       arr[idx] = {
         ...arr[idx],
         ...merged,
-        jenisCuti,
+        jenisCuti: reqJenis,
         status: "Disetujui",
         approvedBy: session.nama,
         approvedTanggal: today()
@@ -29066,7 +29116,7 @@ function FormCutiModule({
       module: "Form Cuti",
       docNomor: merged.id,
       action: "Approve",
-      detail: `${merged.nama}: ${merged.jumlahHari} hari (${merged.dariTanggal} s/d ${merged.sampaiTanggal}) — ${jenisCuti}`
+      detail: `${merged.nama}: ${merged.jumlahHari} hari (${merged.dariTanggal} s/d ${merged.sampaiTanggal}) — ${reqJenis}`
     });
     setDetail(null);
   };
@@ -29076,13 +29126,15 @@ function FormCutiModule({
   // with the change re-synced into Absensi (attendance) immediately, not just edited in isolation.
   const reviseApproved = (req, formOverride) => {
     const oldDates = dateRange(req.dariTanggal, req.sampaiTanggal);
-    const oldJenis = req.jenisCuti === "Cuti Khusus" ? "Cuti Khusus" : "Cuti";
+    const oldReqJenis = req.jenisCuti === "Cuti Khusus" ? "Cuti Khusus" : req.jenisCuti === "Ijin" ? "Ijin" : "Cuti";
+    const oldJenis = resolveJenisCuti(oldReqJenis);
     const merged = {
       ...req,
       ...formOverride,
       jumlahHari: countDays(formOverride.dariTanggal || req.dariTanggal, formOverride.sampaiTanggal || req.sampaiTanggal)
     };
-    const newJenis = merged.jenisCuti === "Cuti Khusus" ? "Cuti Khusus" : "Cuti";
+    const newReqJenis = merged.jenisCuti === "Cuti Khusus" ? "Cuti Khusus" : merged.jenisCuti === "Ijin" ? "Ijin" : "Cuti";
+    const newJenis = resolveJenisCuti(newReqJenis);
     const newDates = dateRange(merged.dariTanggal, merged.sampaiTanggal);
     const newDateSet = new Set(newDates);
     // Dates dropped from the range: remove the attendance row this leave originally wrote, but only
@@ -29117,7 +29169,7 @@ function FormCutiModule({
       arr[idx] = {
         ...arr[idx],
         ...merged,
-        jenisCuti: newJenis,
+        jenisCuti: newReqJenis,
         revisedBy: session.nama,
         revisedTanggal: today()
       };
@@ -29394,9 +29446,10 @@ function FormCutiModule({
     size: "sm",
     variant: "success",
     onClick: () => {
-      // Quick-approve shortcut (skips the Detail modal) — still asks HRD to pick Cuti Biasa vs
-      // Cuti Khusus before writing to attendance, same choice available via Detail/Edit → Approve.
-      const isKhusus = confirm(`Approve cuti ${r.nama} (${r.jumlahHari} hari)?\n\nOK = Cuti Khusus (di luar kuota)\nCancel = Cuti Biasa (potong kuota 12 hari/tahun)`);
+      // Quick-approve shortcut (skips the Detail modal) — confirm() only supports 2 choices, so
+      // this covers the 2 most common cases (Cuti Biasa/Khusus); for "Ijin" use Detail/Edit →
+      // Approve where the Select has all 3 options.
+      const isKhusus = confirm(`Approve cuti ${r.nama} (${r.jumlahHari} hari)?\n\nOK = Cuti Khusus (di luar kuota)\nCancel = Cuti Biasa (potong kuota 12 hari/tahun)\n\nUntuk approve sebagai Ijin, gunakan "Detail/Edit" lalu pilih Ijin.`);
       approve(r, {
         jenisCuti: isKhusus ? "Cuti Khusus" : "Cuti"
       });
@@ -29577,6 +29630,9 @@ function FormCutiModule({
     }, {
       value: "Cuti Khusus",
       label: "Cuti Khusus (di luar kuota — menikah, keluarga meninggal, dll)"
+    }, {
+      value: "Ijin",
+      label: "Ijin (bukan cuti, tidak potong kuota)"
     }]
   }), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -29588,7 +29644,7 @@ function FormCutiModule({
     variant: "ghost",
     onClick: detail.status === "Disetujui" ? () => reviseApproved(detail, detailForm) : saveDetailEdits
   }, detail.status === "Disetujui" ? "💾 Simpan Revisi (update Absensi)" : "💾 Simpan Perubahan")) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Alasan: "), detail.alasan), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Dari Tanggal: "), detail.dariTanggal), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Sampai Tanggal: "), detail.sampaiTanggal), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Jumlah Hari: "), detail.jumlahHari), detail.jenisCuti && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Jenis Cuti: "), /*#__PURE__*/React.createElement(Badge, {
-    color: detail.jenisCuti === "Cuti Khusus" ? theme.accentLight : theme.green
+    color: detail.jenisCuti === "Cuti Khusus" ? theme.accentLight : detail.jenisCuti === "Ijin" ? theme.yellow : theme.green
   }, detail.jenisCuti))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Status: "), /*#__PURE__*/React.createElement(Badge, {
     color: statusColor[detail.status]
   }, detail.status)), detail.status === "Ditolak" && detail.rejectReason && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Alasan Penolakan: "), detail.rejectReason), detail.approvedBy && /*#__PURE__*/React.createElement("div", {
@@ -31849,7 +31905,7 @@ function UserManagement({
       ...form,
       role: v
     }),
-    options: Object.entries(ROLE_DEFS).map(([v, d]) => ({
+    options: Object.entries(ROLE_DEFS).filter(([v]) => v !== "gm").map(([v, d]) => ({
       value: v,
       label: d.label
     }))
