@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-31.9";
+const APP_BUILD = "2026-07-31.10";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -155,6 +155,31 @@ const fmtMoney = (n, currency) => !currency || currency === "IDR" ? fmt(n) : `${
 // Display-only label mapping — the stored value stays "TEMPO" internally (used in comparisons,
 // getDueStatus, etc.) but Purchase Order screens/prints show it in English as "CREDIT".
 const payLabel = tp => tp === "TEMPO" ? "CREDIT" : tp;
+// GLOBAL stock-reservation helper — shared by ItemRequisitionModule and PurchaseOrderModule.
+// Master Part stock (part.stok) only ever rises on actual Goods Receipt; it is NOT decremented
+// the moment an Item Requisition is created or turned into a PO. That means once a part's IR
+// is outstanding (created but not yet fully received), that qty is effectively already spoken
+// for — but nothing was subtracting it before this fix, so a SECOND, unrelated IR for the same
+// part (different SO) would see the full raw stock as "available" and get silently skipped,
+// even though it was already reserved by the first IR. Root cause of the reported PN 93093*
+// case: stock=1, IR-008 already turned into PO (reserving that 1 unit), then IR-064 also needed
+// it but was judged "stock cukup" because nothing tracked IR-008's claim on that unit.
+// Sums remaining (requested - already received via linked PO receivedMap) qty for a part across
+// every Item Requisition system-wide, excluding IRs that belong to excludeSoNomor (so a
+// shortfall calc for that SO's own IRs isn't double-subtracted against itself).
+const reservedQtyFor = (store, partNumber, excludeSoNomor) => {
+  const { itemRequisitions, poLocal, poOverseas } = store;
+  const receivedForIR = ir => {
+    const linkedPOs = [...(poLocal || []), ...(poOverseas || [])].filter(po => (po.irNomors || []).includes(ir.nomor));
+    return linkedPOs.reduce((s, po) => s + (Number((po.receivedMap || {})[partNumber]) || 0), 0);
+  };
+  return (itemRequisitions || []).filter(ir => ir.soNomor !== excludeSoNomor).reduce((sum, ir) => {
+    const it = (ir.items || []).find(x => x.partNumber === partNumber);
+    if (!it) return sum;
+    const diterima = receivedForIR(ir);
+    return sum + Math.max(0, (it.qtyButuh || 0) - diterima);
+  }, 0);
+};
 // Render free-text notes with real line breaks preserved (textarea input already allows multiple
 // lines; without this, browsers collapse \n in plain text nodes onto a single visual line).
 const catatanStyle = {
@@ -14874,7 +14899,11 @@ function ItemRequisitionModule({
     if (!so) return [];
     return explodeSOItems(so).map(m => {
       const part = parts.find(p => p.partNumber === m.partNumber);
-      const stok = part?.stok ?? 0;
+      const stokRaw = part?.stok ?? 0;
+      // Net out stock already earmarked by OTHER SOs' outstanding IRs for this same part before
+      // comparing against this SO's own need — see reservedQtyFor above.
+      const reservedByOthers = reservedQtyFor(store, m.partNumber, soNomor);
+      const stok = Math.max(0, stokRaw - reservedByOthers);
       const sudahDiminta = irRequestedQtyFor(soNomor, m.partNumber);
       const kurang = Math.max(0, m.qty - stok - sudahDiminta);
       return {
@@ -14886,7 +14915,7 @@ function ItemRequisitionModule({
         qtyKurang: kurang,
         catatan: m.fromUnits && m.fromUnits.size > 0 ? `Dari BOM Unit: ${[...m.fromUnits].join(", ")}` : ""
       };
-    }).filter(x => x.qtyKurang > 0); // only short items still not covered by stock or an existing IR
+    }).filter(x => x.qtyKurang > 0); // only short items still not covered by (net) stock or an existing IR
   };
   // Live stock lookup for an item already saved on an existing IR. An IR's it.stokTersedia/
   // it.qtyKurang are a SNAPSHOT taken when the IR was created — if Master Part stock is corrected
@@ -14899,9 +14928,12 @@ function ItemRequisitionModule({
   // stokTersedia/qtyKurang fields are left untouched as a record of what was originally requested;
   // "Recheck Stock" below still exists for anyone who wants to formally persist+audit-log the
   // correction onto the IR record itself.
-  const liveIrItemStock = it => {
+  const liveIrItemStock = (it, soNomor) => {
     const p = parts.find(x => x.partNumber === it.partNumber);
-    const stokTersedia = p ? (p.stok ?? 0) : (it.stokTersedia || 0);
+    const stokRaw = p ? (p.stok ?? 0) : (it.stokTersedia || 0);
+    // Net out stock already reserved by other SOs' outstanding IRs — same fix as checkStockForSO.
+    const reservedByOthers = reservedQtyFor(store, it.partNumber, soNomor);
+    const stokTersedia = Math.max(0, stokRaw - reservedByOthers);
     const qtyKurang = Math.max(0, (it.qtyButuh || 0) - stokTersedia);
     return {
       stokTersedia,
@@ -15162,7 +15194,9 @@ function ItemRequisitionModule({
   const buildStockRecheckDiff = ir => {
     const rows = (ir.items || []).map(it => {
       const p = parts.find(x => x.partNumber === it.partNumber);
-      const currentStok = p?.stok ?? 0;
+      const currentStokRaw = p?.stok ?? 0;
+      // Net out stock already reserved by OTHER SOs' outstanding IRs — same fix as checkStockForSO.
+      const currentStok = Math.max(0, currentStokRaw - reservedQtyFor(store, it.partNumber, ir.soNomor));
       const oldStok = it.stokTersedia || 0;
       const qtyButuh = it.qtyButuh || 0;
       const newQtyKurang = Math.max(0, qtyButuh - currentStok);
@@ -15550,7 +15584,7 @@ function ItemRequisitionModule({
     headers: ["Part Number", "Part Name", "Qty Dibutuhkan", "Stok Tersedia", "Qty Kurang", "Catatan", "Status Diterima"],
     rows: detail.items.map(it => {
       const diterima = irRefInfo(detail).receivedByPart[it.partNumber] || 0;
-      const live = liveIrItemStock(it);
+      const live = liveIrItemStock(it, detail.soNomor);
       const statusBadge = diterima <= 0 ? React.createElement(Badge, {
         color: theme.red
       }, "Belum Diterima") : diterima < (Number(it.qtyButuh) || 0) ? React.createElement(Badge, {
@@ -15584,7 +15618,7 @@ function ItemRequisitionModule({
       partyExtra: detail.soCustomerNama || "",
       itemHeaders: ["Part Number", "Part Name", "Qty Dibutuhkan", "Stok Tersedia", "Qty Kurang", "Catatan"],
       items: detail.items.map(it => {
-        const live = liveIrItemStock(it);
+        const live = liveIrItemStock(it, detail.soNomor);
         return [it.partNumber, it.partName, fmtNum(it.qtyButuh), fmtNum(live.stokTersedia), fmtNum(live.qtyKurang), it.catatan || "-"];
       }),
       showPrice: false,
@@ -16112,7 +16146,11 @@ function PurchaseOrderModule({
       // Use LIVE qty kurang (recomputed against current Master Part stock), not the frozen
       // it.qtyKurang snapshot from when the IR was created — otherwise a stock correction made
       // after the IR but before it's turned into a PO would silently order the wrong quantity.
-      const liveQtyKurang = Math.max(0, (it.qtyButuh || 0) - (part ? (part.stok ?? 0) : (it.stokTersedia || 0)));
+      // Also net out stock already reserved by OTHER SOs' outstanding IRs (reservedQtyFor) so an
+      // already-earmarked unit doesn't get treated as available here too.
+      const rawStok = part ? (part.stok ?? 0) : (it.stokTersedia || 0);
+      const netStok = Math.max(0, rawStok - reservedQtyFor(store, it.partNumber, irPick.soNomor));
+      const liveQtyKurang = Math.max(0, (it.qtyButuh || 0) - netStok);
       return {
         partNumber: it.partNumber,
         partName: it.partName,
@@ -17572,7 +17610,10 @@ function PurchaseOrderModule({
     // Live qty kurang vs current Master Part stock — see confirmIrPick's note; this is the qty
     // Purchasing sees BEFORE picking, so it needs to already be live too, not just at confirm time.
     const livePart = store.parts.find(p => p.partNumber === it.partNumber);
-    const liveQtyKurang = Math.max(0, (it.qtyButuh || 0) - (livePart ? (livePart.stok ?? 0) : (it.stokTersedia || 0)));
+    const rawLiveStok = livePart ? (livePart.stok ?? 0) : (it.stokTersedia || 0);
+    // Net out stock already reserved by OTHER SOs' outstanding IRs — same fix as confirmIrPick.
+    const netLiveStok = Math.max(0, rawLiveStok - reservedQtyFor(store, it.partNumber, irPick.soNomor));
+    const liveQtyKurang = Math.max(0, (it.qtyButuh || 0) - netLiveStok);
     return /*#__PURE__*/React.createElement("label", {
       key: i,
       style: {
