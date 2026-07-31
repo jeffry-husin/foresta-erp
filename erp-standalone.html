@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-31.7";
+const APP_BUILD = "2026-07-31.8";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -22144,6 +22144,7 @@ function InvoiceModule({
       hideCreatedBy: true,
       disetujuiAlign: "left",
       showMateraiSpace: true,
+      materaiSpasi: 5,
       disetujuiLabel: "Disetujui Oleh",
       disetujuiOleh: {
         nama: "Effendi Husin",
@@ -25289,6 +25290,7 @@ function printDocument({
   hideCreatedBy = false,
   disetujuiAlign,
   showMateraiSpace = false,
+  materaiSpasi = 5,
   company,
   bankInfoText,
   terbilangText,
@@ -25376,7 +25378,7 @@ function printDocument({
       ${catatan ? `<div style="margin-top:24px;font-size:12px;color:#666;white-space:pre-wrap;word-break:break-word;"><strong>Catatan:</strong> ${String(catatan).replace(/</g, "&lt;")}</div>` : ""}
       <div style="margin-top:20px;display:flex;justify-content:${disetujuiAlign === "left" ? "flex-start" : hideCreatedBy ? "center" : "space-between"};font-size:12px;">
         ${hideCreatedBy ? "" : `<div style="text-align:center;width:200px;">${dibuatOlehLabel}<br/><br/>${sigBlock(dibuatOleh)}</div>`}
-        <div style="text-align:center;width:200px;">${disetujuiLabel}${showMateraiSpace ? `<div style="width:3cm;height:4cm;margin:4px auto 0;"></div>` : "<br/>"}${sigBlock(disetujuiOleh, showMateraiSpace)}</div>
+        <div style="text-align:center;width:200px;">${disetujuiLabel}${showMateraiSpace ? Array(materaiSpasi).fill("<br/>").join("") : "<br/>"}${sigBlock(disetujuiOleh, showMateraiSpace)}</div>
       </div>
       <div style="margin-top:40px;text-align:center;font-style:italic;font-size:7px;color:#888;border-top:1px solid #ddd;padding-top:10px;line-height:1.5;">
         DISCLAIMER<br/>
