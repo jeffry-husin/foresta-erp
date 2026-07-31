@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-07-31.11";
+const APP_BUILD = "2026-08-01.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -3169,8 +3169,60 @@ function Table({
   onDelete,
   emptyMsg = "Tidak ada data",
   pageSize = 100,
-  search = false
+  search = false,
+  resizable = false,
+  storageKey
 }) {
+  // Optional drag-to-resize columns (opt-in via `resizable: true` + a unique `storageKey`) — first
+  // built for Sales Activity's SUPER USER-only request to control column widths themselves,
+  // written generically here so any other Table call site can opt in later too. Off by default:
+  // no handles rendered, no width applied, existing tables app-wide are completely unaffected.
+  // Widths are keyed by column index and persisted per browser under `storageKey` (include
+  // session.username in the key at the call site for genuinely per-user, not just per-device,
+  // persistence) so a resize sticks around across reloads.
+  const [colWidths, setColWidths] = useState(() => {
+    if (!resizable || !storageKey) return {};
+    try {
+      return JSON.parse(window.localStorage.getItem(storageKey) || "{}");
+    } catch (e) {
+      return {};
+    }
+  });
+  const resizeStateRef = useRef(null);
+  const startResize = (hIdx, e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const th = e.currentTarget.closest("th");
+    resizeStateRef.current = {
+      hIdx,
+      startX: e.clientX,
+      startWidth: (th && th.offsetWidth) || 120
+    };
+    const onMove = ev => {
+      const st = resizeStateRef.current;
+      if (!st) return;
+      const next = Math.max(60, st.startWidth + (ev.clientX - st.startX));
+      setColWidths(prev => ({
+        ...prev,
+        [st.hIdx]: next
+      }));
+    };
+    const onUp = () => {
+      resizeStateRef.current = null;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      if (storageKey) {
+        setColWidths(prev => {
+          try {
+            window.localStorage.setItem(storageKey, JSON.stringify(prev));
+          } catch (e) {}
+          return prev;
+        });
+      }
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
   // Pagination guard: rendering thousands of <tr> nodes in one synchronous React
   // commit (e.g. Master Part with 2700+ items, Database Client with 900+) can
   // freeze or crash the tab on lower-spec devices — this is what made those
@@ -3274,6 +3326,12 @@ function Table({
       whiteSpace: "nowrap",
       cursor: "pointer",
       userSelect: "none",
+      position: "relative",
+      ...(colWidths[hIdx] ? {
+        width: colWidths[hIdx],
+        minWidth: colWidths[hIdx],
+        maxWidth: colWidths[hIdx]
+      } : {}),
       // First column stays visible while scrolling right on wide tables (many columns) — sorting
       // still works exactly the same (this only pins position, it doesn't change table behavior),
       // so the row's identifying info (doc number/name) never scrolls out of view.
@@ -3289,7 +3347,20 @@ function Table({
     style: {
       opacity: 0.3
     }
-  }, "↕"))), (onEdit || onDelete) && /*#__PURE__*/React.createElement("th", {
+  }, "↕"), resizable && /*#__PURE__*/React.createElement("span", {
+    onClick: e => e.stopPropagation(),
+    onMouseDown: e => startResize(hIdx, e),
+    title: "Tarik untuk mengubah lebar kolom",
+    style: {
+      position: "absolute",
+      top: 0,
+      right: 0,
+      width: 8,
+      height: "100%",
+      cursor: "col-resize",
+      zIndex: 2
+    }
+  }))), (onEdit || onDelete) && /*#__PURE__*/React.createElement("th", {
     style: {
       padding: "10px 12px",
       color: theme.muted,
@@ -3323,6 +3394,13 @@ function Table({
         padding: "10px 12px",
         color: theme.text,
         whiteSpace: "nowrap",
+        ...(colWidths[j] ? {
+          width: colWidths[j],
+          minWidth: colWidths[j],
+          maxWidth: colWidths[j],
+          overflow: "hidden",
+          textOverflow: "ellipsis"
+        } : {}),
         ...(j === 0 ? {
           position: "sticky",
           left: 0,
@@ -11569,7 +11647,7 @@ function QuotationUnit({
     open: !!detail,
     title: `Detail ${detail?.nomor}`,
     onClose: () => setDetail(null),
-    width: 620
+    width: 700
   }, detail && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -14382,7 +14460,7 @@ function SalesOrderModule({
     open: !!detail,
     title: `Detail ${detail?.nomor}`,
     onClose: () => setDetail(null),
-    width: 620
+    width: 780
   }, detail && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -15491,7 +15569,17 @@ function ItemRequisitionModule({
     }, "Non-SO / Kandidat BOM") : r.soNomor, (salesOrders.find(s => s.nomor === r.soNomor)?.noPoClient) || "-", r.soCustomerNama || "-", React.createElement(Badge, {
       color: theme.purple
     }, r.items.length, " part"), React.createElement("span", {
-      style: catatanStyle
+      // catatanStyle alone made this column get squeezed to a very narrow width by the browser's
+      // auto table-layout (the Table component has no per-column width control — see other
+      // nowrap columns hogging space), so long notes wrapped into a tall, cramped single-word-
+      // per-line column. Giving it a fixed working width (and letting it wrap within that,
+      // instead of an unconstrained one) keeps the row height reasonable and the text readable.
+      style: {
+        ...catatanStyle,
+        display: "inline-block",
+        width: 260,
+        maxWidth: 260
+      }
     }, irRowCatatan(r)), React.createElement(Badge, {
       color: r.status === "Menunggu Purchasing" ? theme.yellow : theme.green
     }, r.status), r.status === "Sudah di-PO" ? React.createElement(Badge, {
@@ -15541,7 +15629,7 @@ function ItemRequisitionModule({
     open: !!detail,
     title: `Detail ${detail?.nomor}`,
     onClose: () => setDetail(null),
-    width: 620
+    width: 880
   }, detail && React.createElement("div", {
     style: {
       display: "flex",
@@ -26914,7 +27002,7 @@ function SalesActivityModule({
     coa
   } = store;
   const isSalesManager = session.role === "sales_manager";
-  const isOwnerLike = session.role === "owner" || session.role === "gm";
+  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState(null);
   const [form, setForm] = useState({
@@ -27060,7 +27148,13 @@ function SalesActivityModule({
     style: {
       marginBottom: 12
     }
-  }), /*#__PURE__*/React.createElement(Table, {
+  }), isOwnerLike && /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 11,
+      color: theme.muted,
+      marginBottom: 8
+    }
+  }, "↔ Tarik tepi kanan judul kolom untuk mengubah lebar tampilan (tersimpan otomatis)."), /*#__PURE__*/React.createElement(Table, {
     headers: ["Tanggal", "Sales", "Jenis", "Client", "Biaya", "Catatan"],
     rows: myActivities.map(a => [a.tanggal, a.salesNama || "-", /*#__PURE__*/React.createElement(Badge, {
       color: a.jenisAktivitas === "Kunjungan" ? theme.green : a.jenisAktivitas === "Telepon" ? theme.cyan : a.jenisAktivitas === "Quotation" ? theme.accentLight : a.jenisAktivitas === "Client Baru" ? theme.yellow : theme.muted
@@ -27073,6 +27167,11 @@ function SalesActivityModule({
     }, fmt(a.totalBiaya)), /*#__PURE__*/React.createElement("span", {
       style: catatanStyle
     }, a.catatan)]),
+    // SUPER USER-only (owner/gm/finance_director) drag-to-resize column widths, per explicit
+    // request — regular sales users keep the plain fixed-layout table. Widths persist per browser
+    // under a key namespaced by username, so each super user's own resize choice sticks.
+    resizable: isOwnerLike,
+    storageKey: isOwnerLike ? `erp_sa_colwidths_${session.username}` : undefined,
     emptyMsg: "Belum ada aktivitas tercatat"
   })), /*#__PURE__*/React.createElement(Modal, {
     open: !!detail,
@@ -30212,6 +30311,31 @@ function KPISalesModule({
   } = store;
   const isSalesManager = session.role === "sales_manager";
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
+  // Periode KPI (opt-in — default kosong = all-time, sama seperti perilaku sebelumnya). "Basis
+  // Tanggal" menentukan tanggal mana yang dipakai untuk memutuskan apakah sebuah quotation/deal
+  // masuk periode yang dipilih: tanggal Quotation dibuat, atau tanggal SO dibuat (= tanggal PO
+  // client diterima). Aktivitas mentah (jumlah Quotation, Value Quotation, Jumlah Meeting) selalu
+  // memakai tanggal dokumennya sendiri — basis hanya berlaku untuk metrik yang menghubungkan
+  // sebuah quotation ke hasil SO/PO Closed-nya, karena di situlah 2 tanggal itu bisa berbeda jauh.
+  const [kpiPeriodeDari, setKpiPeriodeDari] = useState("");
+  const [kpiPeriodeSampai, setKpiPeriodeSampai] = useState("");
+  const [kpiPeriodeBasis, setKpiPeriodeBasis] = useState("quotation"); // "quotation" | "so"
+  const kpiPeriodeAktif = !!(kpiPeriodeDari || kpiPeriodeSampai);
+  const inKpiPeriode = tgl => (!kpiPeriodeDari || (tgl || "") >= kpiPeriodeDari) && (!kpiPeriodeSampai || (tgl || "") <= kpiPeriodeSampai);
+  const setKpiPeriodeBulanIni = () => {
+    const ym = today().slice(0, 7);
+    setKpiPeriodeDari(`${ym}-01`);
+    setKpiPeriodeSampai(today());
+  };
+  const resetKpiPeriode = () => {
+    setKpiPeriodeDari("");
+    setKpiPeriodeSampai("");
+  };
+  const quotDateByNomor = nomor => {
+    const q = [...quotationsUnit, ...(quotationsPS || [])].find(x => x.nomor === nomor);
+    return q?.tanggal;
+  };
+  const soDateForQuot = quotNomor => salesOrders.find(so => so.sourceNomor === quotNomor)?.tanggal;
   // Base the roster on every registered user with role sales_manager (Master User), not just names
   // that happen to already appear on a quotation/SO — otherwise a sales manager with zero
   // transactions so far (e.g. newly added, like David) silently never shows up in KPI Sales at
@@ -30261,21 +30385,31 @@ function KPISalesModule({
   };
   const soHasLunasInvoice = so => (invoices || []).some(i => i.soNomor === so.nomor && i.statusBayar === "Lunas");
   const rawStats = targetNames.map(nama => {
-    const myQuot = quotationsForSalesManager(nama);
+    const myQuotAll = quotationsForSalesManager(nama);
+    // Value Quotation / Jumlah Quotation: always by the quotation's OWN tanggal — a raw quotation
+    // that never became an SO has no "SO date" to fall back on, so this activity metric only ever
+    // makes sense measured against when it was issued, regardless of the chosen Basis Tanggal.
+    const myQuot = kpiPeriodeAktif ? myQuotAll.filter(q => inKpiPeriode(q.tanggal)) : myQuotAll;
     const quotCount = myQuot.length;
     // Sebelum Pajak — perusahaan tidak mengambil PPN sebagai revenue, jadi Value Quotation dan
     // Value Quotation → SO dihitung dari total dikurangi pajak (bukan q.total yang sudah termasuk PPN).
     const preTax = q => (Number(q.total) || 0) - (Number(q.pajak) || 0);
     const valueQuotation = myQuot.reduce((sum, q) => sum + preTax(q), 0);
-    const myQuotSuccess = myQuot.filter(q => q.status === "Sudah jadi SO");
+    // "Jadi SO" metrics respect Basis Tanggal: "quotation" keeps using the quotation's own date
+    // (same as above — a deal counts toward the period it was QUOTED in), "so" instead uses the
+    // resulting Sales Order's own tanggal (the period the client's PO/SO was actually created in)
+    // — these can land in very different periods for a quotation that took a while to close.
+    const myQuotSuccessAll = myQuotAll.filter(q => q.status === "Sudah jadi SO");
+    const myQuotSuccess = !kpiPeriodeAktif ? myQuotSuccessAll : myQuotSuccessAll.filter(q => inKpiPeriode(kpiPeriodeBasis === "so" ? soDateForQuot(q.nomor) : q.tanggal));
     const valueQuotationSO = myQuotSuccess.reduce((sum, q) => sum + preTax(q), 0);
     const soDiterimaCount = myQuotSuccess.length;
     const conversionRate = quotCount ? Math.round(soDiterimaCount / quotCount * 100) : 0;
-    const poClosedCount = salesOrders.filter(so => so.salesManagerNama === nama && soFullyShippedKpi(so) && soHasLunasInvoice(so)).length;
+    const poClosedCount = salesOrders.filter(so => so.salesManagerNama === nama && soFullyShippedKpi(so) && soHasLunasInvoice(so) && (!kpiPeriodeAktif || inKpiPeriode(kpiPeriodeBasis === "so" ? so.tanggal : quotDateByNomor(so.sourceNomor) || so.tanggal))).length;
     // "Jumlah Meeting" = client visits logged in Sales Activity (jenisAktivitas "Kunjungan") — the
-    // closest existing tracked activity to a client meeting.
-    const meetingCount = salesActivities.filter(a => a.salesNama === nama && a.jenisAktivitas === "Kunjungan").length;
-    const myInvoices = invoices.filter(i => salesOrders.some(so => so.nomor === i.soNomor && so.salesManagerNama === nama));
+    // closest existing tracked activity to a client meeting. Always by its own tanggal — a meeting
+    // isn't tied to any quotation/SO, so Basis Tanggal doesn't apply here.
+    const meetingCount = salesActivities.filter(a => a.salesNama === nama && a.jenisAktivitas === "Kunjungan" && (!kpiPeriodeAktif || inKpiPeriode(a.tanggal))).length;
+    const myInvoices = invoices.filter(i => salesOrders.some(so => so.nomor === i.soNomor && so.salesManagerNama === nama && (!kpiPeriodeAktif || inKpiPeriode(kpiPeriodeBasis === "so" ? so.tanggal : quotDateByNomor(so.sourceNomor) || so.tanggal))));
     const paidOnTime = myInvoices.filter(i => {
       if (i.statusBayar !== "Lunas") return false;
       if (i.tipePembayaran === "COD") return true;
@@ -30372,7 +30506,49 @@ function KPISalesModule({
       meetings: s.meetingCount,
       totalScore: s.totalScore
     })), "KPI_Sales.xlsx", "KPI Sales")
-  })), /*#__PURE__*/React.createElement("div", {
+  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 10,
+      alignItems: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Dari Tanggal",
+    type: "date",
+    value: kpiPeriodeDari,
+    onChange: setKpiPeriodeDari
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Sampai Tanggal",
+    type: "date",
+    value: kpiPeriodeSampai,
+    onChange: setKpiPeriodeSampai
+  }), /*#__PURE__*/React.createElement(Select, {
+    label: "Basis Tanggal",
+    value: kpiPeriodeBasis,
+    onChange: setKpiPeriodeBasis,
+    options: [{
+      value: "quotation",
+      label: "Tanggal Quotation"
+    }, {
+      value: "so",
+      label: "Tanggal SO Dibuat / PO Diterima"
+    }]
+  }), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: setKpiPeriodeBulanIni
+  }, "Bulan Ini"), kpiPeriodeAktif && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: resetKpiPeriode
+  }, "✕ Semua Waktu")), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 11,
+      color: theme.muted,
+      margin: "10px 0 0"
+    }
+  }, kpiPeriodeAktif ? `Menampilkan KPI periode ${kpiPeriodeDari || "(awal)"} s/d ${kpiPeriodeSampai || "(sekarang)"}, berdasarkan ${kpiPeriodeBasis === "so" ? "tanggal SO dibuat / PO client diterima" : "tanggal Quotation dibuat"}. Jumlah Meeting selalu memakai tanggal aktivitasnya sendiri.` : "Belum ada periode dipilih — menampilkan data ALL-TIME (sama seperti sebelumnya). Isi Dari/Sampai Tanggal untuk membatasi periode.")), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
       color: theme.muted,
