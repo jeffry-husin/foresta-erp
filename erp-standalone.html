@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-01.3";
+const APP_BUILD = "2026-08-01.4";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -30802,7 +30802,7 @@ function KPISalesModule({
       borderRadius: 8,
       border: `1px dashed ${theme.border}`
     }
-  }, "ℹ️ Skor KPI = (Value Quotation → SO × 40%) + (Bayar Tepat Waktu × 25%) + (Jumlah Quotation × 20%) + (Jumlah Meeting × 15%). Value Quotation → SO ditarik dari Unit/Parts & Service Quotation yang statusnya sudah \"Sudah jadi SO\" (benar-benar deal dari CLIENT) — bukan lagi dari PO ke Supplier. Value Quotation dan Value Quotation → SO ditampilkan SEBELUM PAJAK (PPN tidak diambil sebagai revenue perusahaan). Value Quotation (total semua quotation dibuat), Conversion Rate, Jumlah SO/PO Diterima, dan PO Closed ditampilkan sebagai info pembanding dan TIDAK ikut dihitung skor, supaya tidak bisa didongkrak hanya dengan membuat banyak quotation tanpa follow-up. Setiap komponen skor dinilai relatif terhadap performa terbaik di antara sales manager saat ini, dan seluruhnya ditarik otomatis dari data Quotation/SO/Delivery Order/Invoice/Sales Activity — tidak ada input manual yang bisa dimanipulasi."), isOwnerLike && /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, "ℹ️ Skor KPI Komposit = Pillar 1 Prospecting Activity (bobot 15%) + Pillar 2 Pipeline Development (25%) + Pillar 3 Conversion & Revenue (40%) + Pillar 4 Customer Health (20%). Conversion Rate memakai gate sample minimum (<5 quotation dinilai netral, ditandai flag 🔵) supaya tidak menyesatkan saat datanya masih sedikit. Klik \"🔍 Detail\" pada setiap baris untuk melihat rincian lengkap tiap pillar, dan \"🎯 Target\" (Owner/GM/Finance Director) untuk mengatur target revenue, kontak baru, follow-up, demo, dan quotation per sales manager — bila target belum diisi, skor dihitung relatif terhadap performa terbaik di antara sales manager saat ini. Seluruhnya ditarik otomatis dari data Quotation/SO/Delivery Order/Invoice/Sales Activity/Database Client — tidak ada input manual yang bisa dimanipulasi selain target itu sendiri."), isOwnerLike && /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "KELOLA DAFTAR SALES MANAGER (KPI)",
     count: salesManagerNames.length,
     badgeColor: theme.purple,
