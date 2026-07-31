@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-01.4";
+const APP_BUILD = "2026-08-01.5";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -30471,6 +30471,22 @@ function KPISalesModule({
     return q?.tanggal;
   };
   const soDateForQuot = quotNomor => salesOrders.find(so => so.sourceNomor === quotNomor)?.tanggal;
+  // Target KPI (kpiTargets) disimpan sebagai angka BULANAN (mis. "Target Kontak Baru: 15" berarti
+  // 15/bulan). Supaya perbandingan tetap adil saat periode yang dipilih lebih/kurang dari sebulan
+  // (atau saat tidak ada periode dipilih sama sekali, yaitu all-time sejak data paling awal), target
+  // itu di-prorate mengikuti panjang periode aktual dalam satuan bulan (dibulatkan ke atas, minimum
+  // 1 bulan) sebelum dipakai untuk skoring. Ini mencegah target bulanan terlihat "gampang tercapai"
+  // hanya karena dibandingkan ke data kumulatif bertahun-tahun.
+  const monthsSpanFor = (dari, sampai) => {
+    if (!dari || !sampai) return 1;
+    const days = (new Date(sampai) - new Date(dari)) / (1000 * 60 * 60 * 24) + 1;
+    return Math.max(1, Math.ceil(days / 30));
+  };
+  const earliestDataDate = () => {
+    const dates = [...quotationsUnit.map(q => q.tanggal), ...(quotationsPS || []).map(q => q.tanggal), ...salesOrders.map(so => so.tanggal), ...salesActivities.map(a => a.tanggal)].filter(Boolean).sort();
+    return dates[0];
+  };
+  const targetMonthsSpan = kpiPeriodeAktif ? monthsSpanFor(kpiPeriodeDari || earliestDataDate() || today(), kpiPeriodeSampai || today()) : monthsSpanFor(earliestDataDate() || today(), today());
   // Base the roster on every registered user with role sales_manager (Master User), not just names
   // that happen to already appear on a quotation/SO — otherwise a sales manager with zero
   // transactions so far (e.g. newly added, like David) silently never shows up in KPI Sales at
@@ -30608,21 +30624,30 @@ function KPISalesModule({
   const MIN_QUOT_SAMPLE = 5;
   const stats = rawStats.map(s => {
     const targets = { ...KPI_TARGET_DEFAULTS, ...(kpiTargets?.[s.nama] || {}) };
+    // Target disimpan per-bulan; di-prorate mengikuti panjang periode yang sedang dilihat
+    // (targetMonthsSpan) supaya adil dibandingkan baik saat lihat 1 bulan maupun all-time.
+    const effTargets = {
+      revenueTarget: (targets.revenueTarget || 0) * targetMonthsSpan,
+      newContactsTarget: (targets.newContactsTarget || 0) * targetMonthsSpan,
+      followupTarget: (targets.followupTarget || 0) * targetMonthsSpan,
+      demosTarget: (targets.demosTarget || 0) * targetMonthsSpan,
+      quotationsTarget: (targets.quotationsTarget || 0) * targetMonthsSpan
+    };
     // Pillar 1 — Prospecting Activity (15%): kontak baru, follow-up, diversifikasi sector.
-    const p1a = Math.min(100, Math.round(s.newContactsCount / (targets.newContactsTarget || 1) * 100));
-    const p1b = Math.min(100, Math.round(s.followupCount / (targets.followupTarget || 1) * 100));
+    const p1a = Math.min(100, Math.round(s.newContactsCount / (effTargets.newContactsTarget || 1) * 100));
+    const p1b = Math.min(100, Math.round(s.followupCount / (effTargets.followupTarget || 1) * 100));
     const p1c = Math.min(100, Math.round(s.sectorsApproached / 3 * 100));
     const pillarProspecting = Math.round((p1a + p1b + p1c) / 3);
     // Pillar 2 — Pipeline Development (25%): jumlah quotation, nilai pipeline, jumlah demo.
-    const p2a = Math.min(100, Math.round(s.quotCount / (targets.quotationsTarget || 1) * 100));
+    const p2a = Math.min(100, Math.round(s.quotCount / (effTargets.quotationsTarget || 1) * 100));
     const p2b = Math.round(s.valueQuotation / maxValueQuotation * 100);
-    const p2c = Math.min(100, Math.round(s.demosCount / (targets.demosTarget || 1) * 100));
+    const p2c = Math.min(100, Math.round(s.demosCount / (effTargets.demosTarget || 1) * 100));
     const pillarPipeline = Math.round((p2a + p2b + p2c) / 3);
     // Pillar 3 — Conversion & Revenue (40%): conversion (cohort-gated), pencapaian target revenue,
     // porsi revenue dari customer BARU (menghindari over-reliance pada existing account saja).
     const conversionGated = s.quotCount < MIN_QUOT_SAMPLE;
     const p3a = conversionGated ? 70 : Math.min(100, s.conversionRate);
-    const p3b = targets.revenueTarget > 0 ? Math.min(100, Math.round(s.valueQuotationSO / targets.revenueTarget * 100)) : Math.round(s.valueQuotationSO / maxValueQuotationSO * 100);
+    const p3b = effTargets.revenueTarget > 0 ? Math.min(100, Math.round(s.valueQuotationSO / effTargets.revenueTarget * 100)) : Math.round(s.valueQuotationSO / maxValueQuotationSO * 100);
     const p3c = Math.min(100, s.newCustomerRevenuePct);
     const pillarConversion = Math.round((p3a + p3b + p3c) / 3);
     // Pillar 4 — Customer Health (20%): bayar tepat waktu, repeat-order rate, Key Account aktif.
@@ -30671,6 +30696,8 @@ function KPISalesModule({
       conversionGated,
       flags,
       targets,
+      effTargets,
+      targetMonthsSpan,
       totalScore
     };
   }).sort((a, b) => b.totalScore - a.totalScore);
@@ -30802,7 +30829,7 @@ function KPISalesModule({
       borderRadius: 8,
       border: `1px dashed ${theme.border}`
     }
-  }, "ℹ️ Skor KPI Komposit = Pillar 1 Prospecting Activity (bobot 15%) + Pillar 2 Pipeline Development (25%) + Pillar 3 Conversion & Revenue (40%) + Pillar 4 Customer Health (20%). Conversion Rate memakai gate sample minimum (<5 quotation dinilai netral, ditandai flag 🔵) supaya tidak menyesatkan saat datanya masih sedikit. Klik \"🔍 Detail\" pada setiap baris untuk melihat rincian lengkap tiap pillar, dan \"🎯 Target\" (Owner/GM/Finance Director) untuk mengatur target revenue, kontak baru, follow-up, demo, dan quotation per sales manager — bila target belum diisi, skor dihitung relatif terhadap performa terbaik di antara sales manager saat ini. Seluruhnya ditarik otomatis dari data Quotation/SO/Delivery Order/Invoice/Sales Activity/Database Client — tidak ada input manual yang bisa dimanipulasi selain target itu sendiri."), isOwnerLike && /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, "ℹ️ Skor KPI Komposit = Pillar 1 Prospecting Activity (bobot 15%) + Pillar 2 Pipeline Development (25%) + Pillar 3 Conversion & Revenue (40%) + Pillar 4 Customer Health (20%). Conversion Rate memakai gate sample minimum (<5 quotation dinilai netral, ditandai flag 🔵) supaya tidak menyesatkan saat datanya masih sedikit. Target (revenue/kontak baru/follow-up/demo/quotation) disimpan PER BULAN dan otomatis di-prorate mengikuti panjang periode yang sedang dilihat (mis. pilih \"Bulan Ini\" → dikali 1, pilih 3 bulan → dikali 3, all-time → dikali jumlah bulan sejak data paling awal) — jadi target tidak perlu diubah manual tiap ganti periode. Klik \"🔍 Detail\" pada setiap baris untuk melihat rincian lengkap tiap pillar (termasuk target yang sudah di-prorate), dan \"🎯 Target\" (Owner/GM/Finance Director) untuk mengatur target bulanan per sales manager — bila target belum diisi, skor dihitung relatif terhadap performa terbaik di antara sales manager saat ini. Seluruhnya ditarik otomatis dari data Quotation/SO/Delivery Order/Invoice/Sales Activity/Database Client — tidak ada input manual yang bisa dimanipulasi selain target itu sendiri."), isOwnerLike && /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "KELOLA DAFTAR SALES MANAGER (KPI)",
     count: salesManagerNames.length,
     badgeColor: theme.purple,
@@ -30934,7 +30961,13 @@ function KPISalesModule({
       color: theme.muted,
       fontSize: 13
     }
-  }, "Skor KPI Komposit")), scorecardStat.flags.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, "Skor KPI Komposit"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: theme.muted,
+      fontSize: 11,
+      marginTop: 4
+    }
+  }, "Target dihitung untuk ", scorecardStat.targetMonthsSpan, " bulan (target bulanan × ", scorecardStat.targetMonthsSpan, ")")), scorecardStat.flags.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       flexDirection: "column",
@@ -30959,15 +30992,15 @@ function KPISalesModule({
   }, [{
     title: "Pillar 1 — Prospecting Activity (bobot 15%)",
     score: scorecardStat.pillarProspecting,
-    rows: [["Kontak Baru", scorecardStat.newContactsCount, scorecardStat.targets.newContactsTarget], ["Follow-up (Kunjungan/Telepon/WA)", scorecardStat.followupCount, scorecardStat.targets.followupTarget], ["Sector Didekati", scorecardStat.sectorsApproached, 3]]
+    rows: [["Kontak Baru", scorecardStat.newContactsCount, scorecardStat.effTargets.newContactsTarget], ["Follow-up (Kunjungan/Telepon/WA)", scorecardStat.followupCount, scorecardStat.effTargets.followupTarget], ["Sector Didekati", scorecardStat.sectorsApproached, 3]]
   }, {
     title: "Pillar 2 — Pipeline Development (bobot 25%)",
     score: scorecardStat.pillarPipeline,
-    rows: [["Jumlah Quotation", scorecardStat.quotCount, scorecardStat.targets.quotationsTarget], ["Value Quotation", fmtMoney(scorecardStat.valueQuotation, "IDR"), "-"], ["Jumlah Demo", scorecardStat.demosCount, scorecardStat.targets.demosTarget]]
+    rows: [["Jumlah Quotation", scorecardStat.quotCount, scorecardStat.effTargets.quotationsTarget], ["Value Quotation", fmtMoney(scorecardStat.valueQuotation, "IDR"), "-"], ["Jumlah Demo", scorecardStat.demosCount, scorecardStat.effTargets.demosTarget]]
   }, {
     title: "Pillar 3 — Conversion & Revenue (bobot 40%)",
     score: scorecardStat.pillarConversion,
-    rows: [["Conversion Rate", `${scorecardStat.conversionRate}%${scorecardStat.conversionGated ? " (sample kecil)" : ""}`, "-"], ["Value Quotation → SO", fmtMoney(scorecardStat.valueQuotationSO, "IDR"), scorecardStat.targets.revenueTarget ? fmtMoney(scorecardStat.targets.revenueTarget, "IDR") : "-"], ["Avg Deal Size", fmtMoney(scorecardStat.avgDealSize, "IDR"), "-"], ["Revenue dari Customer Baru", `${scorecardStat.newCustomerRevenuePct}%`, "-"]]
+    rows: [["Conversion Rate", `${scorecardStat.conversionRate}%${scorecardStat.conversionGated ? " (sample kecil)" : ""}`, "-"], ["Value Quotation → SO", fmtMoney(scorecardStat.valueQuotationSO, "IDR"), scorecardStat.effTargets.revenueTarget ? fmtMoney(scorecardStat.effTargets.revenueTarget, "IDR") : "-"], ["Avg Deal Size", fmtMoney(scorecardStat.avgDealSize, "IDR"), "-"], ["Revenue dari Customer Baru", `${scorecardStat.newCustomerRevenuePct}%`, "-"]]
   }, {
     title: "Pillar 4 — Customer Health (bobot 20%)",
     score: scorecardStat.pillarHealth,
@@ -31024,8 +31057,8 @@ function KPISalesModule({
       fontSize: 12,
       color: theme.muted
     }
-  }, "Target dipakai untuk menghitung skor Pillar 2 & 3. Kosongkan/0 pada Target Revenue untuk kembali ke perhitungan relatif-terhadap-rekan (default)."), /*#__PURE__*/React.createElement(Input, {
-    label: "Target Revenue (Value Quotation → SO, Rp)",
+  }, "Semua angka di bawah ini adalah target PER BULAN. Saat dihitung, sistem otomatis mengalikannya dengan panjang periode yang sedang dilihat di halaman KPI Sales (mis. 2 bulan dipilih → target dikali 2) — jadi target tidak perlu diubah-ubah tiap kali ganti periode. Kosongkan/0 pada Target Revenue untuk kembali ke perhitungan relatif-terhadap-rekan (default)."), /*#__PURE__*/React.createElement(Input, {
+    label: "Target Revenue per Bulan (Value Quotation → SO, Rp)",
     type: "number",
     value: targetForm.revenueTarget,
     onChange: v => setTargetForm({
@@ -31033,7 +31066,7 @@ function KPISalesModule({
       revenueTarget: v
     })
   }), /*#__PURE__*/React.createElement(Input, {
-    label: "Target Kontak Baru",
+    label: "Target Kontak Baru per Bulan",
     type: "number",
     value: targetForm.newContactsTarget,
     onChange: v => setTargetForm({
@@ -31041,7 +31074,7 @@ function KPISalesModule({
       newContactsTarget: v
     })
   }), /*#__PURE__*/React.createElement(Input, {
-    label: "Target Follow-up",
+    label: "Target Follow-up per Bulan",
     type: "number",
     value: targetForm.followupTarget,
     onChange: v => setTargetForm({
@@ -31049,7 +31082,7 @@ function KPISalesModule({
       followupTarget: v
     })
   }), /*#__PURE__*/React.createElement(Input, {
-    label: "Target Demo",
+    label: "Target Demo per Bulan",
     type: "number",
     value: targetForm.demosTarget,
     onChange: v => setTargetForm({
@@ -31057,7 +31090,7 @@ function KPISalesModule({
       demosTarget: v
     })
   }), /*#__PURE__*/React.createElement(Input, {
-    label: "Target Jumlah Quotation",
+    label: "Target Jumlah Quotation per Bulan",
     type: "number",
     value: targetForm.quotationsTarget,
     onChange: v => setTargetForm({
