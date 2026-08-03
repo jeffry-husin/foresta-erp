@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-01.8";
+const APP_BUILD = "2026-08-03.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -26152,7 +26152,9 @@ function MaintenanceScheduleModule({
     setMaintenanceSchedules,
     visits,
     statusReports,
-    salesOrders
+    salesOrders,
+    mills,
+    customers
   } = store;
   const isSepti = session.role === "workshop_manager";
   const isOwnerLike = session.role === "owner" || session.role === "gm";
@@ -26256,6 +26258,26 @@ function MaintenanceScheduleModule({
     const b = getDueBadge(m.nextDueDate, m.status);
     return b.label !== "Selesai" && b.label !== "Terjadwal";
   }).length;
+  // Per-Mill summary (Master Mill × latest Sales Order × latest Mekanik Report visit) — a
+  // client-level/mill-level view separate from the per-Unit service-due table below. Sales Order
+  // is only ever stored per CLIENT (not per specific mill), so "tanggal pembelian parts terakhir"
+  // is the latest SO date for the client that owns this mill — if one client ever has multiple
+  // mills, they'll currently show the same SO date; refine later if that becomes common. The visit
+  // date, by contrast, IS mill-specific (Kunjungan records which Master Mill was selected), so that
+  // one is accurate per mill already.
+  const [millSummarySearch, setMillSummarySearch] = useState("");
+  const millSummaryRows = (mills || []).map(m => {
+    const clientNama = (customers || []).find(c => c.id === m.customerId)?.nama || m.companyName || "-";
+    const soDates = (salesOrders || []).filter(so => m.customerId ? so.customerId === m.customerId : so.customerNama === clientNama).map(so => so.tanggal).filter(Boolean).sort();
+    const visitDates = (visits || []).filter(v => v.millId === m.millName).map(v => v.tanggal).filter(Boolean).sort();
+    return {
+      clientNama,
+      millName: m.millName,
+      lastSODate: soDates[soDates.length - 1] || null,
+      lastVisitDate: visitDates[visitDates.length - 1] || null
+    };
+  });
+  const millSummaryFiltered = millSummarySearch.trim() ? millSummaryRows.filter(r => [r.clientNama, r.millName].some(x => String(x).toLowerCase().includes(millSummarySearch.trim().toLowerCase()))) : millSummaryRows;
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -26306,7 +26328,24 @@ function MaintenanceScheduleModule({
       color: theme.red,
       marginTop: 6
     }
-  }, dueSoonCount))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
+  }, dueSoonCount))), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "RINGKASAN PER MILL (Client × Mill)",
+    count: millSummaryFiltered.length,
+    badgeColor: theme.purple,
+    storageKey: "ms_mill_summary",
+    defaultOpen: true
+  }, /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari nama client / nama mill...",
+    value: millSummarySearch,
+    onChange: setMillSummarySearch,
+    style: {
+      marginBottom: 12
+    }
+  }), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Nama Client", "Nama Mill", "Tanggal SO Terakhir (Parts)", "Tanggal Visit Terakhir"],
+    rows: millSummaryFiltered.map(r => [r.clientNama, r.millName, fmtDateRev(r.lastSODate), fmtDateRev(r.lastVisitDate)]),
+    emptyMsg: "Belum ada data Master Mill"
+  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari unit / client / no. SO / mekanik...",
     value: msSearch,
     onChange: setMsSearch,
@@ -32306,15 +32345,36 @@ function MasterMillModule({
 }) {
   const {
     mills,
-    setMills
+    setMills,
+    customers
   } = store;
   const isOwnerLike = ["owner", "gm", "finance_director"].includes(session.role);
   const canEdit = isOwnerLike || ["workshop_manager", "service_manager", "mekanik"].includes(session.role);
   const [modal, setModal] = useState(false);
   const [editIdx, setEditIdx] = useState(null);
   const [search, setSearch] = useState("");
+  // One-time migration: link legacy mills (free-text companyName only) to a Database Client whose
+  // name matches exactly (case-insensitive), so existing data isn't orphaned by the switch to a
+  // proper customerId link below. Mills with no match (or already linked) are left untouched — those
+  // need a manual pick in the Edit form.
+  useEffect(() => {
+    if (!customers || customers.length === 0 || mills.length === 0) return;
+    let changed = false;
+    const updated = mills.map(m => {
+      if (m.customerId || !m.companyName) return m;
+      const match = customers.find(c => (c.nama || "").trim().toLowerCase() === m.companyName.trim().toLowerCase());
+      if (!match) return m;
+      changed = true;
+      return {
+        ...m,
+        customerId: match.id
+      };
+    });
+    if (changed) setMills(updated);
+  }, [customers, mills]);
   const emptyForm = {
     group: "",
+    customerId: "",
     companyName: "",
     millName: "",
     lokasi: "",
@@ -32330,7 +32390,10 @@ function MasterMillModule({
   // Legacy records may still only have `alamat` + `kabupaten` (pre-rebuild schema) instead of the
   // unified `lokasi` field — fold them together here so no data is lost after the rebuild.
   const millLokasi = m => m.lokasi || [m.alamat, m.kabupaten].filter(Boolean).join(", ") || "";
-  const filtered = mills.filter(m => m.millName.toLowerCase().includes(search.toLowerCase()) || (m.companyName || "").toLowerCase().includes(search.toLowerCase()) || (m.group || "").toLowerCase().includes(search.toLowerCase()));
+  // Linked Database Client's name for a mill — falls back to the legacy free-text companyName for
+  // records not yet linked (or never migrated because no matching client name was found).
+  const millClientNama = m => customers.find(c => c.id === m.customerId)?.nama || m.companyName || "-";
+  const filtered = mills.filter(m => m.millName.toLowerCase().includes(search.toLowerCase()) || millClientNama(m).toLowerCase().includes(search.toLowerCase()) || (m.group || "").toLowerCase().includes(search.toLowerCase()));
   const MILL_TEMPLATE_HEADERS = ["group", "companyName", "millName", "lokasi", "provinsi", "grapple", "snGrapple", "crane", "snCrane", "year"];
   const doExport = () => exportToExcel(mills.map(m => ({
     group: m.group || "",
@@ -32351,9 +32414,12 @@ function MasterMillModule({
     rows.forEach(r => {
       const millName = String(r.millName || "").trim();
       if (!millName) return;
+      const importedCompanyName = r.companyName || "";
+      const matchedCustomer = importedCompanyName ? customers.find(c => (c.nama || "").trim().toLowerCase() === importedCompanyName.trim().toLowerCase()) : null;
       const item = {
         group: r.group || "",
-        companyName: r.companyName || "",
+        customerId: matchedCustomer ? matchedCustomer.id : "",
+        companyName: importedCompanyName,
         millName,
         lokasi: r.lokasi || [r.alamat, r.kabupaten].filter(Boolean).join(", ") || "",
         provinsi: r.provinsi || "",
@@ -32387,6 +32453,7 @@ function MasterMillModule({
     const m = filtered[i];
     setForm({
       group: m.group || "",
+      customerId: m.customerId || "",
       companyName: m.companyName || "",
       millName: m.millName || "",
       lokasi: millLokasi(m),
@@ -32476,8 +32543,10 @@ function MasterMillModule({
     value: search,
     onChange: setSearch
   }), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
-    headers: ["Group", "Company Name", "Mill Name", "Lokasi", "Provinsi", "Grapple", "SN Grapple", "Crane", "SN Crane", "Year", ""],
-    rows: filtered.map((m, i) => [m.group || "-", m.companyName || "-", m.millName, millLokasi(m) || "-", m.provinsi || "-", m.grapple || "-", m.snGrapple || "-", m.crane || "-", m.snCrane || "-", m.year || "-", canEdit && /*#__PURE__*/React.createElement("div", {
+    headers: ["Group", "Client", "Mill Name", "Lokasi", "Provinsi", "Grapple", "SN Grapple", "Crane", "SN Crane", "Year", ""],
+    rows: filtered.map((m, i) => [m.group || "-", m.customerId ? millClientNama(m) : /*#__PURE__*/React.createElement("span", {
+      title: "Belum terhubung ke Database Client — edit untuk pilih client"
+    }, millClientNama(m), " ⚠️"), m.millName, millLokasi(m) || "-", m.provinsi || "-", m.grapple || "-", m.snGrapple || "-", m.crane || "-", m.snCrane || "-", m.year || "-", canEdit && /*#__PURE__*/React.createElement("div", {
       style: {
         display: "flex",
         gap: 6
@@ -32516,13 +32585,24 @@ function MasterMillModule({
       ...form,
       group: v
     })
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "Company Name",
-    value: form.companyName,
-    onChange: v => setForm({
-      ...form,
-      companyName: v
-    })
+  }), /*#__PURE__*/React.createElement(Select, {
+    label: "Client (Database Client)",
+    value: form.customerId,
+    onChange: v => {
+      const cust = customers.find(c => c.id === v);
+      setForm({
+        ...form,
+        customerId: v,
+        companyName: cust ? cust.nama : form.companyName
+      });
+    },
+    options: [{
+      value: "",
+      label: "— Pilih Client —"
+    }, ...customers.map(c => ({
+      value: c.id,
+      label: c.nama
+    }))]
   })), /*#__PURE__*/React.createElement(Input, {
     label: "Mill Name",
     value: form.millName,
