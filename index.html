@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-01.5";
+const APP_BUILD = "2026-08-01.7";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -7395,6 +7395,13 @@ function MekanikReport({
     setEditingJenisPekerjaan(false);
   };
   const [formType, setFormType] = useState(null); // 'dar' | 'partrec' | 'status' | 'bast'
+  // Full-screen "page" takeover for DAR / Part Recommendation / Status Report / BAPP — clicking the
+  // corresponding button in the Kunjungan Kerja table sets this instead of opening a small modal,
+  // so the mekanik gets a dedicated full page (list of existing entries + tambah button) for that
+  // one feature, and returns to the normal Mekanik Report list when done ("← Kembali" or after
+  // save/cancel in the underlying dar/partrec/status/bast form, which still reuses the existing
+  // Modal-based add/edit forms further below — only the ENTRY POINT changed, not the forms).
+  const [visitPage, setVisitPage] = useState(null); // { visit, type: 'dar'|'partrec'|'status'|'bast' }
   const [viewDar, setViewDar] = useState(null); // DAR being previewed for review (before approve/reject)
   const [viewRec, setViewRec] = useState(null); // Part Rec being previewed for review
 
@@ -7719,6 +7726,21 @@ function MekanikReport({
       });
     }
   };
+  // Clickable count-badge used in the Kunjungan Kerja table (DAR/Part Rec./Status/BAPP columns) —
+  // opens the dedicated full-screen page for that visit+type (see `visitPage` state/early-return
+  // below) instead of the old behavior of opening the Detail Kunjungan modal.
+  const openVisitPageBadge = (v, type, color, label) => /*#__PURE__*/React.createElement("span", {
+    onClick: () => setVisitPage({
+      visit: v,
+      type
+    }),
+    style: {
+      cursor: "pointer"
+    },
+    title: "Klik untuk buka halaman"
+  }, /*#__PURE__*/React.createElement(Badge, {
+    color
+  }, label));
   const addCatatanHarian = () => {
     if (!catatanHarianInput.catatan) return alert("Isi catatan harian");
     setDarForm(f => ({
@@ -8347,6 +8369,180 @@ function MekanikReport({
       }
     });
   };
+  // Full-screen "page" takeover for DAR / Part Recommendation / Status Report / BAPP — see the
+  // `visitPage` state declared above. Reads the visit fresh from `visits` (not a stale closure) so
+  // it stays in sync if e.g. jenisBeritaAcara is edited elsewhere while this page is open.
+  if (visitPage) {
+    const v = visits.find(x => x.id === visitPage.visit.id) || visitPage.visit;
+    const type = visitPage.type;
+    const canEditVisit = isOwnerLike || isSepti || isMekanik && (session.username === v.mekanikUsername || (v.mekanikUsernames || []).includes(session.username));
+    const pageTitle = {
+      dar: "📝 Daily Activity Report / Berita Acara",
+      partrec: "🔩 Part Recommendation",
+      status: "📋 Status Report",
+      bast: "📄 Berita Acara Penyelesaian Pekerjaan (BAPP)"
+    }[type];
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 16
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        flexWrap: "wrap"
+      }
+    }, /*#__PURE__*/React.createElement(Btn, {
+      variant: "ghost",
+      onClick: () => setVisitPage(null)
+    }, "← Kembali ke Mekanik Report"), /*#__PURE__*/React.createElement("h2", {
+      style: {
+        margin: 0,
+        color: theme.text
+      }
+    }, pageTitle, " — ", v.id)), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        flexWrap: "wrap",
+        gap: 10,
+        marginBottom: 16
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 13,
+        color: theme.muted
+      }
+    }, v.customerNama, " · ", v.tanggal, " · ", v.unitTerkait || v.lokasi), canEditVisit && type === "dar" && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      onClick: () => openForm(v, "dar")
+    }, "📝 + Isi DAR"), canEditVisit && type === "partrec" && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "success",
+      onClick: () => openForm(v, "partrec")
+    }, "🔩 ", visitRecDoc(v.id) ? "Edit" : "+", " Part Recommendation"), canEditVisit && type === "status" && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "warning",
+      onClick: () => openForm(v, "status")
+    }, "📋 + Status Report"), canEditVisit && type === "bast" && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => openForm(v, "bast")
+    }, "📄 + BAPP")), type === "dar" && /*#__PURE__*/React.createElement(Table, {
+      headers: ["Periode", "Pekerjaan", "Hari Tercatat", "Status", "Aksi"],
+      rows: visitDars(v.id).map(d => [`${d.tanggalMulai} s/d ${d.tanggalSelesai}`, d.pekerjaan, `${d.catatanHarian.length} hari`, /*#__PURE__*/React.createElement(Badge, {
+        color: darStatusColor[d.status]
+      }, d.status), /*#__PURE__*/React.createElement("div", {
+        style: {
+          display: "flex",
+          gap: 6
+        }
+      }, /*#__PURE__*/React.createElement(PrintBtn, {
+        onClick: () => printDAR(d)
+      }), canEditVisit && /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "ghost",
+        onClick: () => openForm(v, "dar", d)
+      }, "✏️"), (isSepti || isOwnerLike) && d.status === "Menunggu Approval Septi" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "success",
+        onClick: () => approveDar(d)
+      }, "✓"), /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "danger",
+        onClick: () => rejectDar(d)
+      }, "✗")), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "danger",
+        onClick: () => deleteDar(d)
+      }, "🗑️"))]),
+      emptyMsg: "Belum ada entri DAR"
+    }), type === "partrec" && (() => {
+      const recDoc = visitRecDoc(v.id);
+      if (!recDoc) return /*#__PURE__*/React.createElement("p", {
+        style: {
+          color: theme.muted,
+          fontSize: 13
+        }
+      }, "Belum ada rekomendasi part untuk kunjungan ini.");
+      return /*#__PURE__*/React.createElement("div", {
+        style: {
+          display: "flex",
+          flexDirection: "column",
+          gap: 10
+        }
+      }, /*#__PURE__*/React.createElement("div", {
+        style: {
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center"
+        }
+      }, /*#__PURE__*/React.createElement(Badge, {
+        color: recStatusColor[recDoc.status]
+      }, recDoc.status), /*#__PURE__*/React.createElement("div", {
+        style: {
+          display: "flex",
+          gap: 6
+        }
+      }, /*#__PURE__*/React.createElement(PrintBtn, {
+        onClick: () => printPartRec(recDoc)
+      }), canEditVisit && /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "ghost",
+        onClick: () => openForm(v, "partrec")
+      }, "✏️"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "danger",
+        onClick: () => deletePartRec(recDoc)
+      }, "🗑️"), (isSepti || isOwnerLike) && recDoc.status === "Menunggu Approval Septi" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "success",
+        onClick: () => approveRec(recDoc)
+      }, "✓ Approve Semua"), /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "danger",
+        onClick: () => rejectRec(recDoc)
+      }, "✗ Tolak")))), /*#__PURE__*/React.createElement(Table, {
+        headers: ["Part Number", "Part Name", "Qty", "Alasan"],
+        rows: recDoc.items.map(it => [it.partNumber, it.partName, fmtNum(it.qty), it.alasan])
+      }));
+    })(), type === "status" && /*#__PURE__*/React.createElement(Table, {
+      headers: ["Status Pekerjaan", "Kondisi Unit", "Tingkat Keparahan", "Catatan", "Rekomendasi Lanjutan"],
+      rows: visitStatus(v.id).map(s => [/*#__PURE__*/React.createElement(Badge, {
+        color: statusColor[s.statusPekerjaan]
+      }, s.statusPekerjaan), /*#__PURE__*/React.createElement(Badge, {
+        color: kondisiUnitColor[s.kondisiUnit]
+      }, s.kondisiUnit), /*#__PURE__*/React.createElement(Badge, {
+        color: keparahanColor[s.keparahan]
+      }, s.keparahan), /*#__PURE__*/React.createElement("span", {
+        style: catatanStyle
+      }, s.catatanKondisi || "-"), s.rekomendasiLanjutan || "-"]),
+      emptyMsg: "Belum ada status report"
+    }), type === "bast" && /*#__PURE__*/React.createElement(Table, {
+      headers: ["No. PO / SO", "Jenis Pekerjaan", "Nama Unit", "Kondisi", "Penerima", ""],
+      rows: visitBasts(v.id).map(b => [b.soNomor || "-", (b.jenisPekerjaan || []).join(", ") || "-", b.unitName || "-", b.kondisi === "Other" ? b.kondisiLainnya : b.kondisi, b.namaPenerima, /*#__PURE__*/React.createElement("div", {
+        style: {
+          display: "flex",
+          gap: 6
+        }
+      }, canEditVisit && /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "ghost",
+        onClick: () => openForm(v, "bast", b)
+      }, "✏️"), /*#__PURE__*/React.createElement(PrintBtn, {
+        onClick: () => printBast(b)
+      }), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "danger",
+        onClick: () => deleteBast(b)
+      }, "🗑️"))]),
+      emptyMsg: "Belum ada BAPP"
+    })));
+  }
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -8806,15 +9002,7 @@ function MekanikReport({
       }
     }, v.id), v.tanggal, /*#__PURE__*/React.createElement(Badge, {
       color: theme.purple
-    }, v.jenisBeritaAcara), v.customerNama, v.unitTerkait || v.lokasi, (v.mekanikNamaList && v.mekanikNamaList.length ? v.mekanikNamaList.join(", ") : v.mekanikNama), /*#__PURE__*/React.createElement(Badge, {
-      color: visitDars(v.id).length ? theme.green : theme.muted
-    }, visitDars(v.id).length, " entri"), /*#__PURE__*/React.createElement(Badge, {
-      color: visitRecDoc(v.id) ? theme.purple : theme.muted
-    }, visitRecDoc(v.id)?.items.length || 0, " item"), /*#__PURE__*/React.createElement(Badge, {
-      color: visitStatus(v.id).length ? theme.cyan : theme.muted
-    }, visitStatus(v.id).length, " entri"), /*#__PURE__*/React.createElement(Badge, {
-      color: visitBasts(v.id).length ? theme.green : theme.muted
-    }, visitBasts(v.id).length), /*#__PURE__*/React.createElement(Btn, {
+    }, v.jenisBeritaAcara), v.customerNama, v.unitTerkait || v.lokasi, (v.mekanikNamaList && v.mekanikNamaList.length ? v.mekanikNamaList.join(", ") : v.mekanikNama), openVisitPageBadge(v, "dar", visitDars(v.id).length ? theme.green : theme.muted, visitDars(v.id).length + " entri"), openVisitPageBadge(v, "partrec", visitRecDoc(v.id) ? theme.purple : theme.muted, (visitRecDoc(v.id)?.items.length || 0) + " item"), openVisitPageBadge(v, "status", visitStatus(v.id).length ? theme.cyan : theme.muted, visitStatus(v.id).length + " entri"), openVisitPageBadge(v, "bast", visitBasts(v.id).length ? theme.green : theme.muted, visitBasts(v.id).length), /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       onClick: () => markVisitSelesai(v)
     }, "✓ Selesai")]),
@@ -8836,18 +9024,12 @@ function MekanikReport({
       }
     }, v.id), v.tanggal, v.tanggalSelesai || "-", /*#__PURE__*/React.createElement(Badge, {
       color: theme.purple
-    }, v.jenisBeritaAcara), v.customerNama, v.unitTerkait || v.lokasi, (v.mekanikNamaList && v.mekanikNamaList.length ? v.mekanikNamaList.join(", ") : v.mekanikNama), /*#__PURE__*/React.createElement(Badge, {
-      color: visitDars(v.id).length ? theme.green : theme.muted
-    }, visitDars(v.id).length, " entri"), /*#__PURE__*/React.createElement(Badge, {
-      color: visitRecDoc(v.id) ? theme.purple : theme.muted
-    }, visitRecDoc(v.id)?.items.length || 0, " item"), /*#__PURE__*/React.createElement(Badge, {
-      color: visitBasts(v.id).length ? theme.green : theme.muted
-    }, visitBasts(v.id).length)]),
+    }, v.jenisBeritaAcara), v.customerNama, v.unitTerkait || v.lokasi, (v.mekanikNamaList && v.mekanikNamaList.length ? v.mekanikNamaList.join(", ") : v.mekanikNama), openVisitPageBadge(v, "dar", visitDars(v.id).length ? theme.green : theme.muted, visitDars(v.id).length + " entri"), openVisitPageBadge(v, "partrec", visitRecDoc(v.id) ? theme.purple : theme.muted, (visitRecDoc(v.id)?.items.length || 0) + " item"), openVisitPageBadge(v, "bast", visitBasts(v.id).length ? theme.green : theme.muted, visitBasts(v.id).length)]),
     onEdit: i => setDetailVisit(myVisitsSelesai[i]),
     onDelete: isOwnerLike ? i => deleteVisit(myVisitsSelesai[i]) : undefined,
     emptyMsg: "Belum ada kunjungan kerja selesai"
   }))), /*#__PURE__*/React.createElement(Modal, {
-    open: !!detailVisit && !formType,
+    open: !!detailVisit && !formType && !visitPage,
     title: `Detail Kunjungan: ${detailVisit?.id}`,
     onClose: () => setDetailVisit(null),
     width: 720
@@ -8938,21 +9120,6 @@ function MekanikReport({
     }
   }, /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
-    onClick: () => openForm(detailVisit, "dar")
-  }, "📝 + Isi DAR"), /*#__PURE__*/React.createElement(Btn, {
-    size: "sm",
-    variant: "success",
-    onClick: () => openForm(detailVisit, "partrec")
-  }, "🔩 ", visitRecDoc(detailVisit.id) ? "Edit" : "+", " Part Recommendation"), /*#__PURE__*/React.createElement(Btn, {
-    size: "sm",
-    variant: "warning",
-    onClick: () => openForm(detailVisit, "status")
-  }, "📋 + Status Report"), /*#__PURE__*/React.createElement(Btn, {
-    size: "sm",
-    variant: "ghost",
-    onClick: () => openForm(detailVisit, "bast")
-  }, "📄 + BAPP"), /*#__PURE__*/React.createElement(Btn, {
-    size: "sm",
     variant: "ghost",
     onClick: () => openForm(detailVisit, "inspection")
   }, "🔍 + Inspection Report"), /*#__PURE__*/React.createElement(Btn, {
@@ -8960,139 +9127,6 @@ function MekanikReport({
     variant: "ghost",
     onClick: () => openForm(detailVisit, "surattugas")
   }, "📜 + Surat Tugas")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
-    style: {
-      margin: "0 0 8px",
-      color: theme.muted,
-      fontSize: 13
-    }
-  }, "📝 DAILY ACTIVITY REPORT / BERITA ACARA (", detailVisit.jenisBeritaAcara, ")"), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Periode", "Pekerjaan", "Hari Tercatat", "Status", "Aksi"],
-    rows: visitDars(detailVisit.id).map(d => [`${d.tanggalMulai} s/d ${d.tanggalSelesai}`, d.pekerjaan, `${d.catatanHarian.length} hari`, /*#__PURE__*/React.createElement(Badge, {
-      color: darStatusColor[d.status]
-    }, d.status), /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: "flex",
-        gap: 6
-      }
-    }, /*#__PURE__*/React.createElement(PrintBtn, {
-      onClick: () => printDAR(d)
-    }), (isOwnerLike || isSepti || isMekanik && (session.username === detailVisit.mekanikUsername || (detailVisit.mekanikUsernames || []).includes(session.username))) && /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "ghost",
-      onClick: () => openForm(detailVisit, "dar", d)
-    }, "✏️"), (isSepti || isOwnerLike) && d.status === "Menunggu Approval Septi" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "success",
-      onClick: () => approveDar(d)
-    }, "✓"), /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "danger",
-      onClick: () => rejectDar(d)
-    }, "✗")), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "danger",
-      onClick: () => deleteDar(d)
-    }, "🗑️"))]),
-    emptyMsg: "Belum ada entri DAR"
-  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
-    style: {
-      margin: "0 0 8px",
-      color: theme.muted,
-      fontSize: 13
-    }
-  }, "🔩 PART RECOMMENDATION"), (() => {
-    const recDoc = visitRecDoc(detailVisit.id);
-    if (!recDoc) return /*#__PURE__*/React.createElement("p", {
-      style: {
-        color: theme.muted,
-        fontSize: 13
-      }
-    }, "Belum ada rekomendasi part untuk kunjungan ini.");
-    return /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: "flex",
-        flexDirection: "column",
-        gap: 10
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center"
-      }
-    }, /*#__PURE__*/React.createElement(Badge, {
-      color: recStatusColor[recDoc.status]
-    }, recDoc.status), /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: "flex",
-        gap: 6
-      }
-    }, /*#__PURE__*/React.createElement(PrintBtn, {
-      onClick: () => printPartRec(recDoc)
-    }), (isOwnerLike || isSepti || isMekanik && (session.username === detailVisit.mekanikUsername || (detailVisit.mekanikUsernames || []).includes(session.username))) && /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "ghost",
-      onClick: () => openForm(detailVisit, "partrec")
-    }, "✏️"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "danger",
-      onClick: () => deletePartRec(recDoc)
-    }, "🗑️"), (isSepti || isOwnerLike) && recDoc.status === "Menunggu Approval Septi" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "success",
-      onClick: () => approveRec(recDoc)
-    }, "✓ Approve Semua"), /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "danger",
-      onClick: () => rejectRec(recDoc)
-    }, "✗ Tolak")))), /*#__PURE__*/React.createElement(Table, {
-      headers: ["Part Number", "Part Name", "Qty", "Alasan"],
-      rows: recDoc.items.map(it => [it.partNumber, it.partName, fmtNum(it.qty), it.alasan])
-    }));
-  })()), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
-    style: {
-      margin: "0 0 8px",
-      color: theme.muted,
-      fontSize: 13
-    }
-  }, "📋 STATUS REPORT"), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Status Pekerjaan", "Kondisi Unit", "Tingkat Keparahan", "Catatan", "Rekomendasi Lanjutan"],
-    rows: visitStatus(detailVisit.id).map(s => [/*#__PURE__*/React.createElement(Badge, {
-      color: statusColor[s.statusPekerjaan]
-    }, s.statusPekerjaan), /*#__PURE__*/React.createElement(Badge, {
-      color: kondisiUnitColor[s.kondisiUnit]
-    }, s.kondisiUnit), /*#__PURE__*/React.createElement(Badge, {
-      color: keparahanColor[s.keparahan]
-    }, s.keparahan), /*#__PURE__*/React.createElement("span", {
-      style: catatanStyle
-    }, s.catatanKondisi || "-"), s.rekomendasiLanjutan || "-"]),
-    emptyMsg: "Belum ada status report"
-  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
-    style: {
-      margin: "0 0 8px",
-      color: theme.muted,
-      fontSize: 13
-    }
-  }, "📄 BERITA ACARA PENYELESAIAN PEKERJAAN (BAPP)"), /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. PO / SO", "Jenis Pekerjaan", "Nama Unit", "Kondisi", "Penerima", ""],
-    rows: visitBasts(detailVisit.id).map(b => [b.soNomor || "-", (b.jenisPekerjaan || []).join(", ") || "-", b.unitName || "-", b.kondisi === "Other" ? b.kondisiLainnya : b.kondisi, b.namaPenerima, /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: "flex",
-        gap: 6
-      }
-    }, (isOwnerLike || isSepti || isMekanik && (session.username === detailVisit.mekanikUsername || (detailVisit.mekanikUsernames || []).includes(session.username))) && /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "ghost",
-      onClick: () => openForm(detailVisit, "bast", b)
-    }, "✏️"), /*#__PURE__*/React.createElement(PrintBtn, {
-      onClick: () => printBast(b)
-    }), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "danger",
-      onClick: () => deleteBast(b)
-    }, "🗑️"))]),
-    emptyMsg: "Belum ada BAPP"
-  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
     style: {
       margin: "0 0 8px",
       color: theme.muted,
@@ -15107,7 +15141,9 @@ function ItemRequisitionModule({
         qtyButuh: m.qty,
         stokTersedia: stok,
         qtyKurang: kurang,
-        catatan: m.fromUnits && m.fromUnits.size > 0 ? `Dari BOM Unit: ${[...m.fromUnits].join(", ")}` : ""
+        // Catatan sengaja dikosongkan (tidak lagi auto-isi "Dari BOM Unit: ..."), per keputusan
+        // bisnis — user request part tetap boleh isi manual di form kalau perlu.
+        catatan: ""
       };
     }).filter(x => x.qtyKurang > 0); // only short items still not covered by (net) stock or an existing IR
   };
