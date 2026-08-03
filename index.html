@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-03.5";
+const APP_BUILD = "2026-08-03.6";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -1907,7 +1907,17 @@ function usePersisted(key, defaultVal) {
         if (!error && data) {
           setValRaw(data.data);
         } else {
-          // First time this key has ever been used — seed it with the default.
+          // First time this key has ever been used — seed it with the default. BUG FIX: this used
+          // to unconditionally call setValRaw(defaultVal) after the seed upsert, which could wipe
+          // out a real change the user made in the meantime — e.g. adding the very first "Master
+          // Group" entry right after this feature shipped: the key erp_client_groups had never
+          // existed before, so on EVERY browser's first load this seed branch always ran; if the
+          // seed upsert's promise was still in flight when the user clicked "+ Tambah", their
+          // group got saved correctly by setVal()'s own upsert, but then this code's blind
+          // setValRaw(defaultVal) fired afterward and reset the screen back to empty/"Tanpa
+          // Group" even though the database already had the real data. Fix: after the seed
+          // upsert (which uses ignoreDuplicates so it never overwrites a real row), re-SELECT and
+          // trust whatever is actually in the database now, instead of assuming it's still empty.
           await sb.from("erp_data").upsert({
             key,
             data: defaultVal,
@@ -1916,7 +1926,12 @@ function usePersisted(key, defaultVal) {
             onConflict: "key",
             ignoreDuplicates: true
           });
-          if (!cancelled) setValRaw(defaultVal);
+          if (cancelled) return;
+          const {
+            data: reData,
+            error: reError
+          } = await sb.from("erp_data").select("data").eq("key", key).maybeSingle();
+          if (!cancelled) setValRaw(!reError && reData ? reData.data : defaultVal);
         }
       } finally {
         if (!cancelled) setLoaded(true);
