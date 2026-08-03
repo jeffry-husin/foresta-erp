@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-03.3";
+const APP_BUILD = "2026-08-03.4";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -15221,30 +15221,31 @@ function ItemRequisitionModule({
     qty: "",
     catatan: ""
   });
-  // "Tambahan Part untuk SO / Non-SO" used to only allow ONE part per submission — per request,
-  // it now supports adding multiple part rows in a single go (tanggal + SO tetap di level header,
-  // dibagi oleh semua part; tiap part punya Qty & Catatan sendiri, konsisten dengan cara item IR
-  // ditampilkan di tabel/print lainnya).
+  // "Tambahan Part untuk SO / Non-SO" used to only allow ONE part per submission, with no way to
+  // tag a client when not tied to an SO. Per request this is now: (1) multi-part, using the same
+  // compact inline "fill one row → + Add → appears in a list below" pattern as Unit Quotation's
+  // item picker instead of one full card per part, and (2) a "Nama Client" picker for the Non-SO
+  // case (soNomor kosong), since soCustomerNama previously only ever came from the linked SO.
   const blankManualForm = {
     tanggal: today(),
     soNomor: "",
-    items: [blankManualItem()]
+    customerId: "",
+    items: []
   };
   const [manualForm, setManualForm] = useState(blankManualForm);
-  const addManualItem = () => setManualForm(f => ({
-    ...f,
-    items: [...f.items, blankManualItem()]
-  }));
+  const [manualItemForm, setManualItemForm] = useState(blankManualItem());
+  const addManualItemFromForm = () => {
+    if (!manualItemForm.partNumber) return alert("Part Number wajib dipilih dari Master Part (gunakan pencarian).");
+    if (!manualItemForm.qty) return alert("Qty wajib diisi");
+    setManualForm(f => ({
+      ...f,
+      items: [...f.items, manualItemForm]
+    }));
+    setManualItemForm(blankManualItem());
+  };
   const removeManualItem = idx => setManualForm(f => ({
     ...f,
-    items: f.items.length <= 1 ? f.items : f.items.filter((_, i) => i !== idx)
-  }));
-  const updateManualItem = (idx, patch) => setManualForm(f => ({
-    ...f,
-    items: f.items.map((it, i) => i === idx ? {
-      ...it,
-      ...patch
-    } : it)
+    items: f.items.filter((_, i) => i !== idx)
   }));
   const [form, setForm] = useState({
     tanggal: today(),
@@ -15257,6 +15258,7 @@ function ItemRequisitionModule({
     setManualModal(false);
     setEditingNomor(null);
     setManualForm(blankManualForm);
+    setManualItemForm(blankManualItem());
   };
   const closeModal = () => {
     setModal(false);
@@ -15269,8 +15271,13 @@ function ItemRequisitionModule({
   };
   const saveManual = () => {
     const validItems = (manualForm.items || []).filter(it => it.partNumber && it.qty);
-    if (validItems.length === 0) return alert("Minimal 1 part wajib diisi — Part Number (dari Master Part) dan Qty.");
+    if (validItems.length === 0) return alert("Minimal 1 part wajib ditambahkan (isi Part Number & Qty lalu klik + Add).");
     const so = manualForm.soNomor ? salesOrders.find(s => s.nomor === manualForm.soNomor) : null;
+    // When not tied to an SO, the client now comes from the explicit "Nama Client" picker instead
+    // of being left blank — this is what let a Non-SO requisition go untracked to any client.
+    const manualCustomer = !so && manualForm.customerId ? customers.find(c => c.id === manualForm.customerId) : null;
+    const soCustomerNama = so?.customerNama || manualCustomer?.nama || "";
+    const resolvedCustomerId = so?.customerId || manualForm.customerId || "";
     const itemPayloads = validItems.map(it => ({
       partNumber: it.partNumber,
       partName: it.partName,
@@ -15285,7 +15292,8 @@ function ItemRequisitionModule({
         ...r,
         tanggal: manualForm.tanggal || r.tanggal,
         soNomor: manualForm.soNomor || "",
-        soCustomerNama: so?.customerNama || "",
+        soCustomerNama,
+        customerId: resolvedCustomerId,
         bomCandidate: true,
         items: itemPayloads
       } : r));
@@ -15300,7 +15308,8 @@ function ItemRequisitionModule({
         nomor: newNomor(prev),
         tanggal: manualForm.tanggal || today(),
         soNomor: manualForm.soNomor || "",
-        soCustomerNama: so?.customerNama || "",
+        soCustomerNama,
+        customerId: resolvedCustomerId,
         bomCandidate: true,
         items: itemPayloads,
         createdBy: session.nama,
@@ -15532,6 +15541,7 @@ function ItemRequisitionModule({
       setManualForm({
         tanggal: r.tanggal || today(),
         soNomor: r.soNomor || "",
+        customerId: r.customerId || "",
         items: (r.items && r.items.length ? r.items : [{}]).map(it => ({
           partNumber: it.partNumber || "",
           partName: it.partName || "",
@@ -15540,6 +15550,7 @@ function ItemRequisitionModule({
           catatan: it.catatan || ""
         }))
       });
+      setManualItemForm(blankManualItem());
       setManualModal(true);
     } else {
       setForm({
@@ -15799,6 +15810,7 @@ function ItemRequisitionModule({
     onClick: () => {
       setEditingNomor(null);
       setManualForm(blankManualForm);
+      setManualItemForm(blankManualItem());
       setManualModal(true);
     }
   }, "+ Tambahan Part untuk SO / Non-SO"))), React.createElement("div", {
@@ -15925,6 +15937,7 @@ function ItemRequisitionModule({
           ...blankManualForm,
           soNomor: soDetailModal
         });
+        setManualItemForm(blankManualItem());
         setManualModal(true);
       }
     }, "+ Tambah Part Pelengkap untuk SO Ini"), React.createElement(Btn, {
@@ -16342,7 +16355,8 @@ function ItemRequisitionModule({
     value: manualForm.soNomor,
     onChange: v => setManualForm({
       ...manualForm,
-      soNomor: v
+      soNomor: v,
+      customerId: v ? "" : manualForm.customerId
     }),
     options: [{
       value: "",
@@ -16351,92 +16365,83 @@ function ItemRequisitionModule({
       value: so.nomor,
       label: `${so.nomor} — ${so.customerNama}`
     }))]
-  }), manualForm.items.map((it, idx) => React.createElement("div", {
-    key: idx,
+  }), manualForm.soNomor ? React.createElement("div", {
     style: {
-      border: `1px solid ${theme.border}`,
-      borderRadius: 10,
-      padding: 12,
-      display: "flex",
-      flexDirection: "column",
-      gap: 10,
-      position: "relative"
-    }
-  }, manualForm.items.length > 1 && React.createElement("button", {
-    type: "button",
-    onClick: () => removeManualItem(idx),
-    title: "Hapus part ini",
-    style: {
-      position: "absolute",
-      top: 8,
-      right: 8,
-      background: "transparent",
-      border: "none",
-      color: theme.red,
-      cursor: "pointer",
-      fontSize: 14
-    }
-  }, "✕"), React.createElement("div", {
-    style: {
-      fontSize: 11,
-      fontWeight: 700,
+      fontSize: 12,
       color: theme.muted
     }
-  }, "Part #", idx + 1), React.createElement(PartPicker, {
-    label: "Part Number *",
-    value: it.partNumber,
+  }, "Nama Client: ", React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, (salesOrders.find(s => s.nomor === manualForm.soNomor) || {}).customerNama || "-"), " (otomatis dari SO)") : React.createElement(Select, {
+    label: "Nama Client",
+    value: manualForm.customerId,
+    onChange: v => setManualForm({
+      ...manualForm,
+      customerId: v
+    }),
+    options: [{
+      value: "",
+      label: "— Pilih Client —"
+    }, ...customers.map(c => ({
+      value: c.id,
+      label: c.nama
+    }))]
+  }), React.createElement("p", {
+    style: {
+      margin: "4px 0 0",
+      fontSize: 12,
+      fontWeight: 600,
+      color: theme.text
+    }
+  }, "Tambah Part"), React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "2fr 1fr 1.4fr auto",
+      gap: 8,
+      alignItems: "end"
+    }
+  }, React.createElement(PartPicker, {
+    label: "Part Number",
+    value: manualItemForm.partNumber,
     parts: parts,
     showDescription: true,
     onChange: pn => {
       const p = parts.find(x => x.partNumber === pn);
-      updateManualItem(idx, {
+      setManualItemForm({
+        ...manualItemForm,
         partNumber: pn,
         partName: p?.partName || "",
         description: p?.description || ""
       });
     }
-  }), it.partName && React.createElement("div", {
-    style: {
-      background: theme.surface,
-      borderRadius: 8,
-      padding: "10px 12px",
-      fontSize: 13,
-      color: theme.text
-    }
-  }, React.createElement("strong", null, it.partName), it.description && React.createElement("div", {
-    style: {
-      fontSize: 11,
-      color: theme.muted,
-      marginTop: 4
-    }
-  }, it.description)), React.createElement(Input, {
-    label: "Qty *",
+  }), React.createElement(Input, {
+    label: "Qty",
     type: "number",
-    value: it.qty,
-    onChange: v => updateManualItem(idx, {
+    value: manualItemForm.qty,
+    onChange: v => setManualItemForm({
+      ...manualItemForm,
       qty: v
     })
   }), React.createElement(Input, {
-    label: "Catatan / Untuk Project",
-    multiline: true,
-    value: it.catatan,
-    onChange: v => updateManualItem(idx, {
+    label: "Catatan",
+    value: manualItemForm.catatan,
+    onChange: v => setManualItemForm({
+      ...manualItemForm,
       catatan: v
     })
-  }))), React.createElement("button", {
-    type: "button",
-    onClick: addManualItem,
-    style: {
-      alignSelf: "flex-start",
-      background: "transparent",
-      border: `1px dashed ${theme.border}`,
-      borderRadius: 6,
-      padding: "6px 12px",
-      color: theme.accentLight,
-      fontSize: 12,
-      cursor: "pointer"
-    }
-  }, "+ Tambah Part"), React.createElement("div", {
+  }), React.createElement(Btn, {
+    size: "sm",
+    onClick: addManualItemFromForm
+  }, "+ Add")), manualForm.items.length > 0 && React.createElement(Table, {
+    headers: ["Part Number", "Part Name", "Qty", "Catatan", ""],
+    rows: manualForm.items.map((it, idx) => [it.partNumber, it.partName, it.qty, it.catatan || "-", React.createElement(Btn, {
+      size: "sm",
+      variant: "danger",
+      onClick: () => removeManualItem(idx)
+    }, "×")])
+  }), React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
