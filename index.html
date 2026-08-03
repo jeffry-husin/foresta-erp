@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-03.1";
+const APP_BUILD = "2026-08-03.2";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -2008,6 +2008,7 @@ function useStore() {
   const [suratTugas, setSuratTugas] = usePersisted("erp_surat_tugas", []); // Surat Perintah Tugas entries, per visit
   const [dinasCatatan, setDinasCatatan] = usePersisted("erp_uang_dinas", []); // Uang Dinas: per-mekanik-per-perjalanan cost record, auto-created when a Kunjungan (visit) is marked Selesai, or as a project-level placeholder when a SO becomes fulfillmentType "MR"
   const [mills, setMills] = usePersisted("erp_mills", []); // Master Mill: mill/site location database (Mill Name, Company, Alamat, Provinsi, Kabupaten)
+  const [clientGroups, setClientGroups] = usePersisted("erp_client_groups", []); // Master Group: corporate group names that multiple Database Client companies can belong to (e.g. several PT under one group holding), managed by Owner/GM from Database Client
   const [inspectionReports, setInspectionReports] = usePersisted("erp_inspection_reports", []); // Inspection Report entries, per visit (component checklist)
   const [leaveRequests, setLeaveRequests] = usePersisted("erp_leave_requests", []); // Form Cuti: leave requests, approved by HRD, deducts from 12-day/year quota via Absensi "Cuti" entries
   const [mingguanMekanikRoster, setMingguanMekanikRoster] = usePersisted("erp_mingguan_mekanik_roster", []); // Laporan Mingguan: manageable list of mekanik names to include (addable/removable, independent of role)
@@ -2238,6 +2239,8 @@ function useStore() {
     setDinasCatatan,
     mills,
     setMills,
+    clientGroups,
+    setClientGroups,
     inspectionReports,
     setInspectionReports,
     leaveRequests,
@@ -5583,12 +5586,15 @@ function CustomerDB({
     setCustomers,
     editRequests,
     setEditRequests,
-    authUsers
+    authUsers,
+    clientGroups,
+    setClientGroups
   } = store;
   const blankForm = {
     id: "",
     nama: "",
     category: "",
+    groupId: "",
     currency: "IDR",
     pics: [],
     alamat: "",
@@ -5792,8 +5798,58 @@ function CustomerDB({
   // requestAccess/pendingAccessRequests above), subject to HO1/HO2/HO3 approval.
   const visible = customers;
   const [search, setSearch] = useState("");
-  const filtered = visible.filter(c => c.nama.toLowerCase().includes(search.toLowerCase()));
+  const groupNamaFor = c => (clientGroups || []).find(g => g.id === c.groupId)?.nama || "";
+  // Search now matches not just the client name but also the assigned Sales Manager (both the
+  // legacy free-text field and the resolved name(s) from salesManagerUsernames) and the Group
+  // name — e.g. searching "Suhandi" finds every client assigned to him, not just clients whose
+  // company name happens to contain that text. This was the actual complaint behind "SUHANDI
+  // hanya lihat sebagian client": the Database Client list itself already shows all clients, but
+  // there was no way to search/filter by sales manager to quickly find "his" clients among 932.
+  const filtered = visible.filter(c => {
+    const q = search.trim().toLowerCase();
+    if (!q) return true;
+    if (c.nama.toLowerCase().includes(q)) return true;
+    if ((c.salesManager || "").toLowerCase().includes(q)) return true;
+    const assignedNamas = (c.salesManagerUsernames || []).map(u => salesManagerUsers.find(x => x.username === u)?.nama || "").join(" ").toLowerCase();
+    if (assignedNamas.includes(q)) return true;
+    if (groupNamaFor(c).toLowerCase().includes(q)) return true;
+    return false;
+  });
   const CUSTOMER_TEMPLATE_HEADERS = ["id", "salesManager", "nama", "category", "currency", "picNama", "picJabatan", "picNoHp", "alamat", "telepon", "email", "shippingAddress", "billingAddress", "npwp", "taxPayer", "nitku", "taxAddress"];
+  // Master Group CRUD — Owner/GM only. Kept intentionally simple (name only, no separate
+  // module) since Group exists purely to tag which Database Client companies belong under the
+  // same corporate group; the dropdown in the Add/Edit Client form references clientGroups by id.
+  const [groupModal, setGroupModal] = useState(false);
+  const [newGroupName, setNewGroupName] = useState("");
+  const addGroup = () => {
+    const nama = newGroupName.trim();
+    if (!nama) return;
+    if ((clientGroups || []).some(g => g.nama.toLowerCase() === nama.toLowerCase())) {
+      alert("Group dengan nama tersebut sudah ada.");
+      return;
+    }
+    setClientGroups([...(clientGroups || []), {
+      id: "GRP" + uid(),
+      nama
+    }]);
+    setNewGroupName("");
+  };
+  const renameGroup = (g, nama) => {
+    if (!nama.trim()) return;
+    setClientGroups((clientGroups || []).map(x => x.id === g.id ? {
+      ...x,
+      nama: nama.trim()
+    } : x));
+  };
+  const deleteGroup = g => {
+    const inUse = customers.filter(c => c.groupId === g.id).length;
+    if (inUse > 0 && !confirm(`Group "${g.nama}" masih dipakai oleh ${inUse} client. Hapus tetap? Client yang memakainya akan kehilangan Group.`)) return;
+    setClientGroups((clientGroups || []).filter(x => x.id !== g.id));
+    if (inUse > 0) setCustomers(customers.map(c => c.groupId === g.id ? {
+      ...c,
+      groupId: ""
+    } : c));
+  };
   const addPic = () => {
     if (!picForm.nama) return alert("Nama PIC wajib diisi");
     setForm(f => ({
@@ -5905,6 +5961,26 @@ function CustomerDB({
       docNomor: customer.nama,
       action: "Ubah Category",
       detail: `${customer.category || "-"} → ${newCategory}`
+    });
+  };
+  const updateGroup = (customer, newGroupId) => {
+    if (!isOwnerLike && !customerAccessibleBy(customer, session)) {
+      alert("Anda belum memiliki akses ke client ini. Gunakan tombol \"Request Akses\" untuk mengajukan akses ke HO1/HO2/HO3.");
+      return;
+    }
+    const idx = customers.indexOf(customer);
+    if (idx < 0) return;
+    const arr = [...customers];
+    arr[idx] = {
+      ...customer,
+      groupId: newGroupId
+    };
+    setCustomers(arr);
+    logAudit(store, session, {
+      module: "Database Client",
+      docNomor: customer.nama,
+      action: "Ubah Group",
+      detail: `${groupNamaFor(customer) || "-"} → ${(clientGroups || []).find(g => g.id === newGroupId)?.nama || "-"}`
     });
   };
   const doExport = () => exportToExcel(visible.flatMap(c => {
@@ -6045,9 +6121,9 @@ function CustomerDB({
   }, /*#__PURE__*/React.createElement(Input, {
     value: search,
     onChange: setSearch,
-    placeholder: "Cari nama client...",
+    placeholder: "Cari nama client / sales manager / group...",
     style: {
-      width: 200
+      width: 240
     }
   }), /*#__PURE__*/React.createElement(ExportExcelBtn, {
     onClick: doExport
@@ -6057,7 +6133,11 @@ function CustomerDB({
     variant: "ghost",
     size: "sm",
     onClick: () => downloadTemplate(CUSTOMER_TEMPLATE_HEADERS, "Template_Database_Client.xlsx")
-  }, "📄 Template"), /*#__PURE__*/React.createElement(Btn, {
+  }, "📄 Template"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    size: "sm",
+    onClick: () => setGroupModal(true)
+  }, "🏢 Kelola Group"), /*#__PURE__*/React.createElement(Btn, {
     onClick: () => {
       setForm(blankForm);
       setEditIdx(null);
@@ -6208,7 +6288,7 @@ function CustomerDB({
     // since that's what actually identifies a client at a glance, not the internal ID. ID itself,
     // Email, and Telepon are dropped from the list entirely (still in the record/edit form, just
     // not useful clutter here).
-    headers: ["Nama Client", "PIC Utama", "Category", "Sales Manager", "Akses"],
+    headers: ["Nama Client", "PIC Utama", "Category", "Group", "Sales Manager", "Akses"],
     rows: filtered.map(c => {
       const picLabelText = c.pics && c.pics.length ? `${c.pics[0].nama}${c.pics.length > 1 ? ` (+${c.pics.length - 1})` : ""}` : "-";
       const picLabel = /*#__PURE__*/React.createElement("span", {
@@ -6235,6 +6315,23 @@ function CustomerDB({
           minWidth: 150
         }
       }) : c.category || "-";
+      // Group can also be revised inline by whoever has access — same pattern as Category, no
+      // approval needed since it's just a classification tag (which corporate group this client
+      // company belongs to), not a change to the client's core data.
+      const groupCell = hasAccess ? /*#__PURE__*/React.createElement(Select, {
+        value: c.groupId || "",
+        onChange: v => updateGroup(c, v),
+        options: [{
+          value: "",
+          label: "— Tanpa Group —"
+        }, ...(clientGroups || []).map(g => ({
+          value: g.id,
+          label: g.nama
+        }))],
+        style: {
+          minWidth: 150
+        }
+      }) : groupNamaFor(c) || "-";
       const accessCell = isOwnerLike ? /*#__PURE__*/React.createElement(Btn, {
         size: "sm",
         variant: "ghost",
@@ -6266,7 +6363,7 @@ function CustomerDB({
           padding: "1px 6px"
         }
       }, "⭐ KA")) : c.nama;
-      return [namaCell, picLabel, categoryCell, /*#__PURE__*/React.createElement(Badge, {
+      return [namaCell, picLabel, categoryCell, groupCell, /*#__PURE__*/React.createElement(Badge, {
         color: theme.accent
       }, c.salesManager || "-"), accessCell];
     }),
@@ -6312,6 +6409,68 @@ function CustomerDB({
       fontSize: 12
     }
   }, "(", u.username, ")")))))), /*#__PURE__*/React.createElement(Modal, {
+    open: groupModal,
+    title: "Kelola Group",
+    onClose: () => setGroupModal(false),
+    width: 460
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "Group menandai beberapa perusahaan (client) yang bernaung di bawah satu group yang sama. Tambahkan nama group di sini, lalu pilih Group-nya saat menambah/edit client."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    value: newGroupName,
+    onChange: setNewGroupName,
+    placeholder: "Nama group baru...",
+    style: {
+      flex: 1
+    }
+  }), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    onClick: addGroup
+  }, "+ Tambah")), (clientGroups || []).length === 0 ? /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "Belum ada group.") : (clientGroups || []).map(g => /*#__PURE__*/React.createElement("div", {
+    key: g.id,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      padding: "6px 0",
+      borderBottom: `1px solid ${theme.border}33`
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    value: g.nama,
+    onChange: v => renameGroup(g, v),
+    style: {
+      flex: 1
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      whiteSpace: "nowrap"
+    }
+  }, customers.filter(c => c.groupId === g.id).length, " client"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "danger",
+    onClick: () => deleteGroup(g)
+  }, "🗑"))))), /*#__PURE__*/React.createElement(Modal, {
     open: modal,
     title: editIdx !== null ? "Edit Client" : "Tambah Client",
     onClose: () => setModal(false),
@@ -6358,6 +6517,20 @@ function CustomerDB({
       value: c,
       label: c
     }))
+  }), /*#__PURE__*/React.createElement(Select, {
+    label: "Group",
+    value: form.groupId || "",
+    onChange: v => setForm({
+      ...form,
+      groupId: v
+    }),
+    options: [{
+      value: "",
+      label: "— Tanpa Group —"
+    }, ...(clientGroups || []).map(g => ({
+      value: g.id,
+      label: g.nama
+    }))]
   })), isOwnerLike && /*#__PURE__*/React.createElement("label", {
     style: {
       display: "flex",
@@ -15004,16 +15177,38 @@ function ItemRequisitionModule({
   // BOM and diffs it against this IR's currently-stored items. Never auto-applies — user must
   // explicitly click "Terapkan Perubahan Ini", which is logged to Audit Trail.
   const [recheckModal, setRecheckModal] = useState(null); // { ir, diff }
-  const blankManualForm = {
-    tanggal: today(),
-    soNomor: "",
+  const blankManualItem = () => ({
     partNumber: "",
     partName: "",
     description: "",
     qty: "",
     catatan: ""
+  });
+  // "Tambahan Part untuk SO / Non-SO" used to only allow ONE part per submission — per request,
+  // it now supports adding multiple part rows in a single go (tanggal + SO tetap di level header,
+  // dibagi oleh semua part; tiap part punya Qty & Catatan sendiri, konsisten dengan cara item IR
+  // ditampilkan di tabel/print lainnya).
+  const blankManualForm = {
+    tanggal: today(),
+    soNomor: "",
+    items: [blankManualItem()]
   };
   const [manualForm, setManualForm] = useState(blankManualForm);
+  const addManualItem = () => setManualForm(f => ({
+    ...f,
+    items: [...f.items, blankManualItem()]
+  }));
+  const removeManualItem = idx => setManualForm(f => ({
+    ...f,
+    items: f.items.length <= 1 ? f.items : f.items.filter((_, i) => i !== idx)
+  }));
+  const updateManualItem = (idx, patch) => setManualForm(f => ({
+    ...f,
+    items: f.items.map((it, i) => i === idx ? {
+      ...it,
+      ...patch
+    } : it)
+  }));
   const [form, setForm] = useState({
     tanggal: today(),
     soNomor: "",
@@ -15036,18 +15231,18 @@ function ItemRequisitionModule({
     });
   };
   const saveManual = () => {
-    if (!manualForm.partNumber) return alert("Part Number wajib dipilih dari Master Part (gunakan pencarian).");
-    if (!manualForm.qty) return alert("Qty wajib diisi");
+    const validItems = (manualForm.items || []).filter(it => it.partNumber && it.qty);
+    if (validItems.length === 0) return alert("Minimal 1 part wajib diisi — Part Number (dari Master Part) dan Qty.");
     const so = manualForm.soNomor ? salesOrders.find(s => s.nomor === manualForm.soNomor) : null;
-    const itemPayload = {
-      partNumber: manualForm.partNumber,
-      partName: manualForm.partName,
-      description: manualForm.description,
-      qtyButuh: parseFloat(manualForm.qty) || 0,
+    const itemPayloads = validItems.map(it => ({
+      partNumber: it.partNumber,
+      partName: it.partName,
+      description: it.description,
+      qtyButuh: parseFloat(it.qty) || 0,
       stokTersedia: 0,
-      qtyKurang: parseFloat(manualForm.qty) || 0,
-      catatan: manualForm.catatan
-    };
+      qtyKurang: parseFloat(it.qty) || 0,
+      catatan: it.catatan
+    }));
     if (editingNomor) {
       setItemRequisitions(prev => prev.map(r => r.nomor === editingNomor ? {
         ...r,
@@ -15055,13 +15250,13 @@ function ItemRequisitionModule({
         soNomor: manualForm.soNomor || "",
         soCustomerNama: so?.customerNama || "",
         bomCandidate: true,
-        items: [itemPayload]
+        items: itemPayloads
       } : r));
       logAudit(store, session, {
         module: "Item Requisition",
         docNomor: editingNomor,
         action: "Revisi (Non-SO / Kandidat BOM)",
-        detail: manualForm.catatan
+        detail: `${itemPayloads.length} part: ${itemPayloads.map(x => x.partName).join(", ")}`
       });
     } else {
       setItemRequisitions(prev => [...prev, {
@@ -15070,15 +15265,15 @@ function ItemRequisitionModule({
         soNomor: manualForm.soNomor || "",
         soCustomerNama: so?.customerNama || "",
         bomCandidate: true,
-        items: [itemPayload],
+        items: itemPayloads,
         createdBy: session.nama,
         status: "Menunggu Purchasing"
       }]);
       logAudit(store, session, {
         module: "Item Requisition",
-        docNomor: manualForm.partName,
+        docNomor: itemPayloads.map(x => x.partName).join(", "),
         action: "Tambah (Non-SO / Kandidat BOM)",
-        detail: manualForm.catatan
+        detail: `${itemPayloads.length} part`
       });
     }
     closeManualModal();
@@ -15297,15 +15492,16 @@ function ItemRequisitionModule({
     if (r.status === "Sudah di-PO" && !confirm(`Item Requisition ${r.nomor} sudah menjadi Purchase Order. Purchase Order terkait TIDAK akan otomatis mengikuti perubahan ini — perlu dicek/disesuaikan manual bila perlu. Lanjutkan revisi?`)) return;
     setEditingNomor(r.nomor);
     if (r.bomCandidate) {
-      const it = r.items[0] || {};
       setManualForm({
         tanggal: r.tanggal || today(),
         soNomor: r.soNomor || "",
-        partNumber: it.partNumber || "",
-        partName: it.partName || "",
-        description: it.description || "",
-        qty: String(it.qtyButuh || ""),
-        catatan: it.catatan || ""
+        items: (r.items && r.items.length ? r.items : [{}]).map(it => ({
+          partNumber: it.partNumber || "",
+          partName: it.partName || "",
+          description: it.description || "",
+          qty: String(it.qtyButuh || ""),
+          catatan: it.catatan || ""
+        }))
       });
       setManualModal(true);
     } else {
@@ -16118,21 +16314,51 @@ function ItemRequisitionModule({
       value: so.nomor,
       label: `${so.nomor} — ${so.customerNama}`
     }))]
-  }), React.createElement(PartPicker, {
+  }), manualForm.items.map((it, idx) => React.createElement("div", {
+    key: idx,
+    style: {
+      border: `1px solid ${theme.border}`,
+      borderRadius: 10,
+      padding: 12,
+      display: "flex",
+      flexDirection: "column",
+      gap: 10,
+      position: "relative"
+    }
+  }, manualForm.items.length > 1 && React.createElement("button", {
+    type: "button",
+    onClick: () => removeManualItem(idx),
+    title: "Hapus part ini",
+    style: {
+      position: "absolute",
+      top: 8,
+      right: 8,
+      background: "transparent",
+      border: "none",
+      color: theme.red,
+      cursor: "pointer",
+      fontSize: 14
+    }
+  }, "✕"), React.createElement("div", {
+    style: {
+      fontSize: 11,
+      fontWeight: 700,
+      color: theme.muted
+    }
+  }, "Part #", idx + 1), React.createElement(PartPicker, {
     label: "Part Number *",
-    value: manualForm.partNumber,
+    value: it.partNumber,
     parts: parts,
     showDescription: true,
     onChange: pn => {
       const p = parts.find(x => x.partNumber === pn);
-      setManualForm({
-        ...manualForm,
+      updateManualItem(idx, {
         partNumber: pn,
         partName: p?.partName || "",
         description: p?.description || ""
       });
     }
-  }), manualForm.partName && React.createElement("div", {
+  }), it.partName && React.createElement("div", {
     style: {
       background: theme.surface,
       borderRadius: 8,
@@ -16140,29 +16366,40 @@ function ItemRequisitionModule({
       fontSize: 13,
       color: theme.text
     }
-  }, React.createElement("strong", null, manualForm.partName), manualForm.description && React.createElement("div", {
+  }, React.createElement("strong", null, it.partName), it.description && React.createElement("div", {
     style: {
       fontSize: 11,
       color: theme.muted,
       marginTop: 4
     }
-  }, manualForm.description)), React.createElement(Input, {
+  }, it.description)), React.createElement(Input, {
     label: "Qty *",
     type: "number",
-    value: manualForm.qty,
-    onChange: v => setManualForm({
-      ...manualForm,
+    value: it.qty,
+    onChange: v => updateManualItem(idx, {
       qty: v
     })
   }), React.createElement(Input, {
     label: "Catatan / Untuk Project",
     multiline: true,
-    value: manualForm.catatan,
-    onChange: v => setManualForm({
-      ...manualForm,
+    value: it.catatan,
+    onChange: v => updateManualItem(idx, {
       catatan: v
     })
-  }), React.createElement("div", {
+  }))), React.createElement("button", {
+    type: "button",
+    onClick: addManualItem,
+    style: {
+      alignSelf: "flex-start",
+      background: "transparent",
+      border: `1px dashed ${theme.border}`,
+      borderRadius: 6,
+      padding: "6px 12px",
+      color: theme.accentLight,
+      fontSize: 12,
+      cursor: "pointer"
+    }
+  }, "+ Tambah Part"), React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
