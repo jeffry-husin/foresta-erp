@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-03.6";
+const APP_BUILD = "2026-08-03.7";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -5637,17 +5637,21 @@ function CustomerDB({
   const toggleAccessUser = (customer, username) => {
     const current = customer.salesManagerUsernames || [];
     const next = current.includes(username) ? current.filter(u => u !== username) : [...current, username];
-    const idx = customers.indexOf(customer);
-    if (idx < 0) return;
-    const arr = [...customers];
     const assignedNamas = next.map(u => salesManagerUsers.find(x => x.username === u)?.nama).filter(Boolean);
-    arr[idx] = {
+    const updatedCustomer = {
       ...customer,
       salesManagerUsernames: next,
       salesManager: assignedNamas.join(", ") || customer.salesManager
     };
-    setCustomers(arr);
-    setAccessModal(arr[idx]);
+    // Functional-updater form of setCustomers (see updateCategory below for why this matters).
+    setCustomers(prev => {
+      const idx = prev.findIndex(c => c.id === customer.id);
+      if (idx < 0) return prev;
+      const arr = [...prev];
+      arr[idx] = updatedCustomer;
+      return arr;
+    });
+    setAccessModal(updatedCustomer);
   };
   const requestAccess = customer => {
     submitEditRequest(store, session, {
@@ -5666,22 +5670,22 @@ function CustomerDB({
   };
   const pendingAccessRequests = editRequests.filter(r => r.module === "Client Access Request" && r.status === "Menunggu Approval GM");
   const approveAccessRequest = req => {
-    const idx = customers.findIndex(c => c.id === req.targetId);
-    if (idx >= 0) {
-      const c = customers[idx];
+    setCustomers(prev => {
+      const idx = prev.findIndex(c => c.id === req.targetId);
+      if (idx < 0) return prev;
+      const c = prev[idx];
       const current = c.salesManagerUsernames || [];
-      if (!current.includes(req.payload.username)) {
-        const next = [...current, req.payload.username];
-        const arr = [...customers];
-        const assignedNamas = next.map(u => salesManagerUsers.find(x => x.username === u)?.nama || (u === req.payload.username ? req.payload.nama : null)).filter(Boolean);
-        arr[idx] = {
-          ...c,
-          salesManagerUsernames: next,
-          salesManager: assignedNamas.join(", ") || c.salesManager
-        };
-        setCustomers(arr);
-      }
-    }
+      if (current.includes(req.payload.username)) return prev;
+      const next = [...current, req.payload.username];
+      const assignedNamas = next.map(u => salesManagerUsers.find(x => x.username === u)?.nama || (u === req.payload.username ? req.payload.nama : null)).filter(Boolean);
+      const arr = [...prev];
+      arr[idx] = {
+        ...c,
+        salesManagerUsernames: next,
+        salesManager: assignedNamas.join(", ") || c.salesManager
+      };
+      return arr;
+    });
     const reqArr = [...editRequests];
     reqArr[editRequests.indexOf(req)] = {
       ...req,
@@ -5767,14 +5771,15 @@ function CustomerDB({
     const payload = {
       ...reviewForm
     };
-    const idx = customers.findIndex(c => c.id === reviewReq.targetId);
-    if (idx >= 0) {
-      const arr = [...customers];
-      arr[idx] = payload;
-      setCustomers(arr);
-    } else {
-      setCustomers([...customers, payload]);
-    }
+    setCustomers(prev => {
+      const idx = prev.findIndex(c => c.id === reviewReq.targetId);
+      if (idx >= 0) {
+        const arr = [...prev];
+        arr[idx] = payload;
+        return arr;
+      }
+      return [...prev, payload];
+    });
     const reqArr = [...editRequests];
     reqArr[editRequests.indexOf(reviewReq)] = {
       ...reviewReq,
@@ -5860,15 +5865,21 @@ function CustomerDB({
       alert("Group dengan nama tersebut sudah ada.");
       return;
     }
-    setClientGroups([...(clientGroups || []), {
-      id: "GRP" + uid(),
-      nama
-    }]);
+    // Functional-updater form (see updateCategory below) so a concurrent add from another
+    // browser/tab can't be silently wiped by this write.
+    setClientGroups(prev => {
+      const list = prev || [];
+      if (list.some(g => g.nama.toLowerCase() === nama.toLowerCase())) return list;
+      return [...list, {
+        id: "GRP" + uid(),
+        nama
+      }];
+    });
     setNewGroupName("");
   };
   const renameGroup = (g, nama) => {
     if (!nama.trim()) return;
-    setClientGroups((clientGroups || []).map(x => x.id === g.id ? {
+    setClientGroups(prev => (prev || []).map(x => x.id === g.id ? {
       ...x,
       nama: nama.trim()
     } : x));
@@ -5876,8 +5887,8 @@ function CustomerDB({
   const deleteGroup = g => {
     const inUse = customers.filter(c => c.groupId === g.id).length;
     if (inUse > 0 && !confirm(`Group "${g.nama}" masih dipakai oleh ${inUse} client. Hapus tetap? Client yang memakainya akan kehilangan Group.`)) return;
-    setClientGroups((clientGroups || []).filter(x => x.id !== g.id));
-    if (inUse > 0) setCustomers(customers.map(c => c.groupId === g.id ? {
+    setClientGroups(prev => (prev || []).filter(x => x.id !== g.id));
+    if (inUse > 0) setCustomers(prev => prev.map(c => c.groupId === g.id ? {
       ...c,
       groupId: ""
     } : c));
@@ -5912,10 +5923,15 @@ function CustomerDB({
     if (isOwnerLike) {
       // Owner/GM can edit/add directly without approval
       if (editIdx !== null) {
-        const a = [...customers];
-        a[customers.indexOf(filtered[editIdx])] = item;
-        setCustomers(a);
-      } else setCustomers([...customers, item]);
+        const targetId = filtered[editIdx].id;
+        setCustomers(prev => {
+          const idx = prev.findIndex(c => c.id === targetId);
+          if (idx < 0) return prev;
+          const a = [...prev];
+          a[idx] = item;
+          return a;
+        });
+      } else setCustomers(prev => [...prev, item]);
       logAudit(store, session, {
         module: "Database Client",
         docNomor: item.nama,
@@ -5967,29 +5983,40 @@ function CustomerDB({
       return;
     }
     if (confirm("Hapus client?")) {
-      const idx = customers.indexOf(filtered[i]);
-      const a = [...customers];
-      a.splice(idx, 1);
-      setCustomers(a);
+      const targetId = filtered[i].id;
+      setCustomers(prev => prev.filter(c => c.id !== targetId));
     }
   };
   // Quick-revise Category directly from the list — deliberately bypasses the normal GM-approval
   // edit-request flow used for other client fields (see save()), since Category is just a
   // classification tag, not something that needs approval. Still access-gated the same way as
   // everything else: Owner/GM/Finance Director can revise any client, a Sales Manager only their own.
+  // BUG FIX (root cause of "category direvisi lalu hilang lagi setelah refresh"): this used to
+  // build the updated array from the local `customers` closure and write it with the plain-value
+  // form of setCustomers, which skips usePersisted's fresh-fetch-before-write step. In a live
+  // multi-user app, `erp_customers` is one shared row that many people write to (category/group
+  // quick-edits, access grants, approvals, adds/deletes) — if ANY other write landed on the server
+  // between this browser's last load and this save, that other write's changes would just get
+  // silently discarded, or (as here) the reverse: a later concurrent write elsewhere could discard
+  // THIS category change because it was built from a snapshot that didn't yet include it. Using the
+  // functional-updater form makes usePersisted re-fetch the current server data right before writing,
+  // closing that window. Same fix applied to every other setCustomers/setClientGroups call in this
+  // module.
   const updateCategory = (customer, newCategory) => {
     if (!isOwnerLike && !customerAccessibleBy(customer, session)) {
       alert("Anda belum memiliki akses ke client ini. Gunakan tombol \"Request Akses\" untuk mengajukan akses ke HO1/HO2/HO3.");
       return;
     }
-    const idx = customers.indexOf(customer);
-    if (idx < 0) return;
-    const arr = [...customers];
-    arr[idx] = {
-      ...customer,
-      category: newCategory
-    };
-    setCustomers(arr);
+    setCustomers(prev => {
+      const idx = prev.findIndex(c => c.id === customer.id);
+      if (idx < 0) return prev;
+      const arr = [...prev];
+      arr[idx] = {
+        ...prev[idx],
+        category: newCategory
+      };
+      return arr;
+    });
     logAudit(store, session, {
       module: "Database Client",
       docNomor: customer.nama,
@@ -6002,14 +6029,16 @@ function CustomerDB({
       alert("Anda belum memiliki akses ke client ini. Gunakan tombol \"Request Akses\" untuk mengajukan akses ke HO1/HO2/HO3.");
       return;
     }
-    const idx = customers.indexOf(customer);
-    if (idx < 0) return;
-    const arr = [...customers];
-    arr[idx] = {
-      ...customer,
-      groupId: newGroupId
-    };
-    setCustomers(arr);
+    setCustomers(prev => {
+      const idx = prev.findIndex(c => c.id === customer.id);
+      if (idx < 0) return prev;
+      const arr = [...prev];
+      arr[idx] = {
+        ...prev[idx],
+        groupId: newGroupId
+      };
+      return arr;
+    });
     logAudit(store, session, {
       module: "Database Client",
       docNomor: customer.nama,
@@ -6240,15 +6269,16 @@ function CustomerDB({
     size: "sm",
     variant: "success",
     onClick: () => {
-      const idx = customers.findIndex(c => c.id === req.targetId);
-      if (idx >= 0) {
-        const arr = [...customers];
-        arr[idx] = req.payload;
-        setCustomers(arr);
-      } else {
+      setCustomers(prev => {
+        const idx = prev.findIndex(c => c.id === req.targetId);
+        if (idx >= 0) {
+          const arr = [...prev];
+          arr[idx] = req.payload;
+          return arr;
+        }
         // "Tambah" request — client doesn't exist yet, create it now.
-        setCustomers([...customers, req.payload]);
-      }
+        return [...prev, req.payload];
+      });
       const reqArr = [...editRequests];
       reqArr[editRequests.indexOf(req)] = {
         ...req,
