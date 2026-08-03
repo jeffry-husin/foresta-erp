@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-03.4";
+const APP_BUILD = "2026-08-03.5";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -15197,7 +15197,8 @@ function ItemRequisitionModule({
     units,
     poLocal,
     poOverseas,
-    goodsReceipts
+    goodsReceipts,
+    customers
   } = store;
   const isPipin = session.role === "inventory" || session.role === "admin2";
   const isSepti = session.role === "workshop_manager";
