@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-03.2";
+const APP_BUILD = "2026-08-03.3";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -5799,6 +5799,23 @@ function CustomerDB({
   const visible = customers;
   const [search, setSearch] = useState("");
   const groupNamaFor = c => (clientGroups || []).find(g => g.id === c.groupId)?.nama || "";
+  // Duplicate-name detection for the Add/Edit Client form — normalizes away casing and extra
+  // whitespace so "PT Sawit Sukses" and "pt   sawit sukses" are recognized as the same company.
+  // An EXACT normalized match blocks Save outright (must use the existing record instead); a
+  // partial/similar match (one name contains the other) is shown as a soft warning so the user
+  // can double-check before adding what might be a genuine duplicate under a slightly different
+  // spelling — but doesn't block, since two legitimately different companies can share a word.
+  const normalizeName = s => (s || "").trim().toLowerCase().replace(/\s+/g, " ");
+  const exactDuplicateOf = nama => {
+    const n = normalizeName(nama);
+    if (!n) return null;
+    return customers.find(c => normalizeName(c.nama) === n && c.id !== form.id) || null;
+  };
+  const similarMatchesOf = nama => {
+    const n = normalizeName(nama);
+    if (n.length < 3) return [];
+    return customers.filter(c => c.id !== form.id && normalizeName(c.nama) !== n && (normalizeName(c.nama).includes(n) || n.includes(normalizeName(c.nama)))).slice(0, 5);
+  };
   // Search now matches not just the client name but also the assigned Sales Manager (both the
   // legacy free-text field and the resolved name(s) from salesManagerUsernames) and the Group
   // name — e.g. searching "Suhandi" finds every client assigned to him, not just clients whose
@@ -5870,6 +5887,8 @@ function CustomerDB({
   }));
   const save = () => {
     if (!form.nama) return alert("Nama client wajib diisi");
+    const dup = exactDuplicateOf(form.nama);
+    if (dup) return alert(`Client dengan nama "${dup.nama}" sudah ada di database (Sales Manager: ${dup.salesManager || "-"}). Gunakan/edit data yang sudah ada, bukan menambahkan duplikat.`);
     const item = {
       ...form,
       id: form.id || "C" + uid(),
@@ -6489,7 +6508,25 @@ function CustomerDB({
       nama: v
     }),
     required: true
-  }), /*#__PURE__*/React.createElement("div", {
+  }), exactDuplicateOf(form.nama) && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: theme.red + "11",
+      border: `1px solid ${theme.red}44`,
+      borderRadius: 8,
+      padding: "8px 12px",
+      fontSize: 12,
+      color: theme.red
+    }
+  }, "⚠️ Client \"", exactDuplicateOf(form.nama).nama, "\" sudah ada di database (Sales Manager: ", exactDuplicateOf(form.nama).salesManager || "-", "). Tidak bisa disimpan sebagai duplikat — gunakan/edit data yang sudah ada."), !exactDuplicateOf(form.nama) && similarMatchesOf(form.nama).length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: theme.yellow + "11",
+      border: `1px solid ${theme.yellow}44`,
+      borderRadius: 8,
+      padding: "8px 12px",
+      fontSize: 12,
+      color: theme.text
+    }
+  }, "ℹ️ Nama serupa sudah ada di database, cek dulu supaya tidak duplikat: ", similarMatchesOf(form.nama).map(c => c.nama).join(", ")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
       gridTemplateColumns: "1fr 1fr",
