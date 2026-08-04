@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-04.6";
+const APP_BUILD = "2026-08-04.7";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -5983,6 +5983,10 @@ function CustomerDB({
   }));
   const save = () => {
     if (!form.nama) return alert("Nama client wajib diisi");
+    // Owner/GM/Finance Director must explicitly pick which Sales Manager this client belongs to —
+    // client ownership (and its KPI) must always stay with the actual sales rep, never silently fall
+    // back to whoever (Superuser) happened to create or edit the record on their behalf.
+    if (isOwnerLike && !form.salesManager) return alert("Pilih Sales Manager pemilik client ini terlebih dahulu.");
     const dup = exactDuplicateOf(form.nama);
     if (dup) return alert(`Client dengan nama "${dup.nama}" sudah ada di database (Sales Manager: ${dup.salesManager || "-"}). Gunakan/edit data yang sudah ada, bukan menambahkan duplikat.`);
     const item = {
@@ -6278,7 +6282,16 @@ function CustomerDB({
     onClick: () => setGroupModal(true)
   }, "🏢 Kelola Group"), /*#__PURE__*/React.createElement(Btn, {
     onClick: () => {
-      setForm(blankForm);
+      // For a Sales Manager, defaulting to their own name (blankForm's default) is correct — it's
+      // their own client. But for Owner/GM/Finance Director, defaulting to the Superuser's own name
+      // was the bug behind "data client yang dibuatkan Superuser jadi bukan milik Sales" — if they
+      // forgot to explicitly pick a name from the Sales Manager dropdown, the client (and its KPI)
+      // silently ended up attributed to the Superuser instead of the actual sales rep. Force an
+      // explicit choice instead by leaving it blank; save() now blocks submission until it's picked.
+      setForm(isOwnerLike ? {
+        ...blankForm,
+        salesManager: ""
+      } : blankForm);
       setEditIdx(null);
       setModal(true);
     }
