@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-03.7";
+const APP_BUILD = "2026-08-04.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -909,7 +909,7 @@ const CLIENT_FACING_MODULES = ["quotation_unit", "quotation_ps", "sales_order", 
 // diversification / sectors-approached metrics) — OIL & GAS and UTILITAS/TELCO were added
 // specifically for that, the rest were already in use and kept as-is so no existing customer's
 // tagging breaks.
-const CLIENT_CATEGORIES = ["SAWIT", "MINING", "MARINE", "MANUFACTURE", "GOVERNMENT", "KONTRAKTOR", "OIL & GAS", "UTILITAS/TELCO", "UMUM"];
+const CLIENT_CATEGORIES = ["SAWIT", "MINING", "MARINE", "MANUFACTURE", "GOVERNMENT", "KONTRAKTOR", "OIL & GAS", "UTILITAS/TELCO", "LOGISTIC", "LOGGING", "KAROSERI", "DEALER", "UMUM"];
 
 // KPI Sales — NEW vs RETURNING customer type is intentionally NOT stored on the customer record.
 // It's derived on the fly from that customer's own Sales Order history: a customer is "NEW" as of
@@ -2947,7 +2947,45 @@ function Input({
       resize: "vertical",
       lineHeight: 1.5
     }
-  }) : /*#__PURE__*/React.createElement("input", {
+  }) : type === "date" ? (
+    // Native <input type="date"> renders its digits using the BROWSER/OS locale, which on most
+    // staff machines is numeric MM/DD/YYYY — the exact "bulan, hari, tahun" confusion reported.
+    // There's no cross-browser way to make the native widget itself show "04-AUG-26". Instead we
+    // keep the native input (so the calendar picker, keyboard entry, and value/onChange plumbing
+    // all still work exactly as before) but make its own text invisible and draw our own text on
+    // top in the app's unified DD-MMM-YY format (fmtDateRev, same format used for every date shown
+    // in tables). The overlay has pointerEvents:"none" so every click/tap still reaches the real
+    // input underneath and opens the native picker as normal.
+    /*#__PURE__*/React.createElement("div", {
+      style: { position: "relative" }
+    }, /*#__PURE__*/React.createElement("input", {
+      type: "date",
+      value: value ?? "",
+      onChange: e => onChange(e.target.value),
+      min: min,
+      disabled: disabled,
+      lang: lang,
+      style: {
+        ...fieldStyle,
+        color: "transparent",
+        WebkitTextFillColor: "transparent",
+        caretColor: "transparent"
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: "absolute",
+        left: 12,
+        top: 0,
+        bottom: 0,
+        display: "flex",
+        alignItems: "center",
+        pointerEvents: "none",
+        fontSize: 14,
+        fontFamily: "inherit",
+        color: disabled ? theme.muted : value ? theme.text : theme.muted
+      }
+    }, value ? fmtDateRev(value) : (placeholder || "dd-mmm-yy")))
+  ) : /*#__PURE__*/React.createElement("input", {
     type: type,
     value: value ?? "",
     onChange: e => onChange(e.target.value),
@@ -7632,6 +7670,21 @@ function MekanikReport({
   };
   const [visitForm, setVisitForm] = useState(emptyVisitForm);
   const [detailVisit, setDetailVisit] = useState(null);
+  // Visit context used ONLY by the DAR/Status/BAPP/Inspection/Surat Tugas edit forms (openForm below)
+  // — deliberately kept separate from `detailVisit` (which is only ever set by clicking a visit's ID
+  // to open the "Detail Kunjungan" summary modal). They used to share the same state, which caused a
+  // real bug: opening an edit form set `detailVisit` as a side effect, and once the form closed again
+  // `detailVisit` was still non-null, so the unrelated "Detail Kunjungan" modal would pop up right
+  // after — on top of the edit form not even being reachable at all while inside a full-screen visit
+  // page (see `visitPage`/`returnToVisitPage` below). Keeping these two concerns on separate state
+  // fixes both symptoms.
+  const [formVisit, setFormVisit] = useState(null);
+  // When an edit form is opened from inside a full-screen visit page (visitPage), we briefly exit
+  // that page so the form's Modal (which only renders in the main list tree) becomes reachable, then
+  // restore the page automatically once the form is saved/cancelled — so from the mekanik's
+  // perspective, clicking "✏️" inside the page just opens the form directly, and closing it lands
+  // them right back where they were instead of dumping them out to the main list.
+  const [returnToVisitPage, setReturnToVisitPage] = useState(null);
   const [editingJenisPekerjaan, setEditingJenisPekerjaan] = useState(false); // toggles the "Jenis Berita Acara" field in Detail Kunjungan into an editable Select
   const saveJenisPekerjaan = v => {
     setVisits(visits.map(x => x.id === detailVisit.id ? {
@@ -7677,12 +7730,21 @@ function MekanikReport({
     jamSelesai: "",
     catatan: ""
   });
-  const [recItemForm, setRecItemForm] = useState({
-    partNumber: "",
-    qty: 1,
-    alasan: ""
-  });
   const [recCart, setRecCart] = useState([]); // items being collected before submitting 1 Part Recommendation doc for this visit
+  const [recSearch, setRecSearch] = useState(""); // Part Recommendation inline search box (visitPage)
+  const [recRowInputs, setRecRowInputs] = useState({}); // Qty/Alasan staged per part number while browsing search results, keyed by partNumber
+  // Seed the cart with whatever's already been recommended for this visit whenever the Part
+  // Recommendation full-screen page is opened (or switched to a different visit) — mirrors what
+  // openForm used to do for the old modal, but this feature no longer goes through openForm at all.
+  useEffect(() => {
+    if (visitPage && visitPage.type === "partrec") {
+      const existing = partRecs.find(r => r.visitId === visitPage.visit.id);
+      setRecCart(existing ? [...existing.items] : []);
+      setRecSearch("");
+      setRecRowInputs({});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visitPage]);
   const [statusForm, setStatusForm] = useState({
     statusPekerjaan: "Selesai",
     keparahan: "Ringan",
@@ -7870,12 +7932,17 @@ function MekanikReport({
   };
   const [editingDarId, setEditingDarId] = useState(null);
   const openForm = (visit, type, editingRecord) => {
-    setDetailVisit(visit);
-    setFormType(type);
-    if (type === "partrec") {
-      const existing = partRecs.find(r => r.visitId === visit.id);
-      setRecCart(existing ? [...existing.items] : []);
+    // If we're currently inside a full-screen visit page, briefly step out of it so the form's
+    // Modal (only reachable from the main list tree) can actually show, and remember to come back
+    // to this exact page once the form is done — see the `returnToVisitPage` declaration above.
+    if (visitPage) {
+      setReturnToVisitPage(visitPage);
+      setVisitPage(null);
+    } else {
+      setReturnToVisitPage(null);
     }
+    setFormVisit(visit);
+    setFormType(type);
     if (type === "dar") {
       const editingDar = editingRecord;
       setEditingDarId(editingDar ? editingDar.id : null);
@@ -7982,6 +8049,15 @@ function MekanikReport({
       });
     }
   };
+  // Counterpart to openForm — call this from every form's Save AND Cancel/Batal action instead of
+  // calling setFormType(null) directly, so the visit page we stepped out of (if any) is always
+  // restored afterward.
+  const closeForm = () => {
+    setFormType(null);
+    setFormVisit(null);
+    setVisitPage(returnToVisitPage);
+    setReturnToVisitPage(null);
+  };
   // Clickable count-badge used in the Kunjungan Kerja table (DAR/Part Rec./Status/BAPP columns) —
   // opens the dedicated full-screen page for that visit+type (see `visitPage` state/early-return
   // below) instead of the old behavior of opening the Detail Kunjungan modal.
@@ -8043,13 +8119,13 @@ function MekanikReport({
     } else {
       setDars([...dars, {
         id: "DAR-" + uid(),
-        visitId: detailVisit.id,
+        visitId: formVisit.id,
         ...darForm,
         mekanikNama: session.nama,
         status: "Menunggu Approval Septi"
       }]);
     }
-    setFormType(null);
+    closeForm();
     setEditingDarId(null);
     setDarForm({
       tanggalMulai: today(),
@@ -8063,61 +8139,64 @@ function MekanikReport({
     });
   };
 
-  // Add an item to the in-progress cart for this visit's Part Recommendation
-  const addRecItem = () => {
-    if (!recItemForm.partNumber) return alert("Pilih part");
-    const part = parts.find(p => p.partNumber === recItemForm.partNumber);
-    setRecCart([...recCart, {
-      partNumber: part.partNumber,
-      partName: part.partName,
-      qty: parseInt(recItemForm.qty) || 1,
-      alasan: recItemForm.alasan
-    }]);
-    setRecItemForm({
-      partNumber: "",
+  // Part Recommendation add/remove — rebuilt as a direct search-and-add flow (see the `partrec`
+  // branch of the visitPage render below): no popup, results show as a table with an inline Qty +
+  // Alasan + "+ Add" per row (recRowInputs, keyed by partNumber) instead of a single-part picker.
+  const addRecItemFromSearch = part => {
+    const rowInput = recRowInputs[part.partNumber] || {
       qty: 1,
       alasan: ""
-    });
+    };
+    setRecCart(cart => [...cart, {
+      partNumber: part.partNumber,
+      partName: part.partName,
+      qty: parseInt(rowInput.qty) || 1,
+      alasan: rowInput.alasan || ""
+    }]);
+    setRecRowInputs(prev => ({
+      ...prev,
+      [part.partNumber]: {
+        qty: 1,
+        alasan: ""
+      }
+    }));
   };
   const removeRecItem = i => setRecCart(recCart.filter((_, j) => j !== i));
 
-  // Submit the whole cart as ONE Part Recommendation document for this visit
-  const submitRecDoc = () => {
+  // Submit the whole cart as ONE Part Recommendation document for this visit. Takes the visit
+  // directly (instead of reading `detailVisit`/`formVisit`) since this is now called straight from
+  // the inline visitPage UI, not from a Modal tied to the openForm/closeForm flow.
+  const submitRecDoc = visit => {
     if (recCart.length === 0) return alert("Tambahkan minimal 1 part ke daftar rekomendasi");
-    const existingIdx = partRecs.findIndex(r => r.visitId === detailVisit.id);
+    const existingIdx = partRecs.findIndex(r => r.visitId === visit.id);
     const doc = {
       id: existingIdx >= 0 ? partRecs[existingIdx].id : "REC-" + uid(),
-      visitId: detailVisit.id,
+      visitId: visit.id,
       items: recCart,
       mekanikNama: session.nama,
-      tanggal: detailVisit.tanggal,
+      tanggal: visit.tanggal,
       status: "Menunggu Approval Septi",
-      customerId: detailVisit.customerId,
-      customerNama: detailVisit.customerNama
+      customerId: visit.customerId,
+      customerNama: visit.customerNama
     };
     if (existingIdx >= 0) {
       const arr = [...partRecs];
       arr[existingIdx] = doc;
       setPartRecs(arr);
     } else setPartRecs([...partRecs, doc]);
-    setFormType(null);
-    setRecCart([]);
-    setRecItemForm({
-      partNumber: "",
-      qty: 1,
-      alasan: ""
-    });
+    setRecCart(doc.items);
+    alert("Part Recommendation tersimpan dan diajukan untuk approval Septi.");
   };
   const saveStatus = () => {
     if (!statusForm.kondisiUnit) return alert("Pilih kondisi unit");
     setStatusReports([...statusReports, {
       id: "STR-" + uid(),
-      visitId: detailVisit.id,
+      visitId: formVisit.id,
       ...statusForm,
       mekanikNama: session.nama,
-      tanggal: detailVisit.tanggal
+      tanggal: formVisit.tanggal
     }]);
-    setFormType(null);
+    closeForm();
     setStatusForm({
       statusPekerjaan: "Selesai",
       keparahan: "Ringan",
@@ -8147,23 +8226,23 @@ function MekanikReport({
         millName: mill?.millName || bastForm.lokasiManual,
         unitName: unit?.unitName,
         doNomor: relatedDOs.map(d => d.nomor).join(", ") || "-",
-        tanggal: bastForm.tanggal || detailVisit.tanggal
+        tanggal: bastForm.tanggal || formVisit.tanggal
       };
       setBasts(arr);
     } else {
       setBasts([...basts, {
         id: genDocNumber(basts, "BAPP", "id"),
-        visitId: detailVisit.id,
+        visitId: formVisit.id,
         ...bastForm,
         customerNama: cust?.nama,
         millName: mill?.millName || bastForm.lokasiManual,
         unitName: unit?.unitName,
         doNomor: relatedDOs.map(d => d.nomor).join(", ") || "-",
         mekanikNama: session.nama,
-        tanggal: bastForm.tanggal || detailVisit.tanggal
+        tanggal: bastForm.tanggal || formVisit.tanggal
       }]);
     }
-    setFormType(null);
+    closeForm();
     setEditingBastId(null);
     setBastForm(emptyBastForm);
   };
@@ -8333,8 +8412,8 @@ function MekanikReport({
     } else {
       setInspectionReports([...inspectionReports, {
         id: genDocNumber(inspectionReports, "IN", "id"),
-        visitId: detailVisit.id,
-        tanggal: detailVisit.tanggal,
+        visitId: formVisit.id,
+        tanggal: formVisit.tanggal,
         tipeCrane: inspectionForm.tipeCrane,
         items: inspectionForm.items,
         catatan: inspectionForm.catatan,
@@ -8342,7 +8421,7 @@ function MekanikReport({
         mekanikNama: session.nama
       }]);
     }
-    setFormType(null);
+    closeForm();
     setEditingInspectionId(null);
     setInspectionForm({
       tipeCrane: "Static Crane",
@@ -8401,7 +8480,7 @@ function MekanikReport({
         const nomor = prev.some(s => s.nomor === stForm.nomor) ? nextSTNomor(prev) : stForm.nomor;
         return [...prev, {
           id: "ST-" + uid(),
-          visitId: detailVisit.id,
+          visitId: formVisit.id,
           ...stForm,
           nomor,
           assignees: stAssigneeCart,
@@ -8415,7 +8494,7 @@ function MekanikReport({
         detail: `${stAssigneeCart.length} orang ditugaskan`
       });
     }
-    setFormType(null);
+    closeForm();
     setEditingSTId(null);
     setSTForm(emptySTForm);
     setSTAssigneeCart([]);
@@ -8711,11 +8790,7 @@ function MekanikReport({
     }, v.customerNama, " · ", v.tanggal, " · ", v.unitTerkait || v.lokasi), canEditVisit && type === "dar" && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       onClick: () => openForm(v, "dar")
-    }, "📝 + Isi DAR"), canEditVisit && type === "partrec" && /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "success",
-      onClick: () => openForm(v, "partrec")
-    }, "🔩 ", visitRecDoc(v.id) ? "Edit" : "+", " Part Recommendation"), canEditVisit && type === "status" && /*#__PURE__*/React.createElement(Btn, {
+    }, "📝 + Isi DAR"), canEditVisit && type === "status" && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "warning",
       onClick: () => openForm(v, "status")
@@ -8762,19 +8837,18 @@ function MekanikReport({
       emptyMsg: "Belum ada entri DAR"
     }), type === "partrec" && (() => {
       const recDoc = visitRecDoc(v.id);
-      if (!recDoc) return /*#__PURE__*/React.createElement("p", {
-        style: {
-          color: theme.muted,
-          fontSize: 13
-        }
-      }, "Belum ada rekomendasi part untuk kunjungan ini.");
+      const q = recSearch.trim().toLowerCase();
+      // Same match set as PartPicker (PN / Part Name / Description) and same Service-excluded
+      // filter as the old modal's picker — just rendered as a browsable results table instead of a
+      // single-select dropdown, per request: type to search, see matches, Add whichever are needed.
+      const searchResults = q ? parts.filter(p => p.kategori !== "Service" && (p.partNumber.toLowerCase().includes(q) || (p.partName || "").toLowerCase().includes(q) || (p.description || "").toLowerCase().includes(q))).slice(0, 30) : [];
       return /*#__PURE__*/React.createElement("div", {
         style: {
           display: "flex",
           flexDirection: "column",
-          gap: 10
+          gap: 14
         }
-      }, /*#__PURE__*/React.createElement("div", {
+      }, recDoc && /*#__PURE__*/React.createElement("div", {
         style: {
           display: "flex",
           justifyContent: "space-between",
@@ -8789,11 +8863,7 @@ function MekanikReport({
         }
       }, /*#__PURE__*/React.createElement(PrintBtn, {
         onClick: () => printPartRec(recDoc)
-      }), canEditVisit && /*#__PURE__*/React.createElement(Btn, {
-        size: "sm",
-        variant: "ghost",
-        onClick: () => openForm(v, "partrec")
-      }, "✏️"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+      }), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
         size: "sm",
         variant: "danger",
         onClick: () => deletePartRec(recDoc)
@@ -8805,10 +8875,80 @@ function MekanikReport({
         size: "sm",
         variant: "danger",
         onClick: () => rejectRec(recDoc)
-      }, "✗ Tolak")))), /*#__PURE__*/React.createElement(Table, {
-        headers: ["Part Number", "Part Name", "Qty", "Alasan"],
-        rows: recDoc.items.map(it => [it.partNumber, it.partName, fmtNum(it.qty), it.alasan])
-      }));
+      }, "✗ Tolak")))), canEditVisit && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
+        placeholder: "Cari Part Number / Nama Part / Deskripsi...",
+        value: recSearch,
+        onChange: setRecSearch
+      }), q && (searchResults.length > 0 ? /*#__PURE__*/React.createElement(Table, {
+        headers: ["Part Number", "Part Name", "Deskripsi", "Qty", "Alasan", ""],
+        rows: searchResults.map(p => {
+          const rowInput = recRowInputs[p.partNumber] || {
+            qty: 1,
+            alasan: ""
+          };
+          return [p.partNumber, p.partName, p.description || "-", /*#__PURE__*/React.createElement(Input, {
+            type: "number",
+            min: "1",
+            value: rowInput.qty,
+            onChange: v2 => setRecRowInputs(prev => ({
+              ...prev,
+              [p.partNumber]: {
+                ...rowInput,
+                qty: v2
+              }
+            })),
+            style: {
+              width: 70
+            }
+          }), /*#__PURE__*/React.createElement(Input, {
+            value: rowInput.alasan,
+            onChange: v2 => setRecRowInputs(prev => ({
+              ...prev,
+              [p.partNumber]: {
+                ...rowInput,
+                alasan: v2
+              }
+            })),
+            placeholder: "Alasan..."
+          }), /*#__PURE__*/React.createElement(Btn, {
+            size: "sm",
+            onClick: () => addRecItemFromSearch(p)
+          }, "+ Add")];
+        })
+      }) : /*#__PURE__*/React.createElement("p", {
+        style: {
+          margin: "8px 0 0",
+          fontSize: 12,
+          color: theme.muted
+        }
+      }, "Tidak ada part yang cocok."))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
+        style: {
+          margin: "0 0 8px",
+          fontSize: 13,
+          color: theme.text
+        }
+      }, "Daftar Part Direkomendasikan (", recCart.length, ")"), recCart.length > 0 ? /*#__PURE__*/React.createElement(Table, {
+        headers: ["Part Number", "Part Name", "Qty", "Alasan", ""],
+        rows: recCart.map((it, i) => [it.partNumber, it.partName, fmtNum(it.qty), it.alasan, canEditVisit && /*#__PURE__*/React.createElement(Btn, {
+          size: "sm",
+          variant: "danger",
+          onClick: () => removeRecItem(i)
+        }, "×")])
+      }) : /*#__PURE__*/React.createElement("p", {
+        style: {
+          margin: 0,
+          fontSize: 12,
+          color: theme.muted
+        }
+      }, "Belum ada part yang direkomendasikan.")), canEditVisit && recCart.length > 0 && /*#__PURE__*/React.createElement("div", {
+        style: {
+          display: "flex",
+          justifyContent: "flex-end"
+        }
+      }, /*#__PURE__*/React.createElement(Btn, {
+        variant: "success",
+        onClick: () => submitRecDoc(v)
+      }, "💾 Simpan Part Recommendation (", recCart.length, " item)")));
     })(), type === "status" && /*#__PURE__*/React.createElement(Table, {
       headers: ["Status Pekerjaan", "Kondisi Unit", "Tingkat Keparahan", "Catatan", "Rekomendasi Lanjutan", ""],
       rows: visitStatus(v.id).map(s => [/*#__PURE__*/React.createElement(Badge, {
@@ -9473,9 +9613,9 @@ function MekanikReport({
     }
   }, "ℹ️ Inspection Report dan Surat Tugas sekarang dikelola dari tombol \"Inspection\"/\"Surat Tugas\" di tabel Kunjungan Kerja (buka halaman full-screen tersendiri)."))), /*#__PURE__*/React.createElement(Modal, {
     open: formType === "dar",
-    title: editingDarId ? `Edit Daily Activity Report — ${detailVisit?.jenisBeritaAcara}` : `Isi Daily Activity Report — ${detailVisit?.jenisBeritaAcara}`,
+    title: editingDarId ? `Edit Daily Activity Report — ${formVisit?.jenisBeritaAcara}` : `Isi Daily Activity Report — ${formVisit?.jenisBeritaAcara}`,
     onClose: () => {
-      setFormType(null);
+      closeForm();
       setEditingDarId(null);
     },
     width: 620
@@ -9656,121 +9796,15 @@ function MekanikReport({
   }, /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
     onClick: () => {
-      setFormType(null);
+      closeForm();
       setEditingDarId(null);
     }
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     onClick: saveDar
   }, editingDarId ? "Simpan Perubahan" : "Simpan DAR")))), /*#__PURE__*/React.createElement(Modal, {
-    open: formType === "partrec",
-    title: "Buat Part Recommendation (1 Dokumen per Kunjungan)",
-    onClose: () => setFormType(null),
-    width: 620
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      flexDirection: "column",
-      gap: 14
-    }
-  }, /*#__PURE__*/React.createElement("p", {
-    style: {
-      margin: 0,
-      fontSize: 12,
-      color: theme.muted
-    }
-  }, "Tambahkan semua part yang dibutuhkan dari kunjungan ini — semuanya akan jadi ", /*#__PURE__*/React.createElement("strong", {
-    style: {
-      color: theme.text
-    }
-  }, "1 dokumen rekomendasi"), " yang nantinya ditarik jadi ", /*#__PURE__*/React.createElement("strong", {
-    style: {
-      color: theme.text
-    }
-  }, "1 Quotation"), "."), /*#__PURE__*/React.createElement("div", {
-    style: {
-      border: `1px solid ${theme.border}`,
-      borderRadius: 10,
-      padding: 14
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "2fr 1fr 2fr auto",
-      gap: 10,
-      marginBottom: 10
-    }
-  }, /*#__PURE__*/React.createElement(PartPicker, {
-    value: recItemForm.partNumber,
-    onChange: v => setRecItemForm({
-      ...recItemForm,
-      partNumber: v
-    }),
-    // Any non-Service item counts as a pickable "part" here — matching on kategori === "Parts"
-    // exactly excluded real parts whose kategori came from an Excel import with a slightly
-    // different label (case, whitespace, synonym like "Sparepart") instead of the literal string
-    // "Parts" typed via the in-app form. Only Service line items should be excluded from a BOM /
-    // parts picker.
-    parts: parts.filter(p => p.kategori !== "Service"),
-    showDescription: true
-  }), /*#__PURE__*/React.createElement(Input, {
-    value: recItemForm.qty,
-    onChange: v => setRecItemForm({
-      ...recItemForm,
-      qty: v
-    }),
-    type: "number",
-    min: "1",
-    placeholder: "Qty"
-  }), /*#__PURE__*/React.createElement(Input, {
-    value: recItemForm.alasan,
-    onChange: v => setRecItemForm({
-      ...recItemForm,
-      alasan: v
-    }),
-    placeholder: "Alasan..."
-  }), /*#__PURE__*/React.createElement(Btn, {
-    size: "sm",
-    onClick: addRecItem
-  }, "+ Add")), recCart.length > 0 && /*#__PURE__*/React.createElement(Table, {
-    headers: ["Part Number", "Part Name", "Qty", "Alasan", ""],
-    rows: recCart.map((it, i) => [it.partNumber, it.partName, fmtNum(it.qty), it.alasan, /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "danger",
-      onClick: () => removeRecItem(i)
-    }, "×")])
-  }), recCart.length === 0 && /*#__PURE__*/React.createElement("p", {
-    style: {
-      margin: 0,
-      fontSize: 12,
-      color: theme.muted,
-      textAlign: "center"
-    }
-  }, "Belum ada item ditambahkan")), /*#__PURE__*/React.createElement("p", {
-    style: {
-      margin: 0,
-      fontSize: 12,
-      color: theme.muted
-    }
-  }, "Part belum ada di list? ", /*#__PURE__*/React.createElement("strong", {
-    style: {
-      color: theme.accentLight
-    }
-  }, "Ajukan Request Part Baru"), " ke menu \"Request Part Baru\" (akan diteruskan ke Asil → approval GM)."), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 10,
-      justifyContent: "flex-end"
-    }
-  }, /*#__PURE__*/React.createElement(Btn, {
-    variant: "ghost",
-    onClick: () => setFormType(null)
-  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
-    variant: "success",
-    onClick: submitRecDoc
-  }, "Simpan Dokumen Rekomendasi (", recCart.length, " item)")))), /*#__PURE__*/React.createElement(Modal, {
     open: formType === "status",
     title: "Buat Status Report",
-    onClose: () => setFormType(null)
+    onClose: () => closeForm()
   }, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -9837,7 +9871,7 @@ function MekanikReport({
     }
   }, /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
-    onClick: () => setFormType(null)
+    onClick: () => closeForm()
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     variant: "warning",
     onClick: saveStatus
@@ -9845,7 +9879,7 @@ function MekanikReport({
     open: formType === "bast",
     title: editingBastId ? "Edit Berita Acara Penyelesaian Pekerjaan (BAPP)" : "Buat Berita Acara Penyelesaian Pekerjaan (BAPP)",
     onClose: () => {
-      setFormType(null);
+      closeForm();
       setEditingBastId(null);
     },
     width: 640
@@ -10130,7 +10164,7 @@ function MekanikReport({
   }, /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
     onClick: () => {
-      setFormType(null);
+      closeForm();
       setEditingBastId(null);
     }
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
@@ -10139,7 +10173,7 @@ function MekanikReport({
     open: formType === "inspection",
     title: (editingInspectionId ? "Edit Inspection Report" : "Inspection Report") + ` — ${inspectionForm.tipeCrane}`,
     onClose: () => {
-      setFormType(null);
+      closeForm();
       setEditingInspectionId(null);
     },
     width: 720
@@ -10259,7 +10293,7 @@ function MekanikReport({
   }, /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
     onClick: () => {
-      setFormType(null);
+      closeForm();
       setEditingInspectionId(null);
     }
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
@@ -10268,7 +10302,7 @@ function MekanikReport({
     open: formType === "surattugas",
     title: editingSTId ? "Edit Surat Perintah Tugas" : "Buat Surat Perintah Tugas",
     onClose: () => {
-      setFormType(null);
+      closeForm();
       setEditingSTId(null);
     },
     width: 780
@@ -10479,7 +10513,7 @@ function MekanikReport({
   }, /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
     onClick: () => {
-      setFormType(null);
+      closeForm();
       setEditingSTId(null);
     }
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
@@ -11328,6 +11362,13 @@ function QuotationUnit({
   // HO1/HO2/HO3 (owner/gm/finance_director) are all "super user" — all three must see the approval
   // box, pending revisions, and internal Sales Discount data, not just owner/gm.
   const isApprover = isOwnerLike;
+  // Quotations store customerNama as a point-in-time snapshot (set once when the quotation was
+  // created/revised), not a live reference. If the client is later renamed in Database Client, old
+  // quotations — including ones sitting in QUOTATION CLOSED — would otherwise keep showing the old
+  // name forever. Since every quotation also stores customerId, always prefer looking the name up
+  // live from the current customers list, falling back to the snapshot only if the client record is
+  // gone (e.g. deleted).
+  const liveNama = q => (customers || []).find(c => c.id === q.customerId)?.nama || q.customerNama;
   const [modal, setModal] = useState(false);
   const [revisionOf, setRevisionOf] = useState(null); // original quotation being revised, if any
   const [editingQ, setEditingQ] = useState(null); // quotation being edited in-place (same nomor, no new revision)
@@ -11804,7 +11845,7 @@ function QuotationUnit({
       cursor: "pointer"
     },
     onClick: () => setDetail(q)
-  }, q.nomor), q.tanggal, q.customerNama, q.salesManagerNama, fmt(q.total), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(Badge, {
+  }, q.nomor), q.tanggal, liveNama(q), q.salesManagerNama, fmt(q.total), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(Badge, {
     color: statusColor[q.status]
   }, q.status), needsFollowUp(q) && /*#__PURE__*/React.createElement("div", {
     style: {
@@ -12004,7 +12045,7 @@ function QuotationUnit({
       style: {
         color: theme.text
       }
-    }, q.nomor), q.customerNama, q.salesManagerNama || "-", fmt(q.total), q.extensionCount > 0 ? `${q.extensionCount}x` : "-", /*#__PURE__*/React.createElement("div", {
+    }, q.nomor), liveNama(q), q.salesManagerNama || "-", fmt(q.total), q.extensionCount > 0 ? `${q.extensionCount}x` : "-", /*#__PURE__*/React.createElement("div", {
       style: {
         display: "flex",
         gap: 8
@@ -12079,7 +12120,7 @@ function QuotationUnit({
     style: {
       color: theme.text
     }
-  }, detail.customerNama)), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+  }, liveNama(detail))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.muted
     }
@@ -12145,7 +12186,7 @@ function QuotationUnit({
       nomor: detail.nomor,
       tanggal: detail.tanggal,
       partyLabel: "Kepada:",
-      partyName: detail.customerNama,
+      partyName: liveNama(detail),
       itemHeaders: ["Kode", "Nama Item", "Qty", "Harga", "Subtotal"],
       items: detail.items.map(it => [it.unitCode, it.unitName, fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)]),
       subtotal: detail.subtotal,
@@ -12702,6 +12743,10 @@ function QuotationPS({
   // HO1/HO2/HO3 (owner/gm/finance_director) are all "super user" — all three must see the approval
   // box, pending revisions, and internal Sales Discount data, not just owner/gm.
   const isApprover = isOwnerLike;
+  // See QuotationUnit's liveNama for why: customerNama is a point-in-time snapshot, so a client
+  // rename in Database Client needs to be resolved live via customerId, not read from the stored
+  // snapshot, otherwise QUOTATION CLOSED (and every other list here) keeps showing the old name.
+  const liveNama = q => (customers || []).find(c => c.id === q.customerId)?.nama || q.customerNama;
   const [qpsSearch, setQpsSearch] = useState("");
   const quotationsPSFiltered = (qpsSearch.trim() ? quotationsPS.filter(q => [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(qpsSearch.trim().toLowerCase()))) : quotationsPS).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const [modal, setModal] = useState(false);
@@ -13224,7 +13269,7 @@ function QuotationPS({
       cursor: "pointer"
     },
     onClick: () => setDetail(q)
-  }, q.nomor), q.tanggal, q.customerNama, q.salesManagerNama || "-", fmt(q.total), q.fromRecIds?.length ? /*#__PURE__*/React.createElement(Badge, {
+  }, q.nomor), q.tanggal, liveNama(q), q.salesManagerNama || "-", fmt(q.total), q.fromRecIds?.length ? /*#__PURE__*/React.createElement(Badge, {
     color: theme.purple
   }, "Dari Mekanik") : /*#__PURE__*/React.createElement(Badge, {
     color: theme.muted
@@ -13409,7 +13454,7 @@ function QuotationPS({
     style: {
       color: theme.text
     }
-  }, q.nomor), " — ", q.customerNama, " — ", fmt(q.total), q.extensionCount > 0 && ` — sudah diperpanjang ${q.extensionCount}x`), /*#__PURE__*/React.createElement("div", {
+  }, q.nomor), " — ", liveNama(q), " — ", fmt(q.total), q.extensionCount > 0 && ` — sudah diperpanjang ${q.extensionCount}x`), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 8
@@ -13582,7 +13627,7 @@ function QuotationPS({
       nomor: detail.nomor,
       tanggal: detail.tanggal,
       partyLabel: "Kepada:",
-      partyName: detail.customerNama,
+      partyName: liveNama(detail),
       itemHeaders: ["Part Number", "Part Name", "Qty", "Harga", "Subtotal"],
       items: detail.items.map(it => [it.partNumber, it.partName, fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)]),
       subtotal: detail.subtotal,
@@ -14330,7 +14375,10 @@ function SalesOrderModule({
       noPoClient: "",
       tanggalPO: "",
       tanggalDelivery: "",
-      catatan: "",
+      // Pre-fill from the Quotation's own Catatan — still fully editable below before the SO is
+      // created, but previously this always started blank, so a note written on the Quotation
+      // never made it through to the SO unless someone manually retyped it.
+      catatan: quot.catatan || "",
       tujuan: "",
       ekspedisi: "",
       pic: "",
