@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-04.11";
+const APP_BUILD = "2026-08-04.12";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -171,18 +171,98 @@ const payLabel = tp => tp === "TEMPO" ? "CREDIT" : tp;
 // every Item Requisition system-wide, excluding IRs that belong to excludeSoNomor (so a
 // shortfall calc for that SO's own IRs isn't double-subtracted against itself). Once Parts Use
 // shows the qty actually released to its originating SO, it's no longer counted as reserved here.
-const reservedQtyFor = (store, partNumber, excludeSoNomor) => {
-  const { itemRequisitions, partsUse } = store;
+// Explodes a Sales Order's items into per-part quantities needed (same BOM-explosion logic used
+// independently by Item Requisition and Parts Use — Master Unit-sourced lines pull every
+// component part from that Unit's BOM, qty-per-unit × qty ordered; Jasa/Service lines are
+// skipped since they're never stock-purchasable). Kept as a global, store-driven version (rather
+// than each module's own local copy) specifically so reservedQtyFor below can use it too.
+const explodeSOItemsGlobal = (store, so) => {
+  const { units, parts } = store;
+  const exploded = [];
+  (so?.items || []).forEach(it => {
+    const effectiveKategori = it.kategori || (parts || []).find(p => p.partNumber === it.partNumber)?.kategori;
+    if (effectiveKategori === "Service") return;
+    const isUnitSourced = it.sumber === "Master Unit" || !!(!it.partNumber && it.unitCode && (units || []).find(u => u.unitCode === it.unitCode));
+    if (isUnitSourced) {
+      const unit = (units || []).find(u => u.unitCode === it.unitCode);
+      if (unit && Array.isArray(unit.bom) && unit.bom.length > 0) {
+        unit.bom.forEach(b => {
+          exploded.push({
+            partNumber: b.partNumber,
+            qty: (Number(b.qty) || 0) * (Number(it.qty) || 0)
+          });
+        });
+        return;
+      }
+    }
+    exploded.push({
+      partNumber: it.partNumber || it.unitCode,
+      qty: Number(it.qty) || 0
+    });
+  });
+  const merged = {};
+  exploded.forEach(e => {
+    if (!e.partNumber) return;
+    merged[e.partNumber] = (merged[e.partNumber] || 0) + e.qty;
+  });
+  return merged; // { [partNumber]: totalQtyNeeded }
+};
+// GLOBAL stock-reservation helper — shared by ItemRequisitionModule, PurchaseOrderModule, Parts
+// Use, and Master Part.
+// Master Part stock (part.stok) only ever rises on actual Goods Receipt; it is NOT decremented
+// the moment an Item Requisition is created, turned into a PO, or even physically handed out to
+// a workshop job (Parts Use "release" doesn't touch part.stok either — see PartsUseModule). That
+// means a part can sit in raw part.stok as "available" through its ENTIRE lifecycle — requested,
+// ordered, received into the warehouse, and even released to a specific SO's job — right up
+// until it actually ships out (Delivery Order) or gets consumed some other way. So any SO whose
+// part need hasn't yet been released to its own job (via Parts Use) is still effectively spoken
+// for, REGARDLESS of whether an Item Requisition was ever created for it.
+//
+// IMPORTANT: this is based on every "Aktif" SO's OWN full exploded need (from its items/BOM), NOT
+// on itemRequisitions — earlier versions only summed IR qtyButuh, which misses any SO whose need
+// was silently covered by existing stock at the time (no IR ever got created for it). That gap let
+// two different SOs each independently see the same 2 units of stock as "available" and both skip
+// creating an IR, when in reality only ONE of them actually had it (confirmed bug: PN 6900000741 —
+// SO-010-FRT-VII-2026, SO-019-FRT-VII-2026 and SO-001-FRT-VIII-2026 all separately "claimed" the
+// same 2 units in stock).
+//
+// Physical stock is allocated FIFO (earliest SO tanggal first, per Jef's decision) rather than
+// simply summing every other SO's full need — summing would double-count the shared pool whenever
+// 3+ SOs compete for the same units (e.g. stock=2 but three SOs each need some: naively summing
+// "everyone else's need" makes each one look short by more than the real system-wide shortfall).
+// FIFO allocation instead hands out the physical stock in order until it runs out, so the total
+// shortfall across all competing SOs always equals exactly (total demand − physical stock) — no
+// more, no less — and only the SO(s) that lose out in the queue get routed to create an IR/PO.
+const stockAllocationForPart = (store, partNumber) => {
+  const { salesOrders, parts, partsUse } = store;
+  const stokRaw = (parts || []).find(p => p.partNumber === partNumber)?.stok ?? 0;
   const releasedFor = soNomor => {
     const pu = (partsUse || []).find(p => p.soNomor === soNomor);
     const it = pu?.items?.find(x => x.partNumber === partNumber);
     return Number(it?.qtyReleased) || 0;
   };
-  return (itemRequisitions || []).filter(ir => ir.soNomor !== excludeSoNomor).reduce((sum, ir) => {
-    const it = (ir.items || []).find(x => x.partNumber === partNumber);
-    if (!it) return sum;
-    return sum + Math.max(0, (it.qtyButuh || 0) - releasedFor(ir.soNomor));
-  }, 0);
+  const claims = (salesOrders || []).filter(so => so.status === "Aktif").map(so => ({
+    nomor: so.nomor,
+    tanggal: so.tanggal || "",
+    need: Math.max(0, (explodeSOItemsGlobal(store, so)[partNumber] || 0) - releasedFor(so.nomor))
+  })).filter(c => c.need > 0).sort((a, b) => a.tanggal.localeCompare(b.tanggal) || a.nomor.localeCompare(b.nomor));
+  let remaining = stokRaw;
+  const allocation = {};
+  claims.forEach(c => {
+    const allocated = Math.min(c.need, remaining);
+    remaining -= allocated;
+    allocation[c.nomor] = {
+      allocated,
+      shortfall: c.need - allocated
+    };
+  });
+  return allocation; // { [soNomor]: { allocated, shortfall } } — SOs with zero need are simply absent
+};
+const reservedQtyFor = (store, partNumber, excludeSoNomor) => {
+  const alloc = stockAllocationForPart(store, partNumber);
+  const totalAllocated = Object.values(alloc).reduce((s, a) => s + a.allocated, 0);
+  const myAllocated = alloc[excludeSoNomor]?.allocated || 0;
+  return Math.max(0, totalAllocated - myAllocated);
 };
 // Render free-text notes with real line breaks preserved (textarea input already allows multiple
 // lines; without this, browsers collapse \n in plain text nodes onto a single visual line).
@@ -4643,7 +4723,7 @@ function MasterPart({
     variant: "danger",
     onClick: () => rejectEditRequest(req)
   }, "✗ Tolak"))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
-    headers: canSeePrice ? ["Part Number", "Part Name", "Description", "Kategori", "Sub-Kategori", "Satuan", "Brand", "Asal", "Harga Beli", "Harga Jual", "Stok"] : ["Part Number", "Part Name", "Description", "Kategori", "Sub-Kategori", "Satuan", "Brand", "Asal", "Stok"],
+    headers: canSeePrice ? ["Part Number", "Part Name", "Description", "Kategori", "Sub-Kategori", "Satuan", "Brand", "Asal", "Harga Beli", "Harga Jual", "Stok", "Teralokasi", "Free Stock"] : ["Part Number", "Part Name", "Description", "Kategori", "Sub-Kategori", "Satuan", "Brand", "Asal", "Stok", "Teralokasi", "Free Stock"],
     rows: filtered.map(p => {
       const base = [/*#__PURE__*/React.createElement("span", {
         style: {
@@ -4666,7 +4746,23 @@ function MasterPart({
       const stokCol = p.stok === null ? "-" : /*#__PURE__*/React.createElement(Badge, {
         color: p.stok > 10 ? theme.green : p.stok > 0 ? theme.yellow : theme.red
       }, fmtNum(p.stok));
-      return [...base, ...priceCols, stokCol];
+      // Teralokasi / Free Stock — dihitung dinamis dari SEMUA SO Aktif yang butuh part ini (baik
+      // sudah ada IR maupun belum, dikurangi qty yang sudah di-release lewat Parts Use), bukan
+      // hanya dari IR — supaya part yang sudah "diklaim" satu SO langsung dari stock (tanpa IR)
+      // tetap terlihat sudah teralokasi untuk SO lain. Lihat reservedQtyFor.
+      let teralokasiCol = "-";
+      let freeStockCol = "-";
+      if (p.kategori !== "Service" && p.stok !== null) {
+        const teralokasi = reservedQtyFor(store, p.partNumber, null);
+        const freeStock = Math.max(0, (p.stok || 0) - teralokasi);
+        teralokasiCol = teralokasi > 0 ? /*#__PURE__*/React.createElement(Badge, {
+          color: theme.yellow
+        }, fmtNum(teralokasi)) : "-";
+        freeStockCol = /*#__PURE__*/React.createElement(Badge, {
+          color: freeStock > 10 ? theme.green : freeStock > 0 ? theme.yellow : theme.red
+        }, fmtNum(freeStock));
+      }
+      return [...base, ...priceCols, stokCol, teralokasiCol, freeStockCol];
     }),
     onEdit: onEdit,
     onDelete: onDelete
@@ -21548,7 +21644,8 @@ function DeliveryOrderModule({
         extraInfoRows: [["No. PO", so?.noPoClient || "-"], ["Ekspedisi", so?.shippingEkspedisi || detail.ekspedisi || "-"], ...(detail.noResi ? [["No. Resi", detail.noResi]] : []), ...(detail.driver ? [["Nama Driver", detail.driver]] : []), ...(detail.noKendaraan ? [["No. Mobil", detail.noKendaraan]] : []), ...(detail.noTelp ? [["No. Telp", detail.noTelp]] : [])],
         dibuatOleh: {
           nama: detail.createdBy
-        }
+        },
+        disetujuiLabel: "Penerima"
       });
     }
   })))), /*#__PURE__*/React.createElement(Modal, {
@@ -31184,13 +31281,21 @@ function KPISalesModule({
     const d1 = new Date(dari);
     const d2 = new Date(sampai);
     const months = (d2.getFullYear() - d1.getFullYear()) * 12 + (d2.getMonth() - d1.getMonth()) + 1;
-    return Math.max(1, months);
+    // Clamp to a sane range (1-120 bulan / 10 tahun) — a single malformed tanggal string elsewhere
+    // in the data (e.g. parsed to a wildly wrong year) must never be able to blow up the target
+    // multiplier into something like ×24019, which silently makes every target look impossible.
+    if (!Number.isFinite(months)) return 1;
+    return Math.min(120, Math.max(1, months));
   };
   const earliestDataDate = () => {
     const dates = [...quotationsUnit.map(q => q.tanggal), ...(quotationsPS || []).map(q => q.tanggal), ...salesOrders.map(so => so.tanggal), ...salesActivities.map(a => a.tanggal)].filter(Boolean).sort();
     return dates[0];
   };
-  const targetMonthsSpan = kpiPeriodeAktif ? monthsSpanFor(kpiPeriodeDari || earliestDataDate() || today(), kpiPeriodeSampai || today()) : monthsSpanFor(earliestDataDate() || today(), today());
+  // Saat tidak ada periode dipilih ("Semua Data"), target dibandingkan sebagai target TAHUNAN
+  // (bulanan × 12) — sama seperti perbandingan "Tahun Ini (YTD)" di bawah — bukan dihitung dari
+  // "sejak data paling awal", yang rentan meledak kalau ada satu tanggal korup di data lama
+  // (pernah menghasilkan ×24019 karena satu tanggal salah parse).
+  const targetMonthsSpan = kpiPeriodeAktif ? monthsSpanFor(kpiPeriodeDari || earliestDataDate() || today(), kpiPeriodeSampai || today()) : 12;
   // Base the roster on every registered user with role sales_manager (Master User), not just names
   // that happen to already appear on a quotation/SO — otherwise a sales manager with zero
   // transactions so far (e.g. newly added, like David) silently never shows up in KPI Sales at
@@ -31239,6 +31344,24 @@ function KPISalesModule({
     });
   };
   const soHasLunasInvoice = so => (invoices || []).some(i => i.soNomor === so.nomor && i.statusBayar === "Lunas");
+  // Robust "does this Database Client belong to nama" check — mirrors customerAccessibleBy's
+  // logic (username-list first, case-insensitive legacy free-text fallback), plus handles the
+  // legacy salesManager field sometimes holding MULTIPLE names joined by comma (e.g. "ALI
+  // SANTOSO, SUHANDI" when a client is shared). Without this, newContactsCount silently missed
+  // any client whose salesManager casing didn't exactly match the roster nama, or that was
+  // co-assigned to more than one sales manager — found: Ali Santoso's client additions not
+  // counting in KPI because of exactly this.
+  const customerBelongsToNama = (c, nama) => {
+    const namaUp = (nama || "").toUpperCase();
+    if (!namaUp) return false;
+    if (Array.isArray(c.salesManagerUsernames) && c.salesManagerUsernames.length > 0) {
+      const emp = (employees || []).find(e => (e.nama || "").toUpperCase() === namaUp);
+      if (emp && c.salesManagerUsernames.includes(emp.username)) return true;
+    }
+    const legacy = (c.salesManager || "").toUpperCase();
+    if (!legacy) return false;
+    return legacy.split(",").map(s => s.trim()).some(part => part === namaUp || namaUp.startsWith(part) || part.startsWith(namaUp));
+  };
   const rawStats = targetNames.map(nama => {
     const myQuotAll = quotationsForSalesManager(nama);
     // Value Quotation / Jumlah Quotation: always by the quotation's OWN tanggal — a raw quotation
@@ -31290,8 +31413,11 @@ function KPISalesModule({
     // only ever existed for the non-owner submission path and missed clients added directly by
     // Owner/GM/HRD on a sales manager's behalf. Legacy clients created before this field existed
     // have no tanggalDibuat and are simply not counted (their real creation date is unknown).
-    const newContactsCount = (customers || []).filter(c => c.salesManager === nama && c.tanggalDibuat && (!kpiPeriodeAktif || inKpiPeriode(c.tanggalDibuat))).length;
-    const followupCount = myActivitiesP.filter(a => ["Kunjungan", "Telepon", "WhatsApp"].includes(a.jenisAktivitas)).length;
+    const newContactsCount = (customers || []).filter(c => customerBelongsToNama(c, nama) && c.tanggalDibuat && (!kpiPeriodeAktif || inKpiPeriode(c.tanggalDibuat))).length;
+    // "Request Akses Client" (logged when a sales manager requests access to a client they don't
+    // yet own) is a genuine prospecting activity and previously wasn't counted toward ANY KPI
+    // metric at all — added here alongside the other outreach types.
+    const followupCount = myActivitiesP.filter(a => ["Kunjungan", "Telepon", "WhatsApp", "Request Akses Client"].includes(a.jenisAktivitas)).length;
     const sectorsApproached = new Set(myActivitiesP.map(a => a.sector).filter(Boolean)).size;
     // Pillar 3 add-ons: NEW-customer revenue share, using each successful quotation's linked SO to
     // determine NEW vs RETURNING (see customerTypeForSO — first-ever SO for that customerId = NEW).
@@ -31739,7 +31865,7 @@ function KPISalesModule({
   }, [{
     title: "Pillar 1 — Prospecting Activity (bobot 15%)",
     score: scorecardStat.pillarProspecting,
-    rows: [["Kontak Baru", scorecardStat.newContactsCount, scorecardStat.effTargets.newContactsTarget], ["Follow-up (Kunjungan/Telepon/WA)", scorecardStat.followupCount, scorecardStat.effTargets.followupTarget], ["Sector Didekati", scorecardStat.sectorsApproached, 3]]
+    rows: [["Kontak Baru", scorecardStat.newContactsCount, scorecardStat.effTargets.newContactsTarget], ["Follow-up (Kunjungan/Telepon/WA/Request Akses)", scorecardStat.followupCount, scorecardStat.effTargets.followupTarget], ["Sector Didekati", scorecardStat.sectorsApproached, 3]]
   }, {
     title: "Pillar 2 — Pipeline Development (bobot 25%)",
     score: scorecardStat.pillarPipeline,
