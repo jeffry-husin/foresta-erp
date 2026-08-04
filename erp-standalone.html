@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-04.5";
+const APP_BUILD = "2026-08-04.6";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -18988,7 +18988,12 @@ function GoodsReceiptModule({
   const isWorkshopApprover = session.role === "workshop_manager" || isOwnerLike; // WORKSHOP1/WORKSHOP2, plus HO1/HO2/HO3 as company-wide override
   const [grSearch, setGrSearch] = useState("");
   const [poReceiveSearch, setPoReceiveSearch] = useState("");
-  const goodsReceiptsFiltered = (grSearch.trim() ? goodsReceipts.filter(g => [g.nomor, g.poNomor, g.mekanikNama].filter(Boolean).some(x => String(x).toLowerCase().includes(grSearch.trim().toLowerCase()))) : goodsReceipts).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  // Section 3 "DAFTAR PENERIMAAN BARANG FINAL" — only Final/Workshop receipts belong here (the ones
+  // that actually moved Master Part stock). Any older "Sementara - Diterima HO" records left over
+  // from before this 3-section redesign are filtered out here; their pending items live on in
+  // Section 2 (Internal Delivery Order) instead of being duplicated in this final list.
+  const goodsReceiptsFinal = goodsReceipts.filter(g => g.statusFinal === "Final - Diterima Workshop");
+  const goodsReceiptsFiltered = (grSearch.trim() ? goodsReceiptsFinal.filter(g => [g.nomor, g.poNomor, g.mekanikNama].filter(Boolean).some(x => String(x).toLowerCase().includes(grSearch.trim().toLowerCase()))) : goodsReceiptsFinal).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const pendingGREdits = editRequests.filter(r => r.module === "Penerimaan Barang" && r.action === "Edit" && r.status === "Menunggu Approval Workshop");
   const [editGR, setEditGR] = useState(null); // the goodsReceipts record currently being edited (opens edit modal)
   const [editGRForm, setEditGRForm] = useState({
@@ -19195,21 +19200,18 @@ function GoodsReceiptModule({
     });
   };
 
-  // Step 1: receive goods — at Head Office (temporary, no stock update yet) or directly at Workshop (final, stock updates immediately)
+  // Step 1: receive goods from an approved PO (Section 1 "PO SIAP DITERIMA"). Two paths:
+  //  - Workshop (direct/final): creates the Section 3 "Daftar Penerimaan Barang Final" record right
+  //    away and updates stock immediately.
+  //  - Head Office (temporary): creates ONLY a Section 2 Internal DO — no separate "Sementara" Goods
+  //    Receipt record anymore (that used to duplicate the same info and blur the 3-section model:
+  //    PO SIAP DITERIMA -> INTERNAL DELIVERY ORDER -> DAFTAR PENERIMAAN BARANG FINAL). Stock is not
+  //    touched here; it only updates once Workshop confirms items in the Internal DO.
   const save = () => {
     const pickedItems = form.items.filter(it => it.included && it.qtyDiterima > 0);
     if (pickedItems.length === 0) return alert("Pilih minimal 1 barang untuk diterima");
     if (!form.mekanikNama) return alert("Pilih atau isi nama mekanik penerima");
-    const grNomor = genDocNumber(goodsReceipts, "GR");
     const isFinalAtWorkshop = form.diterimaOleh === "Workshop";
-    setGoodsReceipts([...goodsReceipts, {
-      nomor: grNomor,
-      tanggal: today(),
-      ...form,
-      items: pickedItems,
-      receivedBy: session.nama,
-      statusFinal: isFinalAtWorkshop ? "Final - Diterima Workshop" : "Sementara - Diterima HO"
-    }]);
     const poList = form.poType === "Lokal" ? poLocal : poOverseas;
     const setPoList = form.poType === "Lokal" ? store.setPoLocal : store.setPoOverseas;
     const arr = [...poList];
@@ -19222,7 +19224,17 @@ function GoodsReceiptModule({
       newReceivedMap[it.partNumber] = (newReceivedMap[it.partNumber] || 0) + it.qtyDiterima;
     });
     const fullyReceived = poRec ? poRec.items.every(it => (newReceivedMap[it.partNumber] || 0) >= it.qty) : false;
+    let docNomor;
     if (isFinalAtWorkshop) {
+      docNomor = genDocNumber(goodsReceipts, "GR");
+      setGoodsReceipts([...goodsReceipts, {
+        nomor: docNomor,
+        tanggal: today(),
+        ...form,
+        items: pickedItems,
+        receivedBy: session.nama,
+        statusFinal: "Final - Diterima Workshop"
+      }]);
       // Direct-to-workshop receipt: stock updates immediately. Functional form — re-fetches the
       // latest server parts list right before applying, so this can't silently discard a part
       // someone else added/edited elsewhere while this receipt was being filled in.
@@ -19244,7 +19256,9 @@ function GoodsReceiptModule({
       };
       setPoList(arr);
     } else {
-      // Head Office receipt: temporary only — stock NOT updated yet, PO marked as pending workshop confirmation
+      // Head Office receipt: no stock change, PO marked as pending Workshop confirmation
+      const idoNomor = "IDO-" + uid();
+      docNomor = idoNomor;
       if (idx >= 0) arr[idx] = {
         ...poRec,
         receivedMap: newReceivedMap,
@@ -19253,9 +19267,8 @@ function GoodsReceiptModule({
       setPoList(arr);
       // Auto-create Internal Delivery Order: Office -> Workshop
       setInternalDOs([...internalDOs, {
-        nomor: "IDO-" + uid(),
+        nomor: idoNomor,
         tanggal: today(),
-        grNomor,
         poNomor: form.poNomor,
         mekanikNama: form.mekanikNama,
         items: pickedItems.map(it => ({
@@ -19271,7 +19284,7 @@ function GoodsReceiptModule({
     }
     logAudit(store, session, {
       module: "Penerimaan Barang",
-      docNomor: grNomor,
+      docNomor,
       action: "Tambah",
       detail: `${form.poNomor} — ${pickedItems.length} item${fullyReceived ? " (PO selesai)" : ""}`
     });
@@ -19285,12 +19298,16 @@ function GoodsReceiptModule({
     });
   };
 
-  // Step 2: Workshop confirms final receipt of an Internal DO — this is what finally updates stock
+  // Step 2: Workshop confirms final receipt of an Internal DO — item-by-item, same partial-selection
+  // pattern as Section 1's PO receiving (checkbox + qty per row). Only the checked items actually
+  // update stock and get logged into Section 3 ("Daftar Penerimaan Barang Final"); unchecked items
+  // stay behind in the Internal DO so Workshop can confirm the rest later instead of an all-or-nothing action.
   const openConfirm = d => {
     setConfirmModal(d);
     setConfirmItems(d.items.map(it => ({
       ...it,
-      qtyDiterimaFinal: it.qty
+      qtyDiterimaFinal: it.qty,
+      included: true
     })));
   };
   const updateConfirmQty = (i, val) => {
@@ -19301,11 +19318,21 @@ function GoodsReceiptModule({
     };
     setConfirmItems(arr);
   };
+  const toggleConfirmItemIncluded = i => {
+    const arr = [...confirmItems];
+    arr[i] = {
+      ...arr[i],
+      included: !arr[i].included
+    };
+    setConfirmItems(arr);
+  };
   const confirmWorkshopReceipt = () => {
+    const pickedItems = confirmItems.filter(it => it.included && it.qtyDiterimaFinal > 0);
+    if (pickedItems.length === 0) return alert("Pilih minimal 1 barang yang benar-benar diterima");
     // Functional form — see concurrency note on the other stock-update sites in this module.
     setParts(prev => {
       const newParts = [...prev];
-      confirmItems.forEach(it => {
+      pickedItems.forEach(it => {
         const idx = newParts.findIndex(p => p.partNumber === it.partNumber);
         if (idx >= 0) newParts[idx] = {
           ...newParts[idx],
@@ -19314,25 +19341,66 @@ function GoodsReceiptModule({
       });
       return newParts;
     });
+    // Log the confirmed portion into Section 3 (Daftar Penerimaan Barang Final) — this is the
+    // record that's actually tied to Master Parts stock, traceable back to both the PO and the
+    // Internal DO it was confirmed from.
+    const grNomor = genDocNumber(goodsReceipts, "GR");
+    const poType = poLocal.find(p => p.nomor === confirmModal.poNomor) ? "Lokal" : "Overseas";
+    setGoodsReceipts([...goodsReceipts, {
+      nomor: grNomor,
+      tanggal: today(),
+      poNomor: confirmModal.poNomor,
+      poType,
+      diterimaOleh: "Workshop",
+      mekanikNama: confirmModal.mekanikNama,
+      items: pickedItems.map(it => ({
+        partNumber: it.partNumber,
+        partName: it.partName,
+        qtyDiterima: it.qtyDiterimaFinal
+      })),
+      receivedBy: session.nama,
+      statusFinal: "Final - Diterima Workshop",
+      internalDONomor: confirmModal.nomor
+    }]);
+    // Shrink the Internal DO down to only what's still outstanding per item — unconfirmed items (or
+    // partially confirmed qty) remain here for a later confirmation instead of being lost.
+    const remainingItems = confirmModal.items.map(it => {
+      const picked = pickedItems.find(p => p.partNumber === it.partNumber);
+      const confirmedQty = picked ? picked.qtyDiterimaFinal : 0;
+      return {
+        ...it,
+        qty: it.qty - confirmedQty
+      };
+    }).filter(it => it.qty > 0);
+    const fullyDone = remainingItems.length === 0;
     const arrDO = [...internalDOs];
     arrDO[internalDOs.indexOf(confirmModal)] = {
       ...confirmModal,
-      statusKonfirmasi: "Diterima Workshop",
+      items: fullyDone ? confirmModal.items : remainingItems,
+      statusKonfirmasi: fullyDone ? "Diterima Workshop" : "Menunggu Diterima Workshop",
       confirmedBy: session.nama,
       confirmedDate: today()
     };
     setInternalDOs(arrDO);
-    // Mark the related PO as fully/finally received
-    const poType = poLocal.find(p => p.nomor === confirmModal.poNomor) ? "Lokal" : "Overseas";
+    // PO only counts as fully/finally received once every Internal DO tied to it has nothing left
+    // pending (checked against the just-updated array, not the stale pre-update value) — otherwise a
+    // partial confirmation here would incorrectly close out the whole PO.
     const poList = poType === "Lokal" ? poLocal : poOverseas;
     const setPoList = poType === "Lokal" ? store.setPoLocal : store.setPoOverseas;
     const arrPO = [...poList];
-    const idx = arrPO.findIndex(p => p.nomor === confirmModal.poNomor);
-    if (idx >= 0) arrPO[idx] = {
-      ...arrPO[idx],
-      status: "Sudah Diterima"
+    const poIdx = arrPO.findIndex(p => p.nomor === confirmModal.poNomor);
+    const stillPendingElsewhere = arrDO.some(d => d.poNomor === confirmModal.poNomor && d.statusKonfirmasi !== "Diterima Workshop");
+    if (poIdx >= 0) arrPO[poIdx] = {
+      ...arrPO[poIdx],
+      status: stillPendingElsewhere ? "Diterima HO - Menunggu Konfirmasi Workshop" : "Sudah Diterima"
     };
     setPoList(arrPO);
+    logAudit(store, session, {
+      module: "Internal Delivery Order",
+      docNomor: confirmModal.nomor,
+      action: "Konfirmasi Diterima Workshop",
+      detail: `${pickedItems.length} item dikonfirmasi${fullyDone ? " (DO selesai)" : " — sebagian, sisa item masih menunggu"}`
+    });
     setConfirmModal(null);
   };
   // Superuser (Owner/GM/Finance Director) delete for an Internal DO — mirrors the existing warning
@@ -19380,7 +19448,7 @@ function GoodsReceiptModule({
       fontSize: 12,
       color: theme.muted
     }
-  }, "Penerimaan FINAL hanya berlaku saat barang diterima di Workshop. Penerimaan di Head Office bersifat sementara dan memerlukan konfirmasi via Internal Delivery Order."), (isJhon || isOwnerLike) && /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, "Alur 3 tahap: (1) PO SIAP DITERIMA — pilih barang yang diterima di Head Office atau langsung di Workshop; (2) INTERNAL DELIVERY ORDER — Workshop pilih & konfirmasi barang yang benar-benar sudah sampai (bisa bertahap/sebagian); (3) DAFTAR PENERIMAAN BARANG FINAL — data final yang mengisi stock Master Part."), (isJhon || isOwnerLike) && /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "PO SIAP DITERIMA (Lokal & Overseas)",
     count: approvedPOsFiltered.length,
     badgeColor: theme.purple,
@@ -19485,7 +19553,7 @@ function GoodsReceiptModule({
       marginBottom: 0
     }
   })), /*#__PURE__*/React.createElement(CollapsibleSection, {
-    title: "Daftar Penerimaan Barang",
+    title: "DAFTAR PENERIMAAN BARANG FINAL",
     count: goodsReceiptsFiltered.length,
     badgeColor: theme.accent,
     storageKey: "gr_list",
@@ -19527,6 +19595,15 @@ function GoodsReceiptModule({
         relatedGRs.forEach(gr => {
           (gr.items || []).forEach(it => {
             newReceivedMap[it.partNumber] = (newReceivedMap[it.partNumber] || 0) + (it.qtyDiterima || 0);
+          });
+        });
+        // Also count qty still sitting in a not-yet-confirmed Internal DO for this PO — under the
+        // 3-section model, "received so far" = Final receipts + whatever Workshop hasn't confirmed
+        // yet, not just Final receipts alone, so deleting one Final record doesn't wipe out tracking
+        // of a still-pending Internal DO for the same PO.
+        internalDOs.filter(d => d.poNomor === g.poNomor && d.statusKonfirmasi !== "Diterima Workshop").forEach(d => {
+          (d.items || []).forEach(it => {
+            newReceivedMap[it.partNumber] = (newReceivedMap[it.partNumber] || 0) + (it.qty || 0);
           });
         });
         const fullyReceived = (poRec.items || []).every(it => (newReceivedMap[it.partNumber] || 0) >= it.qty);
@@ -19827,8 +19904,9 @@ function GoodsReceiptModule({
     }, "✏️"), d.statusKonfirmasi === "Menunggu Diterima Workshop" && (isJhon || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "success",
+      title: "Konfirmasi Diterima Workshop",
       onClick: () => openConfirm(d)
-    }, "✓ Konfirmasi Diterima Workshop"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+    }, "WORKSHOP"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "danger",
       title: "Hapus",
@@ -20142,11 +20220,16 @@ function GoodsReceiptModule({
       fontSize: 13,
       color: theme.muted
     }
-  }, "Konfirmasi qty yang benar-benar diterima di Workshop. Stock akan ter-update setelah ini."), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Part Number", "Part Name", "Qty Dikirim", "Qty Diterima Final"],
-    rows: confirmItems.map((it, i) => [it.partNumber, it.partName, fmtNum(it.qty), /*#__PURE__*/React.createElement("input", {
+  }, "Pilih barang yang benar-benar sudah diterima di Workshop (barang yang belum datang bisa dilewati dan dikonfirmasi belakangan). Stock akan ter-update untuk barang yang dicentang."), /*#__PURE__*/React.createElement(Table, {
+    headers: ["✓", "Part Number", "Part Name", "Qty Dikirim", "Qty Diterima"],
+    rows: confirmItems.map((it, i) => [/*#__PURE__*/React.createElement("input", {
+      type: "checkbox",
+      checked: it.included,
+      onChange: () => toggleConfirmItemIncluded(i)
+    }), it.partNumber, it.partName, fmtNum(it.qty), /*#__PURE__*/React.createElement("input", {
       type: "number",
       value: it.qtyDiterimaFinal,
+      disabled: !it.included,
       onChange: e => updateConfirmQty(i, e.target.value),
       style: {
         background: theme.surface,
@@ -26998,7 +27081,10 @@ function MutasiBarangModule({
       noPoCustomer: [...new Set(relatedSOs.map(so => so.noPoClient).filter(Boolean))].join(", ") || "-"
     };
   };
-  const masukRows = (goodsReceipts || []).flatMap(g => {
+  // Only Final/Workshop receipts actually move Master Part stock (see Penerimaan Barang's 3-section
+  // model) — filtering here keeps this ledger's "Masuk" rows matching real stock movements instead of
+  // also counting any leftover pre-redesign "Sementara - Diterima HO" records that never touched stock.
+  const masukRows = (goodsReceipts || []).filter(g => g.statusFinal === "Final - Diterima Workshop").flatMap(g => {
     const info = grCustomerInfo(g);
     return (g.items || []).map(it => {
       const part = parts.find(p => p.partNumber === it.partNumber);
