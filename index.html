@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-04.1";
+const APP_BUILD = "2026-08-04.3";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -2039,15 +2039,17 @@ function useStore() {
   // Pillar 2 Pipeline Development, Pillar 3 Conversion & Revenue). Keyed by salesperson nama.
   // Defaults match the recommended scorecard spec; Owner/GM/Finance Director can edit per person.
   const KPI_TARGET_DEFAULTS = {
-    revenueTarget: 0,
-    // 0 = not set — pipeline coverage / revenue attainment show "Target belum diatur" until an
-    // Owner/GM sets a real number; scoring for those metrics is skipped (not penalized) until then.
+    // Target SO per bulan: Rp 1.000.000.000.000 (1 triliun) — company-wide standing target per
+    // sales manager, used both as the Pillar 3 revenue-attainment basis (p3b, prorated across the
+    // selected periode like every other target here) AND as the fixed monthly/annual benchmark
+    // shown in the scorecard's own "Target SO" block (Bulan Ini vs Rp 1T, Tahun Ini/YTD vs Rp 12T)
+    // regardless of what periode filter is selected on the main KPI Sales screen.
+    revenueTarget: 1000000000000,
     newContactsTarget: 15,
     followupTarget: 30,
-    demosTarget: 4,
     quotationsTarget: 10
   };
-  const [kpiTargets, setKpiTargets] = usePersisted("erp_kpi_targets", {}); // { [nama]: {revenueTarget, newContactsTarget, followupTarget, demosTarget, quotationsTarget} }
+  const [kpiTargets, setKpiTargets] = usePersisted("erp_kpi_targets", {}); // { [nama]: {revenueTarget, newContactsTarget, followupTarget, quotationsTarget} }
   const [companySettings, setCompanySettings] = usePersisted("erp_company_settings", {
     nama: "PT Heavy Equipment Solutions",
     alamat: "Jl. Industri Raya No. 88, Jakarta",
@@ -2116,7 +2118,31 @@ function useStore() {
           sb.from("profiles").update(patch).eq("username", row.username).then(({
             error
           }) => {
-            if (error) console.error("Gagal menyimpan data karyawan " + row.username + ":", error);
+            // Previously this only logged to the browser console on failure — the UI still showed
+            // the edit as "saved" (optimistic update above), so a write that failed silently (e.g.
+            // a column referenced in EMPLOYEE_FIELD_MAP not actually existing yet in `profiles`,
+            // per the migration note above) looked successful until the next reload wiped it back
+            // to the old value, with no error ever surfaced to the person editing. Now: alert
+            // immediately so this is never silently lost again, and re-fetch the real row from the
+            // DB to undo the optimistic update for THIS employee (other rows/edits are untouched).
+            if (error) {
+              console.error("Gagal menyimpan data karyawan " + row.username + ":", error);
+              alert("Gagal menyimpan sebagian data untuk " + (row.nama || row.username) + ": " + error.message + "\n\nSilakan screenshot pesan ini dan laporkan ke admin — perubahan pada field terkait BELUM tersimpan.");
+              sb.from("profiles").select("*").eq("username", row.username).maybeSingle().then(({
+                data
+              }) => {
+                if (!data) return;
+                const fresh = {};
+                EMPLOYEE_FIELD_MAP.forEach(([camel, snake, def]) => {
+                  fresh[camel] = data[snake] !== undefined && data[snake] !== null ? data[snake] : def;
+                });
+                fresh.statusKaryawan = normalizeStatusKaryawan(fresh.statusKaryawan);
+                setAuthUsers(cur => (cur || []).map(u => u.username === row.username ? {
+                  ...u,
+                  ...fresh
+                } : u));
+              });
+            }
           });
         }
       });
@@ -5660,12 +5686,11 @@ function CustomerDB({
     nitku: "",
     taxAddress: "",
     salesManager: session.nama,
-    salesManagerUsernames: session.role === "sales_manager" ? [session.username] : [],
-    // Manual "Key Account" flag for the KPI Sales Customer Health pillar — per business rule, only
-    // Owner/GM/Finance Director can set/unset this (see the isOwnerLike-gated checkbox below).
+    salesManagerUsernames: session.role === "sales_manager" ? [session.username] : []
     // NEW vs RETURNING customer type is NOT stored here — it's derived automatically from each
     // customer's own Sales Order history (see customerTypeForSO / isNewCustomerAsOf helpers).
-    keyAccount: false
+    // (The manual "Key Account" flag that used to live here was removed per request — no longer
+    // part of the KPI Sales Customer Health pillar, see KPISalesModule.)
   };
   const [modal, setModal] = useState(false);
   const [form, setForm] = useState(blankForm);
@@ -5956,7 +5981,13 @@ function CustomerDB({
     const item = {
       ...form,
       id: form.id || "C" + uid(),
-      salesManager: form.salesManager || session.nama
+      salesManager: form.salesManager || session.nama,
+      // Stamped once, only on genuine creation (editIdx === null) — never overwritten on later
+      // edits/approvals. Drives KPI Sales' "Kontak Baru" (Pillar 1), which counts new Database
+      // Client entries per sales manager by this date rather than a separately-logged activity
+      // (which only ever existed for the non-owner submission path and missed anything added
+      // directly by Owner/GM/HRD on a sales manager's behalf).
+      tanggalDibuat: editIdx === null ? form.tanggalDibuat || today() : form.tanggalDibuat
     };
     if (isOwnerLike) {
       // Owner/GM can edit/add directly without approval
@@ -6447,25 +6478,7 @@ function CustomerDB({
         variant: "ghost",
         onClick: () => requestAccess(c)
       }, "Request Akses"));
-      const namaCell = c.keyAccount ? /*#__PURE__*/React.createElement("span", {
-        style: {
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 6
-        }
-      }, c.nama, /*#__PURE__*/React.createElement("span", {
-        title: "Key Account",
-        style: {
-          fontSize: 11,
-          fontWeight: 700,
-          color: "#a67c00",
-          background: "#fff3cd",
-          border: "1px solid #ffe08a",
-          borderRadius: 6,
-          padding: "1px 6px"
-        }
-      }, "⭐ KA")) : c.nama;
-      return [namaCell, picLabel, categoryCell, groupCell, /*#__PURE__*/React.createElement(Badge, {
+      return [c.nama, picLabel, categoryCell, groupCell, /*#__PURE__*/React.createElement(Badge, {
         color: theme.accent
       }, c.salesManager || "-"), accessCell];
     }),
@@ -6651,35 +6664,7 @@ function CustomerDB({
       value: g.id,
       label: g.nama
     }))]
-  })), isOwnerLike && /*#__PURE__*/React.createElement("label", {
-    style: {
-      display: "flex",
-      alignItems: "center",
-      gap: 8,
-      padding: "6px 10px",
-      border: `1px solid ${theme.border}`,
-      borderRadius: 10,
-      cursor: "pointer",
-      width: "fit-content"
-    }
-  }, /*#__PURE__*/React.createElement("input", {
-    type: "checkbox",
-    checked: !!form.keyAccount,
-    onChange: e => setForm({
-      ...form,
-      keyAccount: e.target.checked
-    })
-  }), /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 13,
-      fontWeight: 600
-    }
-  }, "⭐ Key Account"), /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: theme.muted,
-      fontSize: 12
-    }
-  }, "(untuk perhitungan KPI Sales — Customer Health)")), /*#__PURE__*/React.createElement("div", {
+  })), /*#__PURE__*/React.createElement("div", {
     style: {
       border: `1px solid ${theme.border}`,
       borderRadius: 10,
@@ -7932,10 +7917,22 @@ function MekanikReport({
   };
   const [editingDarId, setEditingDarId] = useState(null);
   const openForm = (visit, type, editingRecord) => {
-    // If we're currently inside a full-screen visit page, briefly step out of it so the form's
-    // Modal (only reachable from the main list tree) can actually show, and remember to come back
-    // to this exact page once the form is done — see the `returnToVisitPage` declaration above.
-    if (visitPage) {
+    // DAR / Status Report / BAPP / Surat Tugas now render inline at the top of their own
+    // full-screen visitPage (no popup) — so opening one of these just needs to land on/stay on
+    // that page; it never needs to step out of visitPage the way "inspection" (still Modal-based)
+    // does below. This also makes the "✏️ Edit" shortcut in the "Menunggu Approval Anda" panel on
+    // the main list (which calls openForm with visitPage still null) jump straight to the right
+    // page with the form already open, instead of popping a modal on top of the list.
+    if (["dar", "status", "bast", "surattugas"].includes(type)) {
+      setVisitPage({
+        visit,
+        type
+      });
+      setReturnToVisitPage(null);
+    } else if (visitPage) {
+      // If we're currently inside a full-screen visit page, briefly step out of it so the form's
+      // Modal (only reachable from the main list tree) can actually show, and remember to come back
+      // to this exact page once the form is done — see the `returnToVisitPage` declaration above.
       setReturnToVisitPage(visitPage);
       setVisitPage(null);
     } else {
@@ -8053,10 +8050,17 @@ function MekanikReport({
   // calling setFormType(null) directly, so the visit page we stepped out of (if any) is always
   // restored afterward.
   const closeForm = () => {
+    // DAR/Status/BAPP/Surat Tugas render inline inside the visitPage they were opened from — closing
+    // the form just hides it again and reveals the list, it must NOT touch visitPage (there is no
+    // "page we stepped out of" to restore for these). Only "inspection" still uses the old
+    // Modal-based exit/restore dance.
+    const wasInlinePageForm = ["dar", "status", "bast", "surattugas"].includes(formType);
     setFormType(null);
     setFormVisit(null);
-    setVisitPage(returnToVisitPage);
-    setReturnToVisitPage(null);
+    if (!wasInlinePageForm) {
+      setVisitPage(returnToVisitPage);
+      setReturnToVisitPage(null);
+    }
   };
   // Clickable count-badge used in the Kunjungan Kerja table (DAR/Part Rec./Status/BAPP columns) —
   // opens the dedicated full-screen page for that visit+type (see `visitPage` state/early-return
@@ -8787,14 +8791,14 @@ function MekanikReport({
         fontSize: 13,
         color: theme.muted
       }
-    }, v.customerNama, " · ", v.tanggal, " · ", v.unitTerkait || v.lokasi), canEditVisit && type === "dar" && /*#__PURE__*/React.createElement(Btn, {
+    }, v.customerNama, " · ", v.tanggal, " · ", v.unitTerkait || v.lokasi), canEditVisit && type === "dar" && !formType && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       onClick: () => openForm(v, "dar")
-    }, "📝 + Isi DAR"), canEditVisit && type === "status" && /*#__PURE__*/React.createElement(Btn, {
+    }, "📝 + Isi DAR"), canEditVisit && type === "status" && !formType && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "warning",
       onClick: () => openForm(v, "status")
-    }, "📋 + Status Report"), canEditVisit && type === "bast" && /*#__PURE__*/React.createElement(Btn, {
+    }, "📋 + Status Report"), canEditVisit && type === "bast" && !formType && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "ghost",
       onClick: () => openForm(v, "bast")
@@ -8802,11 +8806,11 @@ function MekanikReport({
       size: "sm",
       variant: "ghost",
       onClick: () => openForm(v, "inspection")
-    }, "🔍 + Inspection Report"), canEditVisit && type === "surattugas" && /*#__PURE__*/React.createElement(Btn, {
+    }, "🔍 + Inspection Report"), canEditVisit && type === "surattugas" && !formType && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "ghost",
       onClick: () => openForm(v, "surattugas")
-    }, "📜 + Surat Tugas")), type === "dar" && /*#__PURE__*/React.createElement(Table, {
+    }, "📜 + Surat Tugas")), type === "dar" && !formType && /*#__PURE__*/React.createElement(Table, {
       headers: ["Periode", "Pekerjaan", "Hari Tercatat", "Status", "Aksi"],
       rows: visitDars(v.id).map(d => [`${d.tanggalMulai} s/d ${d.tanggalSelesai}`, d.pekerjaan, `${d.catatanHarian.length} hari`, /*#__PURE__*/React.createElement(Badge, {
         color: darStatusColor[d.status]
@@ -8835,7 +8839,196 @@ function MekanikReport({
         onClick: () => deleteDar(d)
       }, "🗑️"))]),
       emptyMsg: "Belum ada entri DAR"
-    }), type === "partrec" && (() => {
+    }), formType === "dar" && React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("h4", {
+    style: {
+      margin: "0 0 14px",
+      fontSize: 15,
+      fontWeight: 700,
+      color: theme.text
+    }
+  }, editingDarId ? `Edit Daily Activity Report — ${formVisit?.jenisBeritaAcara}` : `Isi Daily Activity Report — ${formVisit?.jenisBeritaAcara}`), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Pekerjaan tidak harus selesai dalam 1 hari — isi periode tanggal dan tambahkan catatan per hari di dalamnya."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal Mulai",
+    value: darForm.tanggalMulai,
+    onChange: v => setDarForm({
+      ...darForm,
+      tanggalMulai: v
+    }),
+    type: "date"
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal Selesai",
+    value: darForm.tanggalSelesai,
+    onChange: v => setDarForm({
+      ...darForm,
+      tanggalSelesai: v
+    }),
+    type: "date"
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Jam Mulai (24 Jam)",
+    value: darForm.jamMulai,
+    onChange: v => setDarForm({
+      ...darForm,
+      jamMulai: v
+    }),
+    type: "time",
+    lang: "en-GB",
+    style: {
+      colorScheme: "dark"
+    }
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Jam Selesai (24 Jam)",
+    value: darForm.jamSelesai,
+    onChange: v => setDarForm({
+      ...darForm,
+      jamSelesai: v
+    }),
+    type: "time",
+    lang: "en-GB",
+    style: {
+      colorScheme: "dark"
+    }
+  })), /*#__PURE__*/React.createElement(Input, {
+    label: "Pekerjaan yang Dilakukan (Ringkasan)",
+    value: darForm.pekerjaan,
+    onChange: v => setDarForm({
+      ...darForm,
+      pekerjaan: v
+    }),
+    required: true,
+    placeholder: "Misal: Ganti hydraulic oil, cek wire rope..."
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: `1px solid ${theme.border}`,
+      borderRadius: 10,
+      padding: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.muted,
+      fontSize: 13,
+      fontWeight: 600
+    }
+  }, "CATATAN PER HARI"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr 1fr",
+      gap: 10,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    value: catatanHarianInput.tanggal,
+    onChange: v => setCatatanHarianInput({
+      ...catatanHarianInput,
+      tanggal: v
+    }),
+    type: "date"
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Jam Mulai",
+    value: catatanHarianInput.jamMulai,
+    onChange: v => setCatatanHarianInput({
+      ...catatanHarianInput,
+      jamMulai: v
+    }),
+    type: "time",
+    lang: "en-GB",
+    style: {
+      colorScheme: "dark"
+    }
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Jam Selesai",
+    value: catatanHarianInput.jamSelesai,
+    onChange: v => setCatatanHarianInput({
+      ...catatanHarianInput,
+      jamSelesai: v
+    }),
+    type: "time",
+    lang: "en-GB",
+    style: {
+      colorScheme: "dark"
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "2fr auto",
+      gap: 10,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    value: catatanHarianInput.catatan,
+    onChange: v => setCatatanHarianInput({
+      ...catatanHarianInput,
+      catatan: v
+    }),
+    multiline: true,
+    rows: 2,
+    placeholder: "Catatan kegiatan hari ini..."
+  }), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    onClick: addCatatanHarian
+  }, "+ Add")), darForm.catatanHarian.length > 0 && /*#__PURE__*/React.createElement(Table, {
+    headers: ["Tanggal", "Jam Mulai", "Jam Selesai", "Catatan", ""],
+    rows: darForm.catatanHarian.map((c, i) => [c.tanggal, c.jamMulai || "-", c.jamSelesai || "-", /*#__PURE__*/React.createElement("span", {
+      style: catatanStyle
+    }, c.catatan), /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "danger",
+      onClick: () => removeCatatanHarian(i)
+    }, "×")])
+  })), /*#__PURE__*/React.createElement(Input, {
+    label: "Nama Penerima (Client)",
+    value: darForm.namaPenerima,
+    onChange: v => setDarForm({
+      ...darForm,
+      namaPenerima: v
+    }),
+    placeholder: "Nama yang menerima/menyetujui pekerjaan di lokasi client"
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Catatan Tambahan",
+    multiline: true,
+    value: darForm.catatan,
+    onChange: v => setDarForm({
+      ...darForm,
+      catatan: v
+    })
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => {
+      closeForm();
+      setEditingDarId(null);
+    }
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: saveDar
+  }, editingDarId ? "Simpan Perubahan" : "Simpan DAR")))), type === "partrec" && (() => {
       const recDoc = visitRecDoc(v.id);
       const q = recSearch.trim().toLowerCase();
       // Same match set as PartPicker (PN / Part Name / Description) and same Service-excluded
@@ -8921,7 +9114,13 @@ function MekanikReport({
           fontSize: 12,
           color: theme.muted
         }
-      }, "Tidak ada part yang cocok."))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
+      }, "Tidak ada part yang cocok."), !q && recDoc && recDoc.status !== "Menunggu Approval Septi" && /*#__PURE__*/React.createElement("p", {
+        style: {
+          margin: "8px 0 0",
+          fontSize: 12,
+          color: theme.yellow
+        }
+      }, "ℹ️ Rekomendasi ini sudah ", recDoc.status.toLowerCase(), ". Anda tetap bisa menambah/menghapus part di sini — begitu disimpan, dokumen akan diajukan ulang untuk approval Septi."))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
         style: {
           margin: "0 0 8px",
           fontSize: 13,
@@ -8948,8 +9147,8 @@ function MekanikReport({
       }, /*#__PURE__*/React.createElement(Btn, {
         variant: "success",
         onClick: () => submitRecDoc(v)
-      }, "💾 Simpan Part Recommendation (", recCart.length, " item)")));
-    })(), type === "status" && /*#__PURE__*/React.createElement(Table, {
+      }, recDoc && recDoc.status !== "Menunggu Approval Septi" ? "💾 Simpan & Ajukan Ulang untuk Approval (" : "💾 Simpan Part Recommendation (", recCart.length, " item)")));
+    })(), type === "status" && !formType && /*#__PURE__*/React.createElement(Table, {
       headers: ["Status Pekerjaan", "Kondisi Unit", "Tingkat Keparahan", "Catatan", "Rekomendasi Lanjutan", ""],
       rows: visitStatus(v.id).map(s => [/*#__PURE__*/React.createElement(Badge, {
         color: statusColor[s.statusPekerjaan]
@@ -8963,7 +9162,84 @@ function MekanikReport({
         onClick: () => printStatus(s)
       })]),
       emptyMsg: "Belum ada status report"
-    }), type === "bast" && /*#__PURE__*/React.createElement(Table, {
+    }), formType === "status" && React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("h4", {
+    style: {
+      margin: "0 0 14px",
+      fontSize: 15,
+      fontWeight: 700,
+      color: theme.text
+    }
+  }, "Buat Status Report"), /*#__PURE__*/React.createElement(Select, {
+    label: "Status Pekerjaan",
+    value: statusForm.statusPekerjaan,
+    onChange: v => setStatusForm({
+      ...statusForm,
+      statusPekerjaan: v
+    }),
+    options: STATUS_PEKERJAAN_OPTIONS.map(s => ({
+      value: s,
+      label: s
+    }))
+  }), /*#__PURE__*/React.createElement(Select, {
+    label: "Kondisi Unit",
+    value: statusForm.kondisiUnit,
+    onChange: v => setStatusForm({
+      ...statusForm,
+      kondisiUnit: v
+    }),
+    options: KONDISI_UNIT_OPTIONS.map(s => ({
+      value: s,
+      label: s
+    })),
+    required: true
+  }), /*#__PURE__*/React.createElement(Select, {
+    label: "Tingkat Keparahan",
+    value: statusForm.keparahan,
+    onChange: v => setStatusForm({
+      ...statusForm,
+      keparahan: v
+    }),
+    options: KEPARAHAN_OPTIONS.map(s => ({
+      value: s,
+      label: s
+    }))
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Catatan Kondisi",
+    multiline: true,
+    value: statusForm.catatanKondisi,
+    onChange: v => setStatusForm({
+      ...statusForm,
+      catatanKondisi: v
+    }),
+    placeholder: "Deskripsikan temuan kerusakan/kondisi..."
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Rekomendasi Tindak Lanjut",
+    multiline: true,
+    value: statusForm.rekomendasiLanjutan,
+    onChange: v => setStatusForm({
+      ...statusForm,
+      rekomendasiLanjutan: v
+    }),
+    placeholder: "Opsional"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => closeForm()
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    variant: "warning",
+    onClick: saveStatus
+  }, "Simpan Status Report")))), type === "bast" && !formType && /*#__PURE__*/React.createElement(Table, {
       headers: ["No. PO / SO", "Jenis Pekerjaan", "Nama Unit", "Kondisi", "Penerima", ""],
       rows: visitBasts(v.id).map(b => [b.soNomor || "-", (b.jenisPekerjaan || []).join(", ") || "-", b.unitName || "-", b.kondisi === "Other" ? b.kondisiLainnya : b.kondisi, b.namaPenerima, /*#__PURE__*/React.createElement("div", {
         style: {
@@ -8982,7 +9258,300 @@ function MekanikReport({
         onClick: () => deleteBast(b)
       }, "🗑️"))]),
       emptyMsg: "Belum ada BAPP"
-    }), type === "inspection" && /*#__PURE__*/React.createElement(Table, {
+    }), formType === "bast" && React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("h4", {
+    style: {
+      margin: "0 0 14px",
+      fontSize: 15,
+      fontWeight: 700,
+      color: theme.text
+    }
+  }, editingBastId ? "Edit Berita Acara Penyelesaian Pekerjaan (BAPP)" : "Buat Berita Acara Penyelesaian Pekerjaan (BAPP)"), /*#__PURE__*/React.createElement(Select, {
+    label: "No. PO Dari Client / Sales Order (Opsional)",
+    value: bastForm.soNomor,
+    onChange: v => setBastForm({
+      ...bastForm,
+      soNomor: v
+    }),
+    options: salesOrders.map(so => ({
+      value: so.nomor,
+      label: `${so.nomor} — ${so.customerNama}`
+    }))
+  }), bastForm.soNomor && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 11,
+      color: theme.muted
+    }
+  }, "No. Delivery Order (otomatis): ", deliveryOrders.filter(d => d.soNomor === bastForm.soNomor).map(d => d.nomor).join(", ") || "Belum ada DO untuk SO ini"), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+    style: {
+      fontSize: 13,
+      color: theme.muted,
+      fontWeight: 500,
+      display: "block",
+      marginBottom: 8
+    }
+  }, "Jenis Pekerjaan *"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 10
+    }
+  }, JENIS_PEKERJAAN_BAPP_OPTIONS.map(j => /*#__PURE__*/React.createElement("label", {
+    key: j,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      fontSize: 13,
+      color: theme.text,
+      cursor: "pointer",
+      background: bastForm.jenisPekerjaan.includes(j) ? theme.accent + "22" : theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8,
+      padding: "6px 10px"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: bastForm.jenisPekerjaan.includes(j),
+    onChange: () => toggleJenisPekerjaan(j)
+  }), j))), bastForm.jenisPekerjaan.includes("Other") && /*#__PURE__*/React.createElement(Input, {
+    label: "Jenis Pekerjaan Lainnya",
+    value: bastForm.jenisPekerjaanLainnya,
+    onChange: v => setBastForm({
+      ...bastForm,
+      jenisPekerjaanLainnya: v
+    })
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    label: "Hari",
+    value: bastForm.hari,
+    onChange: v => setBastForm({
+      ...bastForm,
+      hari: v
+    }),
+    options: HARI_OPTIONS.map(h => ({
+      value: h,
+      label: h
+    })),
+    required: true
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal",
+    value: bastForm.tanggal,
+    onChange: v => setBastForm({
+      ...bastForm,
+      tanggal: v
+    }),
+    type: "date"
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: `1px solid ${theme.border}`,
+      borderRadius: 10,
+      padding: 14,
+      display: "flex",
+      flexDirection: "column",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      color: theme.muted,
+      fontSize: 13,
+      fontWeight: 600
+    }
+  }, "DATA UNIT"), /*#__PURE__*/React.createElement(PartPicker, {
+    label: "Nama Unit (cari dari Master Unit)",
+    value: bastForm.unitCode,
+    onChange: v => {
+      const u = units.find(x => x.unitCode === v);
+      setBastForm({
+        ...bastForm,
+        unitCode: v,
+        model: u?.description || bastForm.model
+      });
+    },
+    parts: units.map(u => ({
+      partNumber: u.unitCode,
+      partName: u.unitName
+    }))
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Model",
+    value: bastForm.model,
+    onChange: v => setBastForm({
+      ...bastForm,
+      model: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "SN Unit",
+    value: bastForm.snUnit,
+    onChange: v => setBastForm({
+      ...bastForm,
+      snUnit: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Engine",
+    value: bastForm.engine,
+    onChange: v => setBastForm({
+      ...bastForm,
+      engine: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "SN Engine",
+    value: bastForm.snEngine,
+    onChange: v => setBastForm({
+      ...bastForm,
+      snEngine: v
+    })
+  }))), /*#__PURE__*/React.createElement(Select, {
+    label: "Nama Perusahaan (Client)",
+    value: bastForm.customerId,
+    onChange: v => setBastForm({
+      ...bastForm,
+      customerId: v
+    }),
+    options: customers.map(c => ({
+      value: c.id,
+      label: c.nama
+    })),
+    required: true
+  }), /*#__PURE__*/React.createElement(Select, {
+    label: "Lokasi (cari dari Master Mill)",
+    value: bastForm.millId,
+    onChange: v => {
+      const mill = mills.find(m => m.millName === v);
+      setBastForm({
+        ...bastForm,
+        millId: v,
+        crane: mill ? mill.crane || "" : bastForm.crane,
+        snCrane: mill ? mill.snCrane || "" : bastForm.snCrane,
+        grapple: mill ? mill.grapple || "" : bastForm.grapple,
+        snGrapple: mill ? mill.snGrapple || "" : bastForm.snGrapple
+      });
+    },
+    options: mills.map(m => ({
+      value: m.millName,
+      label: `${m.millName} — ${m.companyName || ""}`
+    }))
+  }), !bastForm.millId && /*#__PURE__*/React.createElement(Input, {
+    label: "Atau isi lokasi manual",
+    value: bastForm.lokasiManual,
+    onChange: v => setBastForm({
+      ...bastForm,
+      lokasiManual: v
+    })
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Crane",
+    value: bastForm.crane,
+    onChange: v => setBastForm({
+      ...bastForm,
+      crane: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "SN Crane",
+    value: bastForm.snCrane,
+    onChange: v => setBastForm({
+      ...bastForm,
+      snCrane: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Grapple",
+    value: bastForm.grapple,
+    onChange: v => setBastForm({
+      ...bastForm,
+      grapple: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "SN Grapple",
+    value: bastForm.snGrapple,
+    onChange: v => setBastForm({
+      ...bastForm,
+      snGrapple: v
+    })
+  })), /*#__PURE__*/React.createElement(Select, {
+    label: "Kondisi",
+    value: bastForm.kondisi,
+    onChange: v => setBastForm({
+      ...bastForm,
+      kondisi: v
+    }),
+    options: KONDISI_BAPP_OPTIONS.map(k => ({
+      value: k,
+      label: k
+    })),
+    required: true
+  }), bastForm.kondisi === "Other" && /*#__PURE__*/React.createElement(Input, {
+    label: "Kondisi Lainnya",
+    value: bastForm.kondisiLainnya,
+    onChange: v => setBastForm({
+      ...bastForm,
+      kondisiLainnya: v
+    })
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Nama Penerima (Client)",
+    value: bastForm.namaPenerima,
+    onChange: v => setBastForm({
+      ...bastForm,
+      namaPenerima: v
+    }),
+    required: true
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Jabatan Penerima",
+    value: bastForm.jabatanPenerima,
+    onChange: v => setBastForm({
+      ...bastForm,
+      jabatanPenerima: v
+    })
+  })), /*#__PURE__*/React.createElement(Input, {
+    label: "Catatan",
+    multiline: true,
+    value: bastForm.catatan,
+    onChange: v => setBastForm({
+      ...bastForm,
+      catatan: v
+    })
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => {
+      closeForm();
+      setEditingBastId(null);
+    }
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: saveBast
+  }, editingBastId ? "Simpan Perubahan" : "Simpan BAPP")))), type === "inspection" && /*#__PURE__*/React.createElement(Table, {
       headers: ["Tanggal", "Tipe Crane", "Komponen Diperiksa", "Mekanik", ""],
       rows: visitInspections(v.id).map(r => [r.tanggal, /*#__PURE__*/React.createElement(Badge, {
         color: (r.tipeCrane || "Static Crane") === "Truck Crane" ? theme.purple : theme.cyan
@@ -9003,7 +9572,7 @@ function MekanikReport({
         onClick: () => deleteInspection(r)
       }, "🗑️"))]),
       emptyMsg: "Belum ada inspection report"
-    }), type === "surattugas" && /*#__PURE__*/React.createElement(Table, {
+    }), type === "surattugas" && !formType && /*#__PURE__*/React.createElement(Table, {
       headers: ["No. Surat Tugas", "Tanggal", "Ditugaskan Kepada", "Dibuat Oleh", ""],
       rows: visitSuratTugas(v.id).map(s => [s.nomor, s.tanggalPembuatan, s.assignees.map(a => a.nama).join(", "), `${s.dibuatOlehNama}${s.dibuatOlehJabatan ? ` (${s.dibuatOlehJabatan})` : ""}`, /*#__PURE__*/React.createElement("div", {
         style: {
@@ -9022,7 +9591,226 @@ function MekanikReport({
         onClick: () => deleteST(s)
       }, "🗑️"))]),
       emptyMsg: "Belum ada surat tugas untuk kunjungan ini"
-    })));
+    }), formType === "surattugas" && React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("h4", {
+    style: {
+      margin: "0 0 14px",
+      fontSize: 15,
+      fontWeight: 700,
+      color: theme.text
+    }
+  }, editingSTId ? "Edit Surat Perintah Tugas" : "Buat Surat Perintah Tugas"), /*#__PURE__*/React.createElement("datalist", {
+    id: "stEmployeeNames"
+  }, activeUserNames.map(nama => /*#__PURE__*/React.createElement("option", {
+    key: nama,
+    value: nama
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "No. Surat Tugas",
+    value: stForm.nomor,
+    onChange: v => setSTForm({
+      ...stForm,
+      nomor: v
+    }),
+    required: true
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal Pembuatan",
+    type: "date",
+    value: stForm.tanggalPembuatan,
+    onChange: v => setSTForm({
+      ...stForm,
+      tanggalPembuatan: v
+    }),
+    required: true
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("label", {
+    style: {
+      fontSize: 13,
+      color: theme.muted,
+      fontWeight: 500
+    }
+  }, "Dibuat Oleh (Nama Manager)", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.red
+    }
+  }, " *")), /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    list: "stEmployeeNames",
+    value: stForm.dibuatOlehNama,
+    placeholder: "Pilih dari daftar atau ketik manual",
+    onChange: e => {
+      const v = e.target.value;
+      const emp = employees.find(x => x.nama === v);
+      setSTForm({
+        ...stForm,
+        dibuatOlehNama: v,
+        dibuatOlehJabatan: emp ? emp.jabatan || stForm.dibuatOlehJabatan : stForm.dibuatOlehJabatan
+      });
+    },
+    style: {
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8,
+      padding: "9px 12px",
+      color: theme.text,
+      fontSize: 14,
+      fontFamily: "inherit",
+      outline: "none",
+      width: "100%",
+      boxSizing: "border-box"
+    }
+  })), /*#__PURE__*/React.createElement(Input, {
+    label: "Jabatan",
+    value: stForm.dibuatOlehJabatan,
+    onChange: v => setSTForm({
+      ...stForm,
+      dibuatOlehJabatan: v
+    }),
+    placeholder: "cth. Service Manager"
+  })), /*#__PURE__*/React.createElement(Input, {
+    label: "Nama yang Mengetahui (Client)",
+    value: stForm.namaClient,
+    onChange: v => setSTForm({
+      ...stForm,
+      namaClient: v
+    }),
+    placeholder: "PIC client yang menandatangani 'Diketahui' (opsional)"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: `1px solid ${theme.border}`,
+      borderRadius: 10,
+      padding: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 10px",
+      fontSize: 13,
+      fontWeight: 600,
+      color: theme.text
+    }
+  }, "Menugaskan Kepada"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 10,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    list: "stEmployeeNames",
+    value: stAssigneeForm.nama,
+    placeholder: "Nama (pilih dari daftar atau ketik manual)",
+    onChange: e => {
+      const v = e.target.value;
+      const emp = employees.find(x => x.nama === v);
+      setSTAssigneeForm({
+        ...stAssigneeForm,
+        nama: v,
+        jabatan: emp ? emp.jabatan || stAssigneeForm.jabatan : stAssigneeForm.jabatan
+      });
+    },
+    style: {
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8,
+      padding: "9px 12px",
+      color: theme.text,
+      fontSize: 14,
+      fontFamily: "inherit",
+      outline: "none",
+      width: "100%",
+      boxSizing: "border-box"
+    }
+  }), /*#__PURE__*/React.createElement(Input, {
+    value: stAssigneeForm.jabatan,
+    onChange: v => setSTAssigneeForm({
+      ...stAssigneeForm,
+      jabatan: v
+    }),
+    placeholder: "Jabatan"
+  }), /*#__PURE__*/React.createElement(Input, {
+    value: stAssigneeForm.jenisPekerjaan,
+    onChange: v => setSTAssigneeForm({
+      ...stAssigneeForm,
+      jenisPekerjaan: v
+    }),
+    placeholder: "Jenis Pekerjaan"
+  }), /*#__PURE__*/React.createElement(Input, {
+    type: "date",
+    value: stAssigneeForm.berangkatTanggal,
+    onChange: v => setSTAssigneeForm({
+      ...stAssigneeForm,
+      berangkatTanggal: v
+    }),
+    placeholder: "Berangkat"
+  }), /*#__PURE__*/React.createElement(Input, {
+    type: "date",
+    value: stAssigneeForm.sampaiTanggal,
+    onChange: v => setSTAssigneeForm({
+      ...stAssigneeForm,
+      sampaiTanggal: v
+    }),
+    placeholder: "Sampai"
+  }), /*#__PURE__*/React.createElement(Input, {
+    value: stAssigneeForm.kendaraan,
+    onChange: v => setSTAssigneeForm({
+      ...stAssigneeForm,
+      kendaraan: v
+    }),
+    placeholder: "Kendaraan"
+  }), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    onClick: addSTAssignee
+  }, "+ Add")), stAssigneeCart.length > 0 && /*#__PURE__*/React.createElement(Table, {
+    headers: ["Nama", "Jabatan", "Jenis Pekerjaan", "Berangkat", "Sampai", "Kendaraan", ""],
+    rows: stAssigneeCart.map((a, i) => [a.nama, a.jabatan || "-", a.jenisPekerjaan || "-", a.berangkatTanggal || "-", a.sampaiTanggal || "-", a.kendaraan || "-", /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "danger",
+      onClick: () => removeSTAssignee(i)
+    }, "×")])
+  }), stAssigneeCart.length === 0 && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted,
+      textAlign: "center"
+    }
+  }, "Belum ada orang yang ditugaskan")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => {
+      closeForm();
+      setEditingSTId(null);
+    }
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: saveST
+  }, editingSTId ? "Simpan Perubahan" : "Simpan Surat Tugas"))))));
   }
   return /*#__PURE__*/React.createElement("div", {
     style: {
@@ -9612,564 +10400,6 @@ function MekanikReport({
       color: theme.muted
     }
   }, "ℹ️ Inspection Report dan Surat Tugas sekarang dikelola dari tombol \"Inspection\"/\"Surat Tugas\" di tabel Kunjungan Kerja (buka halaman full-screen tersendiri)."))), /*#__PURE__*/React.createElement(Modal, {
-    open: formType === "dar",
-    title: editingDarId ? `Edit Daily Activity Report — ${formVisit?.jenisBeritaAcara}` : `Isi Daily Activity Report — ${formVisit?.jenisBeritaAcara}`,
-    onClose: () => {
-      closeForm();
-      setEditingDarId(null);
-    },
-    width: 620
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      flexDirection: "column",
-      gap: 14
-    }
-  }, /*#__PURE__*/React.createElement("p", {
-    style: {
-      margin: 0,
-      fontSize: 12,
-      color: theme.muted
-    }
-  }, "Pekerjaan tidak harus selesai dalam 1 hari — isi periode tanggal dan tambahkan catatan per hari di dalamnya."), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr",
-      gap: 14
-    }
-  }, /*#__PURE__*/React.createElement(Input, {
-    label: "Tanggal Mulai",
-    value: darForm.tanggalMulai,
-    onChange: v => setDarForm({
-      ...darForm,
-      tanggalMulai: v
-    }),
-    type: "date"
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "Tanggal Selesai",
-    value: darForm.tanggalSelesai,
-    onChange: v => setDarForm({
-      ...darForm,
-      tanggalSelesai: v
-    }),
-    type: "date"
-  })), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr",
-      gap: 14
-    }
-  }, /*#__PURE__*/React.createElement(Input, {
-    label: "Jam Mulai (24 Jam)",
-    value: darForm.jamMulai,
-    onChange: v => setDarForm({
-      ...darForm,
-      jamMulai: v
-    }),
-    type: "time",
-    lang: "en-GB",
-    style: {
-      colorScheme: "dark"
-    }
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "Jam Selesai (24 Jam)",
-    value: darForm.jamSelesai,
-    onChange: v => setDarForm({
-      ...darForm,
-      jamSelesai: v
-    }),
-    type: "time",
-    lang: "en-GB",
-    style: {
-      colorScheme: "dark"
-    }
-  })), /*#__PURE__*/React.createElement(Input, {
-    label: "Pekerjaan yang Dilakukan (Ringkasan)",
-    value: darForm.pekerjaan,
-    onChange: v => setDarForm({
-      ...darForm,
-      pekerjaan: v
-    }),
-    required: true,
-    placeholder: "Misal: Ganti hydraulic oil, cek wire rope..."
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      border: `1px solid ${theme.border}`,
-      borderRadius: 10,
-      padding: 14
-    }
-  }, /*#__PURE__*/React.createElement("p", {
-    style: {
-      margin: "0 0 12px",
-      color: theme.muted,
-      fontSize: 13,
-      fontWeight: 600
-    }
-  }, "CATATAN PER HARI"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr 1fr",
-      gap: 10,
-      marginBottom: 10
-    }
-  }, /*#__PURE__*/React.createElement(Input, {
-    value: catatanHarianInput.tanggal,
-    onChange: v => setCatatanHarianInput({
-      ...catatanHarianInput,
-      tanggal: v
-    }),
-    type: "date"
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "Jam Mulai",
-    value: catatanHarianInput.jamMulai,
-    onChange: v => setCatatanHarianInput({
-      ...catatanHarianInput,
-      jamMulai: v
-    }),
-    type: "time",
-    lang: "en-GB",
-    style: {
-      colorScheme: "dark"
-    }
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "Jam Selesai",
-    value: catatanHarianInput.jamSelesai,
-    onChange: v => setCatatanHarianInput({
-      ...catatanHarianInput,
-      jamSelesai: v
-    }),
-    type: "time",
-    lang: "en-GB",
-    style: {
-      colorScheme: "dark"
-    }
-  })), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "2fr auto",
-      gap: 10,
-      marginBottom: 10
-    }
-  }, /*#__PURE__*/React.createElement(Input, {
-    value: catatanHarianInput.catatan,
-    onChange: v => setCatatanHarianInput({
-      ...catatanHarianInput,
-      catatan: v
-    }),
-    multiline: true,
-    rows: 2,
-    placeholder: "Catatan kegiatan hari ini..."
-  }), /*#__PURE__*/React.createElement(Btn, {
-    size: "sm",
-    onClick: addCatatanHarian
-  }, "+ Add")), darForm.catatanHarian.length > 0 && /*#__PURE__*/React.createElement(Table, {
-    headers: ["Tanggal", "Jam Mulai", "Jam Selesai", "Catatan", ""],
-    rows: darForm.catatanHarian.map((c, i) => [c.tanggal, c.jamMulai || "-", c.jamSelesai || "-", /*#__PURE__*/React.createElement("span", {
-      style: catatanStyle
-    }, c.catatan), /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "danger",
-      onClick: () => removeCatatanHarian(i)
-    }, "×")])
-  })), /*#__PURE__*/React.createElement(Input, {
-    label: "Nama Penerima (Client)",
-    value: darForm.namaPenerima,
-    onChange: v => setDarForm({
-      ...darForm,
-      namaPenerima: v
-    }),
-    placeholder: "Nama yang menerima/menyetujui pekerjaan di lokasi client"
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "Catatan Tambahan",
-    multiline: true,
-    value: darForm.catatan,
-    onChange: v => setDarForm({
-      ...darForm,
-      catatan: v
-    })
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 10,
-      justifyContent: "flex-end"
-    }
-  }, /*#__PURE__*/React.createElement(Btn, {
-    variant: "ghost",
-    onClick: () => {
-      closeForm();
-      setEditingDarId(null);
-    }
-  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
-    onClick: saveDar
-  }, editingDarId ? "Simpan Perubahan" : "Simpan DAR")))), /*#__PURE__*/React.createElement(Modal, {
-    open: formType === "status",
-    title: "Buat Status Report",
-    onClose: () => closeForm()
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      flexDirection: "column",
-      gap: 14
-    }
-  }, /*#__PURE__*/React.createElement(Select, {
-    label: "Status Pekerjaan",
-    value: statusForm.statusPekerjaan,
-    onChange: v => setStatusForm({
-      ...statusForm,
-      statusPekerjaan: v
-    }),
-    options: STATUS_PEKERJAAN_OPTIONS.map(s => ({
-      value: s,
-      label: s
-    }))
-  }), /*#__PURE__*/React.createElement(Select, {
-    label: "Kondisi Unit",
-    value: statusForm.kondisiUnit,
-    onChange: v => setStatusForm({
-      ...statusForm,
-      kondisiUnit: v
-    }),
-    options: KONDISI_UNIT_OPTIONS.map(s => ({
-      value: s,
-      label: s
-    })),
-    required: true
-  }), /*#__PURE__*/React.createElement(Select, {
-    label: "Tingkat Keparahan",
-    value: statusForm.keparahan,
-    onChange: v => setStatusForm({
-      ...statusForm,
-      keparahan: v
-    }),
-    options: KEPARAHAN_OPTIONS.map(s => ({
-      value: s,
-      label: s
-    }))
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "Catatan Kondisi",
-    multiline: true,
-    value: statusForm.catatanKondisi,
-    onChange: v => setStatusForm({
-      ...statusForm,
-      catatanKondisi: v
-    }),
-    placeholder: "Deskripsikan temuan kerusakan/kondisi..."
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "Rekomendasi Tindak Lanjut",
-    multiline: true,
-    value: statusForm.rekomendasiLanjutan,
-    onChange: v => setStatusForm({
-      ...statusForm,
-      rekomendasiLanjutan: v
-    }),
-    placeholder: "Opsional"
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 10,
-      justifyContent: "flex-end"
-    }
-  }, /*#__PURE__*/React.createElement(Btn, {
-    variant: "ghost",
-    onClick: () => closeForm()
-  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
-    variant: "warning",
-    onClick: saveStatus
-  }, "Simpan Status Report")))), /*#__PURE__*/React.createElement(Modal, {
-    open: formType === "bast",
-    title: editingBastId ? "Edit Berita Acara Penyelesaian Pekerjaan (BAPP)" : "Buat Berita Acara Penyelesaian Pekerjaan (BAPP)",
-    onClose: () => {
-      closeForm();
-      setEditingBastId(null);
-    },
-    width: 640
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      flexDirection: "column",
-      gap: 14
-    }
-  }, /*#__PURE__*/React.createElement(Select, {
-    label: "No. PO Dari Client / Sales Order (Opsional)",
-    value: bastForm.soNomor,
-    onChange: v => setBastForm({
-      ...bastForm,
-      soNomor: v
-    }),
-    options: salesOrders.map(so => ({
-      value: so.nomor,
-      label: `${so.nomor} — ${so.customerNama}`
-    }))
-  }), bastForm.soNomor && /*#__PURE__*/React.createElement("p", {
-    style: {
-      margin: 0,
-      fontSize: 11,
-      color: theme.muted
-    }
-  }, "No. Delivery Order (otomatis): ", deliveryOrders.filter(d => d.soNomor === bastForm.soNomor).map(d => d.nomor).join(", ") || "Belum ada DO untuk SO ini"), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
-    style: {
-      fontSize: 13,
-      color: theme.muted,
-      fontWeight: 500,
-      display: "block",
-      marginBottom: 8
-    }
-  }, "Jenis Pekerjaan *"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      flexWrap: "wrap",
-      gap: 10
-    }
-  }, JENIS_PEKERJAAN_BAPP_OPTIONS.map(j => /*#__PURE__*/React.createElement("label", {
-    key: j,
-    style: {
-      display: "flex",
-      alignItems: "center",
-      gap: 6,
-      fontSize: 13,
-      color: theme.text,
-      cursor: "pointer",
-      background: bastForm.jenisPekerjaan.includes(j) ? theme.accent + "22" : theme.surface,
-      border: `1px solid ${theme.border}`,
-      borderRadius: 8,
-      padding: "6px 10px"
-    }
-  }, /*#__PURE__*/React.createElement("input", {
-    type: "checkbox",
-    checked: bastForm.jenisPekerjaan.includes(j),
-    onChange: () => toggleJenisPekerjaan(j)
-  }), j))), bastForm.jenisPekerjaan.includes("Other") && /*#__PURE__*/React.createElement(Input, {
-    label: "Jenis Pekerjaan Lainnya",
-    value: bastForm.jenisPekerjaanLainnya,
-    onChange: v => setBastForm({
-      ...bastForm,
-      jenisPekerjaanLainnya: v
-    })
-  })), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr",
-      gap: 14
-    }
-  }, /*#__PURE__*/React.createElement(Select, {
-    label: "Hari",
-    value: bastForm.hari,
-    onChange: v => setBastForm({
-      ...bastForm,
-      hari: v
-    }),
-    options: HARI_OPTIONS.map(h => ({
-      value: h,
-      label: h
-    })),
-    required: true
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "Tanggal",
-    value: bastForm.tanggal,
-    onChange: v => setBastForm({
-      ...bastForm,
-      tanggal: v
-    }),
-    type: "date"
-  })), /*#__PURE__*/React.createElement("div", {
-    style: {
-      border: `1px solid ${theme.border}`,
-      borderRadius: 10,
-      padding: 14,
-      display: "flex",
-      flexDirection: "column",
-      gap: 12
-    }
-  }, /*#__PURE__*/React.createElement("p", {
-    style: {
-      margin: 0,
-      color: theme.muted,
-      fontSize: 13,
-      fontWeight: 600
-    }
-  }, "DATA UNIT"), /*#__PURE__*/React.createElement(PartPicker, {
-    label: "Nama Unit (cari dari Master Unit)",
-    value: bastForm.unitCode,
-    onChange: v => {
-      const u = units.find(x => x.unitCode === v);
-      setBastForm({
-        ...bastForm,
-        unitCode: v,
-        model: u?.description || bastForm.model
-      });
-    },
-    parts: units.map(u => ({
-      partNumber: u.unitCode,
-      partName: u.unitName
-    }))
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr",
-      gap: 14
-    }
-  }, /*#__PURE__*/React.createElement(Input, {
-    label: "Model",
-    value: bastForm.model,
-    onChange: v => setBastForm({
-      ...bastForm,
-      model: v
-    })
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "SN Unit",
-    value: bastForm.snUnit,
-    onChange: v => setBastForm({
-      ...bastForm,
-      snUnit: v
-    })
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "Engine",
-    value: bastForm.engine,
-    onChange: v => setBastForm({
-      ...bastForm,
-      engine: v
-    })
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "SN Engine",
-    value: bastForm.snEngine,
-    onChange: v => setBastForm({
-      ...bastForm,
-      snEngine: v
-    })
-  }))), /*#__PURE__*/React.createElement(Select, {
-    label: "Nama Perusahaan (Client)",
-    value: bastForm.customerId,
-    onChange: v => setBastForm({
-      ...bastForm,
-      customerId: v
-    }),
-    options: customers.map(c => ({
-      value: c.id,
-      label: c.nama
-    })),
-    required: true
-  }), /*#__PURE__*/React.createElement(Select, {
-    label: "Lokasi (cari dari Master Mill)",
-    value: bastForm.millId,
-    onChange: v => {
-      const mill = mills.find(m => m.millName === v);
-      setBastForm({
-        ...bastForm,
-        millId: v,
-        crane: mill ? mill.crane || "" : bastForm.crane,
-        snCrane: mill ? mill.snCrane || "" : bastForm.snCrane,
-        grapple: mill ? mill.grapple || "" : bastForm.grapple,
-        snGrapple: mill ? mill.snGrapple || "" : bastForm.snGrapple
-      });
-    },
-    options: mills.map(m => ({
-      value: m.millName,
-      label: `${m.millName} — ${m.companyName || ""}`
-    }))
-  }), !bastForm.millId && /*#__PURE__*/React.createElement(Input, {
-    label: "Atau isi lokasi manual",
-    value: bastForm.lokasiManual,
-    onChange: v => setBastForm({
-      ...bastForm,
-      lokasiManual: v
-    })
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr",
-      gap: 14
-    }
-  }, /*#__PURE__*/React.createElement(Input, {
-    label: "Crane",
-    value: bastForm.crane,
-    onChange: v => setBastForm({
-      ...bastForm,
-      crane: v
-    })
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "SN Crane",
-    value: bastForm.snCrane,
-    onChange: v => setBastForm({
-      ...bastForm,
-      snCrane: v
-    })
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "Grapple",
-    value: bastForm.grapple,
-    onChange: v => setBastForm({
-      ...bastForm,
-      grapple: v
-    })
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "SN Grapple",
-    value: bastForm.snGrapple,
-    onChange: v => setBastForm({
-      ...bastForm,
-      snGrapple: v
-    })
-  })), /*#__PURE__*/React.createElement(Select, {
-    label: "Kondisi",
-    value: bastForm.kondisi,
-    onChange: v => setBastForm({
-      ...bastForm,
-      kondisi: v
-    }),
-    options: KONDISI_BAPP_OPTIONS.map(k => ({
-      value: k,
-      label: k
-    })),
-    required: true
-  }), bastForm.kondisi === "Other" && /*#__PURE__*/React.createElement(Input, {
-    label: "Kondisi Lainnya",
-    value: bastForm.kondisiLainnya,
-    onChange: v => setBastForm({
-      ...bastForm,
-      kondisiLainnya: v
-    })
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr",
-      gap: 14
-    }
-  }, /*#__PURE__*/React.createElement(Input, {
-    label: "Nama Penerima (Client)",
-    value: bastForm.namaPenerima,
-    onChange: v => setBastForm({
-      ...bastForm,
-      namaPenerima: v
-    }),
-    required: true
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "Jabatan Penerima",
-    value: bastForm.jabatanPenerima,
-    onChange: v => setBastForm({
-      ...bastForm,
-      jabatanPenerima: v
-    })
-  })), /*#__PURE__*/React.createElement(Input, {
-    label: "Catatan",
-    multiline: true,
-    value: bastForm.catatan,
-    onChange: v => setBastForm({
-      ...bastForm,
-      catatan: v
-    })
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 10,
-      justifyContent: "flex-end"
-    }
-  }, /*#__PURE__*/React.createElement(Btn, {
-    variant: "ghost",
-    onClick: () => {
-      closeForm();
-      setEditingBastId(null);
-    }
-  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
-    onClick: saveBast
-  }, editingBastId ? "Simpan Perubahan" : "Simpan BAPP")))), /*#__PURE__*/React.createElement(Modal, {
     open: formType === "inspection",
     title: (editingInspectionId ? "Edit Inspection Report" : "Inspection Report") + ` — ${inspectionForm.tipeCrane}`,
     onClose: () => {
@@ -10298,227 +10528,7 @@ function MekanikReport({
     }
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     onClick: saveInspection
-  }, editingInspectionId ? "Simpan Perubahan" : "Simpan Inspection Report")))), /*#__PURE__*/React.createElement(Modal, {
-    open: formType === "surattugas",
-    title: editingSTId ? "Edit Surat Perintah Tugas" : "Buat Surat Perintah Tugas",
-    onClose: () => {
-      closeForm();
-      setEditingSTId(null);
-    },
-    width: 780
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      flexDirection: "column",
-      gap: 14
-    }
-  }, /*#__PURE__*/React.createElement("datalist", {
-    id: "stEmployeeNames"
-  }, activeUserNames.map(nama => /*#__PURE__*/React.createElement("option", {
-    key: nama,
-    value: nama
-  }))), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr",
-      gap: 14
-    }
-  }, /*#__PURE__*/React.createElement(Input, {
-    label: "No. Surat Tugas",
-    value: stForm.nomor,
-    onChange: v => setSTForm({
-      ...stForm,
-      nomor: v
-    }),
-    required: true
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "Tanggal Pembuatan",
-    type: "date",
-    value: stForm.tanggalPembuatan,
-    onChange: v => setSTForm({
-      ...stForm,
-      tanggalPembuatan: v
-    }),
-    required: true
-  })), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr",
-      gap: 14
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      flexDirection: "column",
-      gap: 6
-    }
-  }, /*#__PURE__*/React.createElement("label", {
-    style: {
-      fontSize: 13,
-      color: theme.muted,
-      fontWeight: 500
-    }
-  }, "Dibuat Oleh (Nama Manager)", /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: theme.red
-    }
-  }, " *")), /*#__PURE__*/React.createElement("input", {
-    type: "text",
-    list: "stEmployeeNames",
-    value: stForm.dibuatOlehNama,
-    placeholder: "Pilih dari daftar atau ketik manual",
-    onChange: e => {
-      const v = e.target.value;
-      const emp = employees.find(x => x.nama === v);
-      setSTForm({
-        ...stForm,
-        dibuatOlehNama: v,
-        dibuatOlehJabatan: emp ? emp.jabatan || stForm.dibuatOlehJabatan : stForm.dibuatOlehJabatan
-      });
-    },
-    style: {
-      background: theme.surface,
-      border: `1px solid ${theme.border}`,
-      borderRadius: 8,
-      padding: "9px 12px",
-      color: theme.text,
-      fontSize: 14,
-      fontFamily: "inherit",
-      outline: "none",
-      width: "100%",
-      boxSizing: "border-box"
-    }
-  })), /*#__PURE__*/React.createElement(Input, {
-    label: "Jabatan",
-    value: stForm.dibuatOlehJabatan,
-    onChange: v => setSTForm({
-      ...stForm,
-      dibuatOlehJabatan: v
-    }),
-    placeholder: "cth. Service Manager"
-  })), /*#__PURE__*/React.createElement(Input, {
-    label: "Nama yang Mengetahui (Client)",
-    value: stForm.namaClient,
-    onChange: v => setSTForm({
-      ...stForm,
-      namaClient: v
-    }),
-    placeholder: "PIC client yang menandatangani 'Diketahui' (opsional)"
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      border: `1px solid ${theme.border}`,
-      borderRadius: 10,
-      padding: 14
-    }
-  }, /*#__PURE__*/React.createElement("p", {
-    style: {
-      margin: "0 0 10px",
-      fontSize: 13,
-      fontWeight: 600,
-      color: theme.text
-    }
-  }, "Menugaskan Kepada"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr",
-      gap: 10,
-      marginBottom: 10
-    }
-  }, /*#__PURE__*/React.createElement("input", {
-    type: "text",
-    list: "stEmployeeNames",
-    value: stAssigneeForm.nama,
-    placeholder: "Nama (pilih dari daftar atau ketik manual)",
-    onChange: e => {
-      const v = e.target.value;
-      const emp = employees.find(x => x.nama === v);
-      setSTAssigneeForm({
-        ...stAssigneeForm,
-        nama: v,
-        jabatan: emp ? emp.jabatan || stAssigneeForm.jabatan : stAssigneeForm.jabatan
-      });
-    },
-    style: {
-      background: theme.surface,
-      border: `1px solid ${theme.border}`,
-      borderRadius: 8,
-      padding: "9px 12px",
-      color: theme.text,
-      fontSize: 14,
-      fontFamily: "inherit",
-      outline: "none",
-      width: "100%",
-      boxSizing: "border-box"
-    }
-  }), /*#__PURE__*/React.createElement(Input, {
-    value: stAssigneeForm.jabatan,
-    onChange: v => setSTAssigneeForm({
-      ...stAssigneeForm,
-      jabatan: v
-    }),
-    placeholder: "Jabatan"
-  }), /*#__PURE__*/React.createElement(Input, {
-    value: stAssigneeForm.jenisPekerjaan,
-    onChange: v => setSTAssigneeForm({
-      ...stAssigneeForm,
-      jenisPekerjaan: v
-    }),
-    placeholder: "Jenis Pekerjaan"
-  }), /*#__PURE__*/React.createElement(Input, {
-    type: "date",
-    value: stAssigneeForm.berangkatTanggal,
-    onChange: v => setSTAssigneeForm({
-      ...stAssigneeForm,
-      berangkatTanggal: v
-    }),
-    placeholder: "Berangkat"
-  }), /*#__PURE__*/React.createElement(Input, {
-    type: "date",
-    value: stAssigneeForm.sampaiTanggal,
-    onChange: v => setSTAssigneeForm({
-      ...stAssigneeForm,
-      sampaiTanggal: v
-    }),
-    placeholder: "Sampai"
-  }), /*#__PURE__*/React.createElement(Input, {
-    value: stAssigneeForm.kendaraan,
-    onChange: v => setSTAssigneeForm({
-      ...stAssigneeForm,
-      kendaraan: v
-    }),
-    placeholder: "Kendaraan"
-  }), /*#__PURE__*/React.createElement(Btn, {
-    size: "sm",
-    onClick: addSTAssignee
-  }, "+ Add")), stAssigneeCart.length > 0 && /*#__PURE__*/React.createElement(Table, {
-    headers: ["Nama", "Jabatan", "Jenis Pekerjaan", "Berangkat", "Sampai", "Kendaraan", ""],
-    rows: stAssigneeCart.map((a, i) => [a.nama, a.jabatan || "-", a.jenisPekerjaan || "-", a.berangkatTanggal || "-", a.sampaiTanggal || "-", a.kendaraan || "-", /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "danger",
-      onClick: () => removeSTAssignee(i)
-    }, "×")])
-  }), stAssigneeCart.length === 0 && /*#__PURE__*/React.createElement("p", {
-    style: {
-      margin: 0,
-      fontSize: 12,
-      color: theme.muted,
-      textAlign: "center"
-    }
-  }, "Belum ada orang yang ditugaskan")), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 10,
-      justifyContent: "flex-end"
-    }
-  }, /*#__PURE__*/React.createElement(Btn, {
-    variant: "ghost",
-    onClick: () => {
-      closeForm();
-      setEditingSTId(null);
-    }
-  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
-    onClick: saveST
-  }, editingSTId ? "Simpan Perubahan" : "Simpan Surat Tugas")))), /*#__PURE__*/React.createElement(Modal, {
+  }, editingInspectionId ? "Simpan Perubahan" : "Simpan Inspection Report")))), /*#__PURE__*//*#__PURE__*/React.createElement(Modal, {
     open: visitModal,
     title: "Buat Kunjungan Kerja Baru",
     onClose: () => setVisitModal(false)
@@ -11369,6 +11379,12 @@ function QuotationUnit({
   // live from the current customers list, falling back to the snapshot only if the client record is
   // gone (e.g. deleted).
   const liveNama = q => (customers || []).find(c => c.id === q.customerId)?.nama || q.customerNama;
+  // "Value Quotation" everywhere in the list views below is shown EXCLUDING PPN — the company
+  // doesn't take PPN as revenue, so the number sales actually tracks is the pre-tax value (same
+  // convention already used by KPI Sales). q.total is still the tax-INCLUSIVE amount and is used
+  // as-is in the printed Quotation document and the Ringkasan (subtotal/pajak/total) breakdown in
+  // the detail modal, where showing PPN separately is correct/expected.
+  const preTaxQ = q => (Number(q.total) || 0) - (Number(q.pajak) || 0);
   const [modal, setModal] = useState(false);
   const [revisionOf, setRevisionOf] = useState(null); // original quotation being revised, if any
   const [editingQ, setEditingQ] = useState(null); // quotation being edited in-place (same nomor, no new revision)
@@ -11845,7 +11861,7 @@ function QuotationUnit({
       cursor: "pointer"
     },
     onClick: () => setDetail(q)
-  }, q.nomor), q.tanggal, liveNama(q), q.salesManagerNama, fmt(q.total), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(Badge, {
+  }, q.nomor), q.tanggal, liveNama(q), q.salesManagerNama, fmt(preTaxQ(q)), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(Badge, {
     color: statusColor[q.status]
   }, q.status), needsFollowUp(q) && /*#__PURE__*/React.createElement("div", {
     style: {
@@ -12040,12 +12056,12 @@ function QuotationUnit({
       fontSize: 15
     }
   }, "⚠ Follow-up Diperlukan — Belum ada kabar 14 hari sejak disetujui"), /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. Quotation", "Client", "Sales Manager", "Total", "Diperpanjang", "Aksi"],
+    headers: ["No. Quotation", "Client", "Sales Manager", "Total (excl. PPN)", "Diperpanjang", "Aksi"],
     rows: staleQ.map(q => [/*#__PURE__*/React.createElement("strong", {
       style: {
         color: theme.text
       }
-    }, q.nomor), liveNama(q), q.salesManagerNama || "-", fmt(q.total), q.extensionCount > 0 ? `${q.extensionCount}x` : "-", /*#__PURE__*/React.createElement("div", {
+    }, q.nomor), liveNama(q), q.salesManagerNama || "-", fmt(preTaxQ(q)), q.extensionCount > 0 ? `${q.extensionCount}x` : "-", /*#__PURE__*/React.createElement("div", {
       style: {
         display: "flex",
         gap: 8
@@ -12073,7 +12089,7 @@ function QuotationUnit({
     badgeColor: theme.accent,
     storageKey: "qu_ongoing"
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total", "Status", "Aksi"],
+    headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total (excl. PPN)", "Status", "Aksi"],
     rows: onGoingQ.map(buildRow),
     emptyMsg: "Tidak ada quotation on going"
   })), /*#__PURE__*/React.createElement(CollapsibleSection, {
@@ -12082,7 +12098,7 @@ function QuotationUnit({
     badgeColor: theme.cyan,
     storageKey: "qu_success"
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total", "Status", "Aksi"],
+    headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total (excl. PPN)", "Status", "Aksi"],
     rows: successQ.map(buildRow),
     emptyMsg: "Belum ada quotation yang menjadi SO"
   })), /*#__PURE__*/React.createElement(CollapsibleSection, {
@@ -12091,7 +12107,7 @@ function QuotationUnit({
     badgeColor: theme.muted,
     storageKey: "qu_closed"
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total", "Status", "Aksi"],
+    headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total (excl. PPN)", "Status", "Aksi"],
     rows: closedQ.map(buildRow),
     emptyMsg: "Belum ada quotation yang closed"
   })), /*#__PURE__*/React.createElement(Modal, {
@@ -12747,6 +12763,10 @@ function QuotationPS({
   // rename in Database Client needs to be resolved live via customerId, not read from the stored
   // snapshot, otherwise QUOTATION CLOSED (and every other list here) keeps showing the old name.
   const liveNama = q => (customers || []).find(c => c.id === q.customerId)?.nama || q.customerNama;
+  // "Value Quotation" everywhere in the list views below is shown EXCLUDING PPN (same convention
+  // as KPI Sales / Unit Quotation). q.total is still tax-inclusive and used as-is in the printed
+  // Quotation document and the Ringkasan (subtotal/pajak/total) breakdown in the detail modal.
+  const preTaxQ = q => (Number(q.total) || 0) - (Number(q.pajak) || 0);
   const [qpsSearch, setQpsSearch] = useState("");
   const quotationsPSFiltered = (qpsSearch.trim() ? quotationsPS.filter(q => [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(qpsSearch.trim().toLowerCase()))) : quotationsPS).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const [modal, setModal] = useState(false);
@@ -13269,7 +13289,7 @@ function QuotationPS({
       cursor: "pointer"
     },
     onClick: () => setDetail(q)
-  }, q.nomor), q.tanggal, liveNama(q), q.salesManagerNama || "-", fmt(q.total), q.fromRecIds?.length ? /*#__PURE__*/React.createElement(Badge, {
+  }, q.nomor), q.tanggal, liveNama(q), q.salesManagerNama || "-", fmt(preTaxQ(q)), q.fromRecIds?.length ? /*#__PURE__*/React.createElement(Badge, {
     color: theme.purple
   }, "Dari Mekanik") : /*#__PURE__*/React.createElement(Badge, {
     color: theme.muted
@@ -13454,7 +13474,7 @@ function QuotationPS({
     style: {
       color: theme.text
     }
-  }, q.nomor), " — ", liveNama(q), " — ", fmt(q.total), q.extensionCount > 0 && ` — sudah diperpanjang ${q.extensionCount}x`), /*#__PURE__*/React.createElement("div", {
+  }, q.nomor), " — ", liveNama(q), " — ", fmt(preTaxQ(q)), q.extensionCount > 0 && ` — sudah diperpanjang ${q.extensionCount}x`), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 8
@@ -13480,7 +13500,7 @@ function QuotationPS({
     badgeColor: theme.accent,
     storageKey: "qps_ongoing"
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total", "Sumber", "Status", "Aksi"],
+    headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total (excl. PPN)", "Sumber", "Status", "Aksi"],
     rows: qpsOnGoing.map(buildRowPS),
     emptyMsg: "Tidak ada quotation on going"
   })), /*#__PURE__*/React.createElement(CollapsibleSection, {
@@ -13489,7 +13509,7 @@ function QuotationPS({
     badgeColor: theme.cyan,
     storageKey: "qps_success"
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total", "Sumber", "Status", "Aksi"],
+    headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total (excl. PPN)", "Sumber", "Status", "Aksi"],
     rows: qpsSuccess.map(buildRowPS),
     emptyMsg: "Belum ada quotation yang menjadi SO"
   })), /*#__PURE__*/React.createElement(CollapsibleSection, {
@@ -13498,7 +13518,7 @@ function QuotationPS({
     badgeColor: theme.muted,
     storageKey: "qps_closed"
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total", "Sumber", "Status", "Aksi"],
+    headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total (excl. PPN)", "Sumber", "Status", "Aksi"],
     rows: qpsClosed.map(buildRowPS),
     emptyMsg: "Belum ada quotation yang closed"
   })), /*#__PURE__*/React.createElement(Modal, {
@@ -30965,8 +30985,12 @@ function KPISalesModule({
   // hanya karena dibandingkan ke data kumulatif bertahun-tahun.
   const monthsSpanFor = (dari, sampai) => {
     if (!dari || !sampai) return 1;
-    const days = (new Date(sampai) - new Date(dari)) / (1000 * 60 * 60 * 24) + 1;
-    return Math.max(1, Math.ceil(days / 30));
+    // Calendar-month count (not days/30, which rounds a full 365-day year up to 13 months) — e.g.
+    // Jan 1 to Dec 31 of the same year is exactly 12 months, not 13.
+    const d1 = new Date(dari);
+    const d2 = new Date(sampai);
+    const months = (d2.getFullYear() - d1.getFullYear()) * 12 + (d2.getMonth() - d1.getMonth()) + 1;
+    return Math.max(1, months);
   };
   const earliestDataDate = () => {
     const dates = [...quotationsUnit.map(q => q.tanggal), ...(quotationsPS || []).map(q => q.tanggal), ...salesOrders.map(so => so.tanggal), ...salesActivities.map(a => a.tanggal)].filter(Boolean).sort();
@@ -31038,6 +31062,14 @@ function KPISalesModule({
     // — these can land in very different periods for a quotation that took a while to close.
     const myQuotSuccessAll = myQuotAll.filter(q => q.status === "Sudah jadi SO");
     const myQuotSuccess = !kpiPeriodeAktif ? myQuotSuccessAll : myQuotSuccessAll.filter(q => inKpiPeriode(kpiPeriodeBasis === "so" ? soDateForQuot(q.nomor) : q.tanggal));
+    // Target SO achievement — ALWAYS measured against the current calendar month/year, independent
+    // of whatever periode filter is selected above on the main KPI Sales screen, so "apakah target
+    // bulanan/tahunan tercapai" always answers for right now regardless of what's being reviewed.
+    const dateForSuccessQ = q => kpiPeriodeBasis === "so" ? soDateForQuot(q.nomor) : q.tanggal;
+    const curMonthStr = today().slice(0, 7);
+    const curYearStr = today().slice(0, 4);
+    const thisMonthRevenue = myQuotSuccessAll.filter(q => (dateForSuccessQ(q) || "").startsWith(curMonthStr)).reduce((sum, q) => sum + preTax(q), 0);
+    const thisYearRevenue = myQuotSuccessAll.filter(q => (dateForSuccessQ(q) || "").startsWith(curYearStr)).reduce((sum, q) => sum + preTax(q), 0);
     const valueQuotationSO = myQuotSuccess.reduce((sum, q) => sum + preTax(q), 0);
     const soDiterimaCount = myQuotSuccess.length;
     const conversionRate = quotCount ? Math.round(soDiterimaCount / quotCount * 100) : 0;
@@ -31058,9 +31090,14 @@ function KPISalesModule({
     // Pillar 1: Prospecting Activity — drawn from Sales Activity log entries.
     const myActivitiesAll = salesActivities.filter(a => a.salesNama === nama);
     const myActivitiesP = kpiPeriodeAktif ? myActivitiesAll.filter(a => inKpiPeriode(a.tanggal)) : myActivitiesAll;
-    const newContactsCount = myActivitiesP.filter(a => a.isNewContact).length;
+    // Kontak Baru = new Database Client entries owned by this sales manager, counted by the
+    // client's OWN creation date (tanggalDibuat, stamped once in CustomerDB and never touched
+    // again on later edits) — not a separately-logged "isNewContact" Sales Activity entry, which
+    // only ever existed for the non-owner submission path and missed clients added directly by
+    // Owner/GM/HRD on a sales manager's behalf. Legacy clients created before this field existed
+    // have no tanggalDibuat and are simply not counted (their real creation date is unknown).
+    const newContactsCount = (customers || []).filter(c => c.salesManager === nama && c.tanggalDibuat && (!kpiPeriodeAktif || inKpiPeriode(c.tanggalDibuat))).length;
     const followupCount = myActivitiesP.filter(a => ["Kunjungan", "Telepon", "WhatsApp"].includes(a.jenisAktivitas)).length;
-    const demosCount = myActivitiesP.filter(a => a.jenisAktivitas === "Demo").length;
     const sectorsApproached = new Set(myActivitiesP.map(a => a.sector).filter(Boolean)).size;
     // Pillar 3 add-ons: NEW-customer revenue share, using each successful quotation's linked SO to
     // determine NEW vs RETURNING (see customerTypeForSO — first-ever SO for that customerId = NEW).
@@ -31071,10 +31108,16 @@ function KPISalesModule({
     });
     const newCustomerRevenuePct = valueQuotationSO ? Math.round(newCustomerRevenue / valueQuotationSO * 100) : 0;
     const avgDealSize = soDiterimaCount ? Math.round(valueQuotationSO / soDiterimaCount) : 0;
-    // Pillar 4: Customer Health — repeat-order rate & active Key Accounts, from this person's SOs.
+    // Pillar 4: Customer Health — repeat-order rate, from this person's SOs. (The "active Key
+    // Accounts" component that used to also live here was removed per request, along with the
+    // manual Key Account flag on Database Client — see CustomerDB.)
     const mySOs = salesOrders.filter(so => so.salesManagerNama === nama && (!kpiPeriodeAktif || inKpiPeriode(kpiPeriodeBasis === "so" ? so.tanggal : quotDateByNomor(so.sourceNomor) || so.tanggal)));
+    // Repeat Order Rate = of this person's Sales Orders (in the selected period), what % belong to
+    // a RETURNING customer (i.e. NOT that customer's first-ever SO) rather than a NEW one — see
+    // customerTypeForSO, which looks at each customer's full SO history company-wide (earliest SO
+    // date = NEW, anything after = RETURNING) so it reflects genuine repeat business, not just
+    // "more than one SO in the chosen date range".
     const repeatOrderRate = mySOs.length ? Math.round(mySOs.filter(so => customerTypeForSO(salesOrders, so) === "RETURNING").length / mySOs.length * 100) : 0;
-    const keyAccountsActive = new Set(mySOs.filter(so => (customers || []).find(c => c.id === so.customerId)?.keyAccount).map(so => so.customerId)).size;
     return {
       nama,
       valueQuotation,
@@ -31087,12 +31130,12 @@ function KPISalesModule({
       meetingCount,
       newContactsCount,
       followupCount,
-      demosCount,
       sectorsApproached,
       newCustomerRevenuePct,
+      thisMonthRevenue,
+      thisYearRevenue,
       avgDealSize,
-      repeatOrderRate,
-      keyAccountsActive
+      repeatOrderRate
     };
   });
   // Peer-relative normalization: each SCORED metric is measured against the best performer
@@ -31116,7 +31159,6 @@ function KPISalesModule({
       revenueTarget: (targets.revenueTarget || 0) * targetMonthsSpan,
       newContactsTarget: (targets.newContactsTarget || 0) * targetMonthsSpan,
       followupTarget: (targets.followupTarget || 0) * targetMonthsSpan,
-      demosTarget: (targets.demosTarget || 0) * targetMonthsSpan,
       quotationsTarget: (targets.quotationsTarget || 0) * targetMonthsSpan
     };
     // Pillar 1 — Prospecting Activity (15%): kontak baru, follow-up, diversifikasi sector.
@@ -31124,11 +31166,11 @@ function KPISalesModule({
     const p1b = Math.min(100, Math.round(s.followupCount / (effTargets.followupTarget || 1) * 100));
     const p1c = Math.min(100, Math.round(s.sectorsApproached / 3 * 100));
     const pillarProspecting = Math.round((p1a + p1b + p1c) / 3);
-    // Pillar 2 — Pipeline Development (25%): jumlah quotation, nilai pipeline, jumlah demo.
+    // Pillar 2 — Pipeline Development (25%): jumlah quotation, nilai pipeline. (Jumlah Demo removed
+    // per request — no longer part of this pillar.)
     const p2a = Math.min(100, Math.round(s.quotCount / (effTargets.quotationsTarget || 1) * 100));
     const p2b = Math.round(s.valueQuotation / maxValueQuotation * 100);
-    const p2c = Math.min(100, Math.round(s.demosCount / (effTargets.demosTarget || 1) * 100));
-    const pillarPipeline = Math.round((p2a + p2b + p2c) / 3);
+    const pillarPipeline = Math.round((p2a + p2b) / 2);
     // Pillar 3 — Conversion & Revenue (40%): conversion (cohort-gated), pencapaian target revenue,
     // porsi revenue dari customer BARU (menghindari over-reliance pada existing account saja).
     const conversionGated = s.quotCount < MIN_QUOT_SAMPLE;
@@ -31136,11 +31178,12 @@ function KPISalesModule({
     const p3b = effTargets.revenueTarget > 0 ? Math.min(100, Math.round(s.valueQuotationSO / effTargets.revenueTarget * 100)) : Math.round(s.valueQuotationSO / maxValueQuotationSO * 100);
     const p3c = Math.min(100, s.newCustomerRevenuePct);
     const pillarConversion = Math.round((p3a + p3b + p3c) / 3);
-    // Pillar 4 — Customer Health (20%): bayar tepat waktu, repeat-order rate, Key Account aktif.
+    // Pillar 4 — Customer Health (20%): bayar tepat waktu, repeat-order rate. (Key Account aktif
+    // removed per request — no longer part of this pillar, and the underlying Key Account flag was
+    // removed from Database Client entirely.)
     const p4a = s.onTimeRate;
     const p4b = s.repeatOrderRate;
-    const p4c = Math.min(100, Math.round(s.keyAccountsActive / 2 * 100));
-    const pillarHealth = Math.round((p4a + p4b + p4c) / 3);
+    const pillarHealth = Math.round((p4a + p4b) / 2);
     const totalScore = Math.round(pillarProspecting * 0.15 + pillarPipeline * 0.25 + pillarConversion * 0.40 + pillarHealth * 0.20);
     // Warning flags — informational, shown as badges, don't affect the score.
     const flags = [];
@@ -31206,7 +31249,6 @@ function KPISalesModule({
         revenueTarget: Number(targetForm.revenueTarget) || 0,
         newContactsTarget: Number(targetForm.newContactsTarget) || 0,
         followupTarget: Number(targetForm.followupTarget) || 0,
-        demosTarget: Number(targetForm.demosTarget) || 0,
         quotationsTarget: Number(targetForm.quotationsTarget) || 0
       }
     }));
@@ -31453,7 +31495,32 @@ function KPISalesModule({
       fontSize: 11,
       marginTop: 4
     }
-  }, "Target dihitung untuk ", scorecardStat.targetMonthsSpan, " bulan (target bulanan × ", scorecardStat.targetMonthsSpan, ")")), scorecardStat.flags.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, "Periode: ", kpiPeriodeAktif ? `${kpiPeriodeDari ? fmtDateRev(kpiPeriodeDari) : "awal data"} s/d ${kpiPeriodeSampai ? fmtDateRev(kpiPeriodeSampai) : "sekarang"}` : "Semua Data (all-time)", " — target dihitung untuk ", scorecardStat.targetMonthsSpan, " bulan (target bulanan × ", scorecardStat.targetMonthsSpan, ")")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: `1px solid ${theme.border}`,
+      borderRadius: 10,
+      padding: 12,
+      display: "flex",
+      flexDirection: "column",
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      fontWeight: 600,
+      color: theme.text
+    }
+  }, "🎯 Target SO — Rp ", fmtNum(scorecardStat.targets.revenueTarget || 0), "/bulan (independen dari filter periode di atas)"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Bulan Ini: ", fmtMoney(scorecardStat.thisMonthRevenue, "IDR"), (scorecardStat.targets.revenueTarget || 0) > 0 && ` / ${fmtMoney(scorecardStat.targets.revenueTarget, "IDR")} (${Math.round(scorecardStat.thisMonthRevenue / scorecardStat.targets.revenueTarget * 100)}%)`), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Tahun Ini (YTD): ", fmtMoney(scorecardStat.thisYearRevenue, "IDR"), (scorecardStat.targets.revenueTarget || 0) > 0 && ` / ${fmtMoney(scorecardStat.targets.revenueTarget * 12, "IDR")} (${Math.round(scorecardStat.thisYearRevenue / (scorecardStat.targets.revenueTarget * 12) * 100)}%)`)), scorecardStat.flags.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       flexDirection: "column",
@@ -31482,7 +31549,7 @@ function KPISalesModule({
   }, {
     title: "Pillar 2 — Pipeline Development (bobot 25%)",
     score: scorecardStat.pillarPipeline,
-    rows: [["Jumlah Quotation", scorecardStat.quotCount, scorecardStat.effTargets.quotationsTarget], ["Value Quotation", fmtMoney(scorecardStat.valueQuotation, "IDR"), "-"], ["Jumlah Demo", scorecardStat.demosCount, scorecardStat.effTargets.demosTarget]]
+    rows: [["Jumlah Quotation", scorecardStat.quotCount, scorecardStat.effTargets.quotationsTarget], ["Value Quotation", fmtMoney(scorecardStat.valueQuotation, "IDR"), "-"]]
   }, {
     title: "Pillar 3 — Conversion & Revenue (bobot 40%)",
     score: scorecardStat.pillarConversion,
@@ -31490,7 +31557,7 @@ function KPISalesModule({
   }, {
     title: "Pillar 4 — Customer Health (bobot 20%)",
     score: scorecardStat.pillarHealth,
-    rows: [["Bayar Tepat Waktu", `${scorecardStat.onTimeRate}%`, "-"], ["Repeat Order Rate", `${scorecardStat.repeatOrderRate}%`, "-"], ["Key Account Aktif", scorecardStat.keyAccountsActive, "-"]]
+    rows: [["Bayar Tepat Waktu", `${scorecardStat.onTimeRate}%`, "-"], ["Repeat Order Rate", `${scorecardStat.repeatOrderRate}%`, "-"]]
   }].map((pillar, pi) => /*#__PURE__*/React.createElement("div", {
     key: pi,
     style: {
@@ -31566,14 +31633,6 @@ function KPISalesModule({
     onChange: v => setTargetForm({
       ...targetForm,
       followupTarget: v
-    })
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "Target Demo per Bulan",
-    type: "number",
-    value: targetForm.demosTarget,
-    onChange: v => setTargetForm({
-      ...targetForm,
-      demosTarget: v
     })
   }), /*#__PURE__*/React.createElement(Input, {
     label: "Target Jumlah Quotation per Bulan",
