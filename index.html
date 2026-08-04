@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-04.9";
+const APP_BUILD = "2026-08-04.10";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -3599,6 +3599,58 @@ function Badge({
       whiteSpace: "nowrap"
     }
   }, children);
+}
+// Shared Subtotal/Diskon/PPN/Total breakdown box for preview modals (Quotation Unit, Quotation
+// PS, Sales Order). Bug fix: these preview modals used to jump straight from the items table to
+// a bare "Total" figure, with no Subtotal/Diskon/PPN breakdown — so a Quotation or SO with a
+// discount looked identical to one without in the preview, even though the discount WAS correctly
+// applied to the total and DID show up on the printed document. Mirrors the breakdown already
+// shown in Invoice's preview modal.
+function PriceBreakdownBox({
+  subtotal,
+  diskon,
+  diskonLabel = "Diskon",
+  pajak,
+  pajakLabel = "PPN",
+  total
+}) {
+  const row = (label, value, negative) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, /*#__PURE__*/React.createElement("span", null, label), /*#__PURE__*/React.createElement("span", {
+    style: negative ? {
+      color: theme.red
+    } : undefined
+  }, negative ? "-" : "", fmt(value)));
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: theme.surface,
+      borderRadius: 8,
+      padding: 14,
+      display: "flex",
+      flexDirection: "column",
+      gap: 4
+    }
+  }, row("Subtotal", subtotal || 0), diskon > 0 && row(diskonLabel, diskon, true), row(pajakLabel, pajak || 0), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      color: theme.text,
+      fontSize: 16,
+      fontWeight: 700,
+      borderTop: `1px solid ${theme.border}`,
+      paddingTop: 8,
+      marginTop: 4
+    }
+  }, /*#__PURE__*/React.createElement("span", null, "TOTAL"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.green
+    }
+  }, fmt(total))));
 }
 function Modal({
   open,
@@ -12187,14 +12239,13 @@ function QuotationUnit({
   }, detail.revisiDari))), /*#__PURE__*/React.createElement(Table, {
     headers: ["Unit Code", "Unit Name", "Qty", "Harga", "Subtotal"],
     rows: detail.items.map(it => [it.unitCode, it.unitName, fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)])
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      textAlign: "right",
-      color: theme.green,
-      fontWeight: 700,
-      fontSize: 16
-    }
-  }, "Total: ", fmt(detail.total)), detail.rejectReason && /*#__PURE__*/React.createElement("p", {
+  }), /*#__PURE__*/React.createElement(PriceBreakdownBox, {
+    subtotal: detail.subtotal,
+    diskon: detail.clientDiskon,
+    diskonLabel: detail.clientDiskonPersen ? `Discount (${detail.clientDiskonPersen}%)` : "Discount",
+    pajak: detail.pajak,
+    total: detail.total
+  }), detail.rejectReason && /*#__PURE__*/React.createElement("p", {
     style: {
       color: theme.red,
       fontSize: 13
@@ -13658,14 +13709,13 @@ function QuotationPS({
   }, detail.revisiDari)), /*#__PURE__*/React.createElement(Table, {
     headers: ["Part Number", "Part Name", "Qty", "Harga", "Subtotal"],
     rows: detail.items.map(it => [it.partNumber, it.partName, fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)])
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      textAlign: "right",
-      color: theme.green,
-      fontWeight: 700,
-      fontSize: 16
-    }
-  }, "Total: ", fmt(detail.total)), isOwnerLike && detail.salesDiscount?.aktif && /*#__PURE__*/React.createElement(Card, {
+  }), /*#__PURE__*/React.createElement(PriceBreakdownBox, {
+    subtotal: detail.subtotal,
+    diskon: detail.clientDiskon,
+    diskonLabel: detail.clientDiskonPersen ? `Discount (${detail.clientDiskonPersen}%)` : "Discount",
+    pajak: detail.pajak,
+    total: detail.total
+  }), isOwnerLike && detail.salesDiscount?.aktif && /*#__PURE__*/React.createElement(Card, {
     style: {
       background: theme.yellow + "11",
       border: `1px solid ${theme.yellow}44`
@@ -15056,14 +15106,12 @@ function SalesOrderModule({
   }, `BOM untuk Unit ${bomRevisedUnits(detail.bomSnapshot, units).join(", ")} telah direvisi di Master Unit setelah SO ini dibuat. Data item di SO ini TIDAK otomatis berubah — cek Item Requisition terkait (gunakan "Cek Ulang vs BOM Terbaru") bila perlu menyesuaikan.`)), /*#__PURE__*/React.createElement(Table, {
     headers: detail.tipe === "Unit" ? ["Unit Code", "Unit Name", "Description", "Qty", "Harga", "Subtotal"] : ["Part Number", "Part Name", "Description", "Qty", "Harga", "Subtotal"],
     rows: detail.items.map(it => detail.tipe === "Unit" ? [it.unitCode, it.unitName, it.partDescription || it.description || "-", fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)] : [it.partNumber, it.partName, it.partDescription || it.description || "-", fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)])
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      textAlign: "right",
-      color: theme.green,
-      fontWeight: 700,
-      fontSize: 16
-    }
-  }, "Total: ", fmt(detail.total)), detail.noPoClient && /*#__PURE__*/React.createElement("p", {
+  }), /*#__PURE__*/React.createElement(PriceBreakdownBox, {
+    subtotal: detail.subtotal,
+    diskon: detail.diskon,
+    pajak: detail.pajak,
+    total: detail.total
+  }), detail.noPoClient && /*#__PURE__*/React.createElement("p", {
     style: {
       margin: 0,
       fontSize: 13,
@@ -21912,6 +21960,13 @@ function InvoiceModule({
       return { ...it, harga: discHarga, subtotal: discSubtotal, hargaSebelumDiskonSO: it.harga, subtotalSebelumDiskonSO: rawSubtotal };
     });
   };
+  // Transparency fix: applySoDiskon (above) bakes the SO's discount straight into each item's
+  // unit price, so the invoice's own "Diskon" line (a separate, independently-entered field) stays
+  // 0 even when the SO had a real discount — making it look like no discount was applied at all,
+  // even though the item prices ARE already net of it. Recover the actual discount amount from the
+  // hargaSebelumDiskonSO/subtotalSebelumDiskonSO snapshot applySoDiskon leaves on each item, so it
+  // can be shown as its own line in the preview/print instead of being invisible.
+  const invoiceSoDiskonAmount = inv => (inv?.items || []).reduce((s, it) => s + Math.max(0, (it.subtotalSebelumDiskonSO ?? it.subtotal ?? 0) - (it.subtotal ?? 0)), 0);
   const availableSO = salesOrders.filter(so => {
     const rem = remainingTermin(so);
     if (rem === null) return soUninvoicedItems(so).length > 0; // legacy: keep offering until all items invoiced
@@ -22941,7 +22996,18 @@ function InvoiceModule({
       color: theme.muted,
       fontSize: 13
     }
-  }, /*#__PURE__*/React.createElement("span", null, "Subtotal"), /*#__PURE__*/React.createElement("span", null, fmt(detail.subtotal))), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("span", null, "Subtotal"), /*#__PURE__*/React.createElement("span", null, fmt(detail.subtotal))), invoiceSoDiskonAmount(detail) > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, /*#__PURE__*/React.createElement("span", null, "Diskon dari SO (sudah termasuk di harga item)"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.red
+    }
+  }, "-", fmt(invoiceSoDiskonAmount(detail)))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
@@ -23019,7 +23085,7 @@ function InvoiceModule({
       uangMuka: detail.uangMuka,
       total: detail.total,
       catatan: detail.catatan,
-      extraInfoRows: [["No. Purchase", detail.noPoClient || "-"], ...(detail.terminLabel ? [["Termin", `${detail.terminLabel} (${detail.terminPercent}%) dari total SO ${fmt(detail.soTotal)}`]] : []), ["Term of Payment", detail.tipePembayaran], ...(detail.tipePembayaran === "TEMPO" ? [...(detail.jumlahHariTempo ? [["Jumlah Hari", `${detail.jumlahHariTempo} hari`]] : []), ["Jatuh Tempo", detail.tanggalJatuhTempo]] : [])],
+      extraInfoRows: [["No. Purchase", detail.noPoClient || "-"], ...(invoiceSoDiskonAmount(detail) > 0 ? [["Diskon dari SO (sudah termasuk di harga item)", fmt(invoiceSoDiskonAmount(detail))]] : []), ...(detail.terminLabel ? [["Termin", `${detail.terminLabel} (${detail.terminPercent}%) dari total SO ${fmt(detail.soTotal)}`]] : []), ["Term of Payment", detail.tipePembayaran], ...(detail.tipePembayaran === "TEMPO" ? [...(detail.jumlahHariTempo ? [["Jumlah Hari", `${detail.jumlahHariTempo} hari`]] : []), ["Jatuh Tempo", detail.tanggalJatuhTempo]] : [])],
       terbilangText: terbilang(detail.total),
       bankInfoText: "BCA KCP Sunter Bisma<br/>A/N PT. FORESTA TRANSTEK<br/>A/C 5820822678",
       hideCreatedBy: true,
