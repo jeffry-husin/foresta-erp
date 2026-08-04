@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-04.8";
+const APP_BUILD = "2026-08-04.9";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -13376,7 +13376,23 @@ function QuotationPS({
     variant: "danger",
     onClick: () => deleteQuotationPS(q)
   }, "✕"))];
-  const qpsOnGoing = quotationsPSFiltered.filter(q => !["Sudah jadi SO", "Closed"].includes(q.status));
+  // Bug fix (same root cause as Unit Quotation's quotIsLatestRevision, see line ~11951): when a
+  // Parts & Service Quotation is revised, the OLDER revision never gets its own status changed —
+  // it just sits there under its old status — so every revision in a family (e.g. SQ-009 through
+  // SQ-009-R4) kept showing here forever instead of only the latest one. Filter ON GOING down to
+  // only the latest revision in each family; superseded older revisions are dead history.
+  const quotIsLatestRevision = (arr, q) => {
+    const fam = q.revisiDari || q.nomor;
+    const members = arr.filter(x => (x.revisiDari || x.nomor) === fam);
+    if (members.length <= 1) return true;
+    const revNum = x => {
+      const m = /-R(\d+)$/.exec(x.nomor || "");
+      return m ? parseInt(m[1], 10) : -1;
+    };
+    const latest = members.reduce((a, b) => revNum(b) > revNum(a) ? b : a);
+    return latest.nomor === q.nomor;
+  };
+  const qpsOnGoing = quotationsPSFiltered.filter(q => !["Sudah jadi SO", "Closed"].includes(q.status) && quotIsLatestRevision(quotationsPS, q));
   const qpsSuccess = quotationsPSFiltered.filter(q => q.status === "Sudah jadi SO");
   const qpsClosed = quotationsPSFiltered.filter(q => q.status === "Closed");
   const qpsStaleQ = qpsOnGoing.filter(needsFollowUp);
