@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-04.4";
+const APP_BUILD = "2026-08-04.5";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -3540,12 +3540,14 @@ function Table({
     }, onEdit && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "ghost",
+      title: "Edit",
       onClick: () => onEdit(absIdx)
-    }, "Edit"), onDelete && /*#__PURE__*/React.createElement(Btn, {
+    }, "✏️"), onDelete && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "danger",
+      title: "Hapus",
       onClick: () => onDelete(absIdx)
-    }, "Hapus")));
+    }, "✕")));
   })))), sortedRows.length > pageSize && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -9907,7 +9909,7 @@ function MekanikReport({
       id: d.visitId,
       tanggal: d.tanggalMulai
     }, "dar", d)
-  }, "✏️ Edit"), /*#__PURE__*/React.createElement(Btn, {
+  }, "✏️"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "success",
     onClick: () => approveDar(d)
@@ -9944,7 +9946,7 @@ function MekanikReport({
       tanggal: r.tanggal,
       customerId: r.customerId
     }, "partrec")
-  }, "✏️ Edit"), /*#__PURE__*/React.createElement(Btn, {
+  }, "✏️"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "success",
     onClick: () => approveRec(r)
@@ -10039,7 +10041,7 @@ function MekanikReport({
       setViewDar(null);
       openForm(v, "dar", viewDar);
     }
-  }, "✏️ Edit"), /*#__PURE__*/React.createElement(Btn, {
+  }, "✏️"), /*#__PURE__*/React.createElement(Btn, {
     variant: "danger",
     onClick: () => {
       rejectDar(viewDar);
@@ -10101,7 +10103,7 @@ function MekanikReport({
       setViewRec(null);
       openForm(v, "partrec");
     }
-  }, "✏️ Edit"), /*#__PURE__*/React.createElement(Btn, {
+  }, "✏️"), /*#__PURE__*/React.createElement(Btn, {
     variant: "danger",
     onClick: () => {
       rejectRec(viewRec);
@@ -10351,7 +10353,7 @@ function MekanikReport({
     size: "sm",
     variant: "ghost",
     onClick: () => setEditingJenisPekerjaan(true)
-  }, "✏️ Edit"))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+  }, "✏️"))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.muted
     }
@@ -11918,7 +11920,7 @@ function QuotationUnit({
     size: "sm",
     variant: "danger",
     onClick: () => deleteQuotation(q)
-  }, "Hapus"))];
+  }, "✕"))];
   // Bug fix: when a quotation is revised, the OLDER revision (e.g. the original UQ-024 once
   // UQ-024-R1 exists) never gets its own status changed — it just sits there, still "Disetujui
   // GM" — so it kept showing in ON GOING forever even after the newer revision became an SO
@@ -12041,7 +12043,7 @@ function QuotationUnit({
     size: "sm",
     variant: "ghost",
     onClick: () => openEdit(q)
-  }, "✏️ Edit"), /*#__PURE__*/React.createElement(Btn, {
+  }, "✏️"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "success",
     onClick: () => gmApprove(q)
@@ -13346,7 +13348,7 @@ function QuotationPS({
     size: "sm",
     variant: "danger",
     onClick: () => deleteQuotationPS(q)
-  }, "Hapus"))];
+  }, "✕"))];
   const qpsOnGoing = quotationsPSFiltered.filter(q => !["Sudah jadi SO", "Closed"].includes(q.status));
   const qpsSuccess = quotationsPSFiltered.filter(q => q.status === "Sudah jadi SO");
   const qpsClosed = quotationsPSFiltered.filter(q => q.status === "Closed");
@@ -13447,7 +13449,7 @@ function QuotationPS({
     size: "sm",
     variant: "ghost",
     onClick: () => openEdit(q)
-  }, "✏️ Edit"), /*#__PURE__*/React.createElement(Btn, {
+  }, "✏️"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "success",
     onClick: () => gmApprove(q)
@@ -15095,7 +15097,7 @@ function SalesOrderModule({
     onClick: () => {
       openEditSO(detail);
     }
-  }, "✏️ Revisi")))), /*#__PURE__*/React.createElement(Modal, {
+  }, "✏️")))), /*#__PURE__*/React.createElement(Modal, {
     open: !!editSO,
     title: `Revisi ${editSO?.nomor}`,
     onClose: () => {
@@ -16277,13 +16279,13 @@ function ItemRequisitionModule({
       onEditIR(detail);
       setDetail(null);
     }
-  }, "✏️ Revisi"), canManage && React.createElement(Btn, {
+  }, "✏️"), canManage && React.createElement(Btn, {
     variant: "danger",
     onClick: () => {
       deleteIR(detail);
       setDetail(null);
     }
-  }, "🗑️ Hapus")))), React.createElement(Modal, {
+  }, "✕")))), React.createElement(Modal, {
     open: !!recheckModal,
     title: `Cek Ulang vs BOM Terbaru — ${recheckModal?.ir?.nomor || ""}`,
     onClose: () => setRecheckModal(null),
@@ -17401,7 +17403,7 @@ function PurchaseOrderModule({
     size: "sm",
     variant: "ghost",
     onClick: () => openRevise(p)
-  }, "✏️ Edit"), /*#__PURE__*/React.createElement(Btn, {
+  }, "✏️"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
     onClick: () => openEditCatatanPO(p)
@@ -17487,7 +17489,7 @@ function PurchaseOrderModule({
         size: "sm",
         variant: "ghost",
         onClick: () => openRevise(p)
-      }, "✏️ Edit"), (isHandler || isMaria || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+      }, "✏️"), (isHandler || isMaria || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
         size: "sm",
         variant: "ghost",
         onClick: () => openEditTanggalPO(p)
@@ -19333,6 +19335,22 @@ function GoodsReceiptModule({
     setPoList(arrPO);
     setConfirmModal(null);
   };
+  // Superuser (Owner/GM/Finance Director) delete for an Internal DO — mirrors the existing warning
+  // pattern used by the Goods Receipt row delete above: if the DO was already confirmed at Workshop
+  // (stock already incremented), deleting the record does NOT automatically reverse that stock
+  // change, so the confirming message says so explicitly rather than silently going out of sync.
+  const deleteInternalDO = d => {
+    const isConfirmed = d.statusKonfirmasi === "Diterima Workshop";
+    const msg = isConfirmed ? `Hapus Internal DO ${d.nomor}? Catatan: stock yang sudah ditambahkan saat konfirmasi Workshop TIDAK otomatis dikurangi — sesuaikan stock secara manual di Master Part bila perlu.` : `Hapus Internal DO ${d.nomor}?`;
+    if (!confirm(msg)) return;
+    setInternalDOs(internalDOs.filter(x => x !== d));
+    logAudit(store, session, {
+      module: "Internal Delivery Order",
+      docNomor: d.nomor,
+      action: "Hapus",
+      detail: `Dihapus oleh ${session.nama}`
+    });
+  };
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -19758,7 +19776,12 @@ function GoodsReceiptModule({
     title: "Internal Delivery Order (Office → Workshop)",
     count: internalDOs.length,
     badgeColor: theme.cyan,
-    storageKey: "gr_internal_do"
+    storageKey: "gr_internal_do",
+    // Defaults to OPEN (unlike most CollapsibleSections) because this is where the final Workshop
+    // stock-confirmation action lives — leaving it collapsed by default meant staff (esp. Logistic,
+    // who was only just granted access to this module) never noticed the "Konfirmasi Diterima
+    // Workshop" button was even here.
+    defaultOpen: true
   }, /*#__PURE__*/React.createElement("p", {
     style: {
       margin: "0 0 12px",
@@ -19799,12 +19822,18 @@ function GoodsReceiptModule({
     }), d.statusKonfirmasi === "Menunggu Diterima Workshop" && (isJhon || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "ghost",
+      title: "Edit",
       onClick: () => openEditIDO(d)
-    }, "✏️ Edit"), d.statusKonfirmasi === "Menunggu Diterima Workshop" && (isJhon || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+    }, "✏️"), d.statusKonfirmasi === "Menunggu Diterima Workshop" && (isJhon || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "success",
       onClick: () => openConfirm(d)
-    }, "✓ Konfirmasi Diterima Workshop"))]),
+    }, "✓ Konfirmasi Diterima Workshop"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "danger",
+      title: "Hapus",
+      onClick: () => deleteInternalDO(d)
+    }, "✕"))]),
     emptyMsg: "Belum ada Internal DO"
   })), /*#__PURE__*/React.createElement(Modal, {
     open: !!detailIDO,
@@ -19907,7 +19936,7 @@ function GoodsReceiptModule({
       openEditIDO(detailIDO);
       setDetailIDO(null);
     }
-  }, "✏️ Edit")))), /*#__PURE__*/React.createElement(Modal, {
+  }, "✏️")))), /*#__PURE__*/React.createElement(Modal, {
     open: !!editIDO,
     title: editIDO ? `Edit Internal DO ${editIDO.nomor}` : "",
     onClose: () => setEditIDO(null)
@@ -29244,7 +29273,7 @@ function DashboardAbsensiPanel({
         size: "sm",
         variant: "ghost",
         onClick: () => openEditStaff(s.nama)
-      }, "✏️ Edit")];
+      }, "✏️")];
     }),
     emptyMsg: bulanFilter ? "Belum ada rekap absensi tersimpan untuk bulan ini" : "Belum ada rekap absensi tersimpan"
   }))), /*#__PURE__*/React.createElement(Modal, {
@@ -31422,7 +31451,7 @@ function KPISalesModule({
     size: "sm",
     variant: "danger",
     onClick: () => removeFromKpiRoster(nama)
-  }, "Hapus")))))), /*#__PURE__*/React.createElement(Card, null, !isSalesManager && /*#__PURE__*/React.createElement(Input, {
+  }, "✕")))))), /*#__PURE__*/React.createElement(Card, null, !isSalesManager && /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari sales manager...",
     value: kpiSalesSearch,
     onChange: setKpiSalesSearch,
