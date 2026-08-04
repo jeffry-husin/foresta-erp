@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-04.3";
+const APP_BUILD = "2026-08-04.4";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -859,7 +859,12 @@ const ROLE_DEFS = {
   logistic: {
     label: "Logistic",
     color: "#22c55e",
-    modules: ["dashboard", "parts_use", "delivery_order", "attendance", "mutasi_barang"]
+    // goods_receipt added so Logistic can do the final Workshop confirmation step (Internal DO ->
+    // "Konfirmasi Diterima Workshop"), which is what actually increments Master Part stock. Before
+    // this, Logistic had no access to the module at all, so only Storage/Workshop Manager/Owner-like
+    // roles could finalize a receipt at Workshop even though the confirm button itself was already
+    // gated to include the "logistic" role (see isJhon in the Penerimaan Barang module).
+    modules: ["dashboard", "goods_receipt", "parts_use", "delivery_order", "attendance", "mutasi_barang"]
   },
   finance: {
     label: "Finance",
