@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-04.7";
+const APP_BUILD = "2026-08-04.8";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -244,20 +244,28 @@ const bomRevisedUnits = (bomSnapshot, units) => {
   });
 };
 // Unified document-numbering format used across the whole app: TYPE-000-FRT-ROMAN-YEAR
-// (e.g. "SO-001-FRT-VII-2026"). The sequence resets to 001 every calendar month per document
-// type. `arr` must be the freshest array of existing records of that type (matching the
-// collision-safe max-seq pattern already used elsewhere) so concurrent creation across browsers
-// can't produce a duplicate number; `numberField` defaults to "nomor" (Cuti stores its number in
-// "id" instead).
+// (e.g. "SO-001-FRT-VII-2026"). The running sequence number no longer resets to 001 on a month
+// change (per explicit request 2026-08-04) — only the month/year SUFFIX reflects the current
+// period; the number itself keeps counting up from the highest number this document type has ever
+// used, across every month/year already on record. Existing historical numbers are left exactly as
+// they are — this only changes how the NEXT new number is computed. `arr` must be the freshest
+// array of existing records of that type (matching the collision-safe max-seq pattern already used
+// elsewhere) so concurrent creation across browsers can't produce a duplicate number; `numberField`
+// defaults to "nomor" (Cuti stores its number in "id" instead).
 const DOC_ROMAN_MONTHS = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"];
 const genDocNumber = (arr, typeCode, numberField = "nomor") => {
   const now = new Date();
   const prefix = typeCode + "-";
   const suffix = `-FRT-${DOC_ROMAN_MONTHS[now.getMonth()]}-${now.getFullYear()}`;
+  // Matches TYPE-###-FRT-<any roman month>-<any year>[-R#] so the max is taken across ALL
+  // month/year suffixes this type has ever used, not just the current one.
+  const numRe = new RegExp(`^${prefix}(\\d+)-FRT-(?:I|II|III|IV|V|VI|VII|VIII|IX|X|XI|XII)-\\d{4}(?:-R\\d+)?$`);
   const maxSeq = (arr || []).reduce((max, r) => {
     const val = r && r[numberField];
-    if (val && val.startsWith(prefix) && val.endsWith(suffix)) {
-      const n = parseInt(val.slice(prefix.length, val.length - suffix.length), 10);
+    if (!val) return max;
+    const m = String(val).match(numRe);
+    if (m) {
+      const n = parseInt(m[1], 10);
       if (!isNaN(n) && n > max) return n;
     }
     return max;
@@ -5735,6 +5743,12 @@ function CustomerDB({
         nama: session.nama
       },
       approverLabel: "GM"
+    });
+    logSalesActivity(store, session, {
+      jenisAktivitas: "Request Akses Client",
+      customerId: customer.id,
+      customerNama: customer.nama,
+      catatan: `Mengajukan permintaan akses ke client "${customer.nama}" (menunggu approval GM)`
     });
     alert(`Permintaan akses ke client "${customer.nama}" diajukan dan menunggu approval GM.`);
   };
@@ -14282,13 +14296,18 @@ function SalesOrderModule({
     });
   };
   const soIsCompleted = so => {
-    const hasLunasInvoice = (invoices || []).some(i => i.soNomor === so.nomor && i.statusBayar === "Lunas");
-    return soFullyShipped(so) || hasLunasInvoice || !!so.selesaiManual;
+    // Changed 2026-08-04 per explicit request: an SO is considered done once an Invoice has been
+    // created for it AT ALL (regardless of payment status) — previously this required the invoice
+    // to be fully paid ("Lunas"), which left SO-003/SO-004-style SOs sitting in ON GOING for as
+    // long as the customer hadn't paid yet, even though the SO's own job (produce the Invoice) was
+    // already done. Payment collection is Invoice's job to track from here, not Sales Order's.
+    const hasInvoice = (invoices || []).some(i => i.soNomor === so.nomor);
+    return soFullyShipped(so) || hasInvoice || !!so.selesaiManual;
   };
   const soSelesaiVia = so => {
     if (so.selesaiManual) return `${so.selesaiManual.via} ${so.selesaiManual.refNomor} (manual oleh ${so.selesaiManual.oleh})`;
     if ((deliveryOrders || []).some(d => d.soNomor === so.nomor)) return "Delivery Order";
-    return "Invoice Lunas";
+    return "Invoice";
   };
   const [selesaiModal, setSelesaiModal] = useState(null); // SO being marked selesai
   const [selesaiForm, setSelesaiForm] = useState({
