@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-04.10";
+const APP_BUILD = "2026-08-04.11";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -7921,7 +7921,10 @@ function MekanikReport({
   });
 
   // Visible visits: mekanik sees own, reviewer sees all
-  const [visitSearch, setVisitSearch] = useState("");
+  // Consolidated into ONE module-wide search bar per Jef's request (recSearch stays separate —
+  // it's an in-page item picker inside the Part Recommendation full-screen view, not a list filter).
+  const [search, setSearch] = useState("");
+  const visitSearch = search;
   const myVisitsAll = isMekanik ? visits.filter(v => v.mekanikUsername === session.username || (v.mekanikUsernames || []).includes(session.username)) : visits;
   const myVisits = (visitSearch.trim() ? myVisitsAll.filter(v => [v.id, v.customerNama, v.unitTerkait, v.lokasi, v.mekanikNama].filter(Boolean).some(x => String(x).toLowerCase().includes(visitSearch.trim().toLowerCase()))) : myVisitsAll).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const myVisitsOngoing = myVisits.filter(v => !v.selesai);
@@ -7931,7 +7934,7 @@ function MekanikReport({
   // sale typically needs both procurement AND installation/commissioning) that haven't been turned
   // into a Kunjungan yet. Drops off this list automatically once a visit referencing that SO exists
   // (see openVisitFromSO below).
-  const [mrSearch, setMrSearch] = useState("");
+  const mrSearch = search;
   const [soPreview, setSoPreview] = useState(null); // SO clicked from MR ON GOING list, to preview jenis pekerjaan before starting a visit
   const mrOngoingAll = (salesOrders || []).filter(so => ["MR", "BOTH"].includes(so.fulfillmentType) && !visits.some(v => v.soNomor === so.nomor));
   const mrOngoingList = (mrSearch.trim() ? mrOngoingAll.filter(so => [so.nomor, so.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(mrSearch.trim().toLowerCase()))) : mrOngoingAll).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
@@ -9943,7 +9946,11 @@ function MekanikReport({
     })), "Mekanik_Report.xlsx", "Mekanik Report")
   }), (isMekanik || isOwnerLike || isSepti) && /*#__PURE__*/React.createElement(Btn, {
     onClick: () => setVisitModal(true)
-  }, "+ Kunjungan Baru"))), (isSepti || isOwnerLike) && (dars.some(d => d.status === "Menunggu Approval Septi") || partRecs.some(r => r.status === "Menunggu Approval Septi")) && /*#__PURE__*/React.createElement(Card, {
+  }, "+ Kunjungan Baru"))), /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari no. kunjungan / no. SO / client / unit / lokasi / mekanik...",
+    value: search,
+    onChange: setSearch
+  }), (isSepti || isOwnerLike) && (dars.some(d => d.status === "Menunggu Approval Septi") || partRecs.some(r => r.status === "Menunggu Approval Septi")) && /*#__PURE__*/React.createElement(Card, {
     style: {
       background: theme.yellow + "11",
       border: `1px solid ${theme.yellow}44`
@@ -10211,11 +10218,7 @@ function MekanikReport({
       fontSize: 12,
       color: theme.muted
     }
-  }, "SO di sini sudah ditandai Purchasing/Workshop lewat tombol \"Buat MR\" di Item Requisition — klik ", /*#__PURE__*/React.createElement("strong", null, "Buat Kunjungan"), " untuk mengerjakannya, sama seperti + Kunjungan Baru."), /*#__PURE__*/React.createElement(Input, {
-    placeholder: "Cari no. SO / nama client...",
-    value: mrSearch,
-    onChange: setMrSearch
-  }), /*#__PURE__*/React.createElement("div", {
+  }, "SO di sini sudah ditandai Purchasing/Workshop lewat tombol \"Buat MR\" di Item Requisition — klik ", /*#__PURE__*/React.createElement("strong", null, "Buat Kunjungan"), " untuk mengerjakannya, sama seperti + Kunjungan Baru."), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       flexDirection: "column",
@@ -10335,14 +10338,7 @@ function MekanikReport({
       color: theme.text,
       fontSize: 15
     }
-  }, "Daftar Kunjungan Kerja"), /*#__PURE__*/React.createElement(Input, {
-    placeholder: "Cari no. kunjungan / client / unit / mekanik...",
-    value: visitSearch,
-    onChange: setVisitSearch,
-    style: {
-      marginBottom: 12
-    }
-  }), /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, "Daftar Kunjungan Kerja"), /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "KUNJUNGAN KERJA ON GOING",
     count: myVisitsOngoing.length,
     badgeColor: theme.cyan,
@@ -14459,7 +14455,13 @@ function SalesOrderModule({
   // source — this guards against the status field ever getting out of sync (e.g. a bug or manual
   // data fix) and a quotation that's already been pulled reappearing in the picker.
   const quotAlreadyHasSO = nomor => salesOrders.some(so => so.sourceNomor === nomor);
-  const [pullSearch, setPullSearch] = useState("");
+  // Consolidated into ONE module-wide search bar per Jef's request — previously this module had
+  // 5 separate search boxes stacked across its sections (SQ ON GOING, plus one "Cari di tabel
+  // ini..." box built into each of the ON GOING / SO TO PO / COMPLETED tables on top of their own
+  // Card-level search), which was confusing and redundant. Now a single `search` state, entered
+  // once at the top of the module, filters every section below it.
+  const [search, setSearch] = useState("");
+  const pullSearch = search;
   // When a Quotation is revised, ALL revisions in the family share the same revisiDari (the
   // original/base nomor) — they don't chain sequentially, they all point back to the base. The
   // revision number is baked into the nomor suffix ("-R1", "-R2", ...), so the member with the
@@ -14479,7 +14481,7 @@ function SalesOrderModule({
   };
   const approvedUnit = quotationsUnit.filter(q => q.status === "Disetujui GM" && !quotAlreadyHasSO(q.nomor) && quotIsLatestRevision(quotationsUnit, q)).filter(q => !pullSearch.trim() || [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(pullSearch.trim().toLowerCase())));
   const approvedPS = quotationsPS.filter(q => q.status === "Disetujui GM" && !quotAlreadyHasSO(q.nomor) && quotIsLatestRevision(quotationsPS, q)).filter(q => !pullSearch.trim() || [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(pullSearch.trim().toLowerCase())));
-  const [soSearch, setSoSearch] = useState("");
+  const soSearch = search;
   const salesOrdersFiltered = (soSearch.trim() ? salesOrders.filter(so => [so.nomor, so.customerNama, so.salesManagerNama, so.sourceNomor].filter(Boolean).some(x => String(x).toLowerCase().includes(soSearch.trim().toLowerCase()))) : salesOrders).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   // Compute the next number from the max existing sequence in the given (ideally freshly-fetched)
   // array rather than its .length — this avoids both collisions when two users create a record at
@@ -14690,7 +14692,11 @@ function SalesOrderModule({
       total: so.total,
       status: so.status
     })), "Sales_Order.xlsx", "Sales Order")
-  }))), /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }))), /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari no. quotation / no. SO / client / sales manager / sumber quotation...",
+    value: search,
+    onChange: setSearch
+  }), /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "SQ ON GOING (Quotation Disetujui, Belum Jadi SO)",
     count: approvedUnit.length + approvedPS.length,
     badgeColor: theme.purple,
@@ -14701,11 +14707,7 @@ function SalesOrderModule({
       flexDirection: "column",
       gap: 16
     }
-  }, /*#__PURE__*/React.createElement(Input, {
-    placeholder: "Cari no. quotation / nama client...",
-    value: pullSearch,
-    onChange: setPullSearch
-  }), /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "UNIT QUOTATION",
     count: approvedUnit.length,
     badgeColor: theme.purple,
@@ -14763,20 +14765,12 @@ function SalesOrderModule({
   }, q.nomor, " — ", q.customerNama, " — ", fmt(q.total)), (isEpy || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     onClick: () => openPickItems(q, "Parts/Service")
-  }, "Buat SO")))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
-    placeholder: "Cari no. SO / client / sales manager / sumber quotation...",
-    value: soSearch,
-    onChange: setSoSearch,
-    style: {
-      marginBottom: 12
-    }
-  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, "Buat SO")))))), /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "ON GOING",
     count: salesOrdersFiltered.filter(so => !soHasBecomePO(so) && !soIsCompleted(so)).length,
     badgeColor: theme.accent,
     storageKey: "so_ongoing"
   }, /*#__PURE__*/React.createElement(Table, {
-    search: true,
     headers: ["No. SO", "Tipe", "Rute", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Status", "Selesai"],
     rows: salesOrdersFiltered.filter(so => !soHasBecomePO(so) && !soIsCompleted(so)).map(so => [/*#__PURE__*/React.createElement("span", {
       style: {
@@ -14809,7 +14803,6 @@ function SalesOrderModule({
     badgeColor: theme.cyan,
     storageKey: "so_to_po"
   }, /*#__PURE__*/React.createElement(Table, {
-    search: true,
     headers: ["No. SO", "Tipe", "Rute", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Status", "Selesai"],
     rows: salesOrdersFiltered.filter(so => soHasBecomePO(so) && !soIsCompleted(so)).map(so => [/*#__PURE__*/React.createElement("span", {
       style: {
@@ -14842,7 +14835,6 @@ function SalesOrderModule({
     badgeColor: theme.green,
     storageKey: "so_completed"
   }, /*#__PURE__*/React.createElement(Table, {
-    search: true,
     headers: ["No. SO", "Tipe", "Rute", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Selesai Via"],
     rows: salesOrdersFiltered.filter(so => soIsCompleted(so)).map(so => [/*#__PURE__*/React.createElement("span", {
       style: {
@@ -15421,7 +15413,10 @@ function ItemRequisitionModule({
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   const canManage = isPipin || isOwnerLike || isSepti;
   const activeSO = salesOrders.filter(so => so.status === "Aktif");
-  const [irSearch, setIrSearch] = useState("");
+  // Consolidated into ONE module-wide search bar per Jef's request — previously "SO ON GOING"
+  // and the IR list sections below each had their own separate search box.
+  const [search, setSearch] = useState("");
+  const irSearch = search;
   const itemRequisitionsFiltered = (irSearch.trim() ? itemRequisitions.filter(r => [r.nomor, r.soNomor, r.soCustomerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(irSearch.trim().toLowerCase()))) : itemRequisitions).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState(null);
@@ -15469,7 +15464,7 @@ function ItemRequisitionModule({
     soNomor: "",
     items: []
   });
-  const [soPickerSearch, setSoPickerSearch] = useState("");
+  const soPickerSearch = search;
   const [soDetailModal, setSoDetailModal] = useState(null); // SO nomor whose shortfall detail is open
   const closeManualModal = () => {
     setManualModal(false);
@@ -16030,7 +16025,11 @@ function ItemRequisitionModule({
       setManualItemForm(blankManualItem());
       setManualModal(true);
     }
-  }, "+ Tambahan Part untuk SO / Non-SO"))), React.createElement("div", {
+  }, "+ Tambahan Part untuk SO / Non-SO"))), React.createElement(Input, {
+    placeholder: "Cari no. requisition / no. SO / nama client / part number / nama part / deskripsi...",
+    value: search,
+    onChange: setSearch
+  }), React.createElement("div", {
     style: {
       fontSize: 12,
       color: theme.muted,
@@ -16050,11 +16049,7 @@ function ItemRequisitionModule({
       flexDirection: "column",
       gap: 12
     }
-  }, React.createElement(Input, {
-    placeholder: "Cari no. SO / nama client...",
-    value: soPickerSearch,
-    onChange: setSoPickerSearch
-  }), React.createElement("div", {
+  }, React.createElement("div", {
     style: {
       display: "flex",
       flexDirection: "column",
@@ -16163,14 +16158,7 @@ function ItemRequisitionModule({
         loadFromSO(soDetailModal);
       }
     }, "Buat IR dari SO Ini")));
-  })()), React.createElement(Card, null, React.createElement(Input, {
-    placeholder: "Cari no. requisition / no. SO / nama client...",
-    value: irSearch,
-    onChange: setIrSearch,
-    style: {
-      marginBottom: 12
-    }
-  })), (() => {
+  })()), (() => {
     const irHeaders = ["No. Requisition", "Tanggal", "No. SO", "No. PO Client", "Nama Client", "Jumlah Item Kurang", "Catatan", "Status", "IR Completed"];
     // Catatan is per-item, not per-IR — join every non-empty item catatan into one cell so it's
     // visible directly in the list without opening Detail (per user request).
@@ -16701,8 +16689,12 @@ function PurchaseOrderModule({
   // PO CLOSED requires BOTH: barang sudah diterima (status) AND pembayaran sudah lunas (statusBayar).
   // If either is missing, the PO stays in PO ON GOING so it doesn't get lost from view.
   const isPoClosed = p => p.status === "Sudah Diterima" && p.statusBayar === "Sudah Dibayar";
-  const [poSearch, setPoSearch] = useState("");
-  const [irOngoingSearch, setIrOngoingSearch] = useState("");
+  // Consolidated into ONE module-wide search bar per Jef's request — previously "IR ON GOING",
+  // "PO ON GOING" and "PO CLOSED" each had their own separate search box. Now a single `search`
+  // state, entered once at the top of the module, filters every section below it.
+  const [search, setSearch] = useState("");
+  const poSearch = search;
+  const irOngoingSearch = search;
   const irOngoingListAll = itemRequisitions.filter(ir => ir.status === "Menunggu Purchasing" && (ir.items || []).some(it => !it.sudahDiPO));
   const irOngoingList = irOngoingSearch.trim() ? irOngoingListAll.filter(ir => {
     const q = irOngoingSearch.trim().toLowerCase();
@@ -17386,7 +17378,11 @@ function PurchaseOrderModule({
   }), (isHandler || isMaria || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
     onClick: openCreate
-  }, "+ Buat PO Manual (multi-IR)"))), (isHandler || isMaria || isOwnerLike) && /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, "+ Buat PO Manual (multi-IR)"))), /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari no. IR / no. PO / no. SO / supplier / client / part number / nama part / deskripsi...",
+    value: search,
+    onChange: setSearch
+  }), (isHandler || isMaria || isOwnerLike) && /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "IR ON GOING (Belum di-PO)",
     count: irOngoingList.length,
     badgeColor: theme.purple,
@@ -17397,11 +17393,7 @@ function PurchaseOrderModule({
       flexDirection: "column",
       gap: 12
     }
-  }, /*#__PURE__*/React.createElement(Input, {
-    placeholder: "Cari no. IR / no. SO / nama client / part number / nama part / deskripsi...",
-    value: irOngoingSearch,
-    onChange: setIrOngoingSearch
-  }), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       flexDirection: "column",
@@ -17511,14 +17503,7 @@ function PurchaseOrderModule({
     size: "sm",
     variant: "danger",
     onClick: () => gmReject(p)
-  }, "✗ Tolak"))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
-    placeholder: "Cari no. PO / supplier / nama atau nomor part...",
-    value: poSearch,
-    onChange: setPoSearch,
-    style: {
-      marginBottom: 12
-    }
-  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, "✗ Tolak"))))), /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "PO ON GOING",
     count: po.filter(p => !isPoClosed(p)).length,
     badgeColor: theme.accent,
@@ -17531,7 +17516,6 @@ function PurchaseOrderModule({
       color: theme.muted
     }
   }, "Semua PO yang belum diterima dan/atau belum lunas dibayar — pindah ke PO CLOSED hanya setelah barang diterima Workshop DAN pembayaran lunas. Input No. Invoice Supplier, edit item/Biaya Tambahan, dan tandai pembayaran di sini."), /*#__PURE__*/React.createElement(Table, {
-    search: true,
     headers: ["No. PO", "Tanggal", "Supplier", "Tipe Bayar", "Jatuh Tempo", "Total", "Status", "No. Invoice Supplier", "No. Faktur Pajak", "Status Bayar", "Aksi"],
     rows: poFiltered.filter(p => !isPoClosed(p)).map(p => {
       const due = getDueStatus(p.tipePembayaran, p.tanggalJatuhTempo);
@@ -17657,7 +17641,6 @@ function PurchaseOrderModule({
       color: theme.muted
     }
   }, "PO otomatis masuk ke sini hanya setelah barang diterima Workshop DAN pembayaran sudah lunas."), /*#__PURE__*/React.createElement(Table, {
-    search: true,
     headers: ["No. PO", "Tanggal", "Supplier", "Total", "No. Invoice Supplier", "Status Bayar", "Aksi"],
     rows: poFiltered.filter(p => isPoClosed(p)).map(p => [/*#__PURE__*/React.createElement("span", {
       style: {
@@ -19082,8 +19065,10 @@ function GoodsReceiptModule({
   const isJhon = ["storage", "logistic", "inventory", "workshop_manager", "purchasing", "purchasing_overseas"].includes(session.role);
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   const isWorkshopApprover = session.role === "workshop_manager" || isOwnerLike; // WORKSHOP1/WORKSHOP2, plus HO1/HO2/HO3 as company-wide override
-  const [grSearch, setGrSearch] = useState("");
-  const [poReceiveSearch, setPoReceiveSearch] = useState("");
+  // Consolidated into ONE module-wide search bar per Jef's request.
+  const [search, setSearch] = useState("");
+  const grSearch = search;
+  const poReceiveSearch = search;
   // Section 3 "DAFTAR PENERIMAAN BARANG FINAL" — only Final/Workshop receipts belong here (the ones
   // that actually moved Master Part stock). Any older "Sementara - Diterima HO" records left over
   // from before this 3-section redesign are filtered out here; their pending items live on in
@@ -19544,7 +19529,11 @@ function GoodsReceiptModule({
       fontSize: 12,
       color: theme.muted
     }
-  }, "Alur 3 tahap: (1) PO SIAP DITERIMA — pilih barang yang diterima di Head Office atau langsung di Workshop; (2) INTERNAL DELIVERY ORDER — Workshop pilih & konfirmasi barang yang benar-benar sudah sampai (bisa bertahap/sebagian); (3) DAFTAR PENERIMAAN BARANG FINAL — data final yang mengisi stock Master Part."), (isJhon || isOwnerLike) && /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, "Alur 3 tahap: (1) PO SIAP DITERIMA — pilih barang yang diterima di Head Office atau langsung di Workshop; (2) INTERNAL DELIVERY ORDER — Workshop pilih & konfirmasi barang yang benar-benar sudah sampai (bisa bertahap/sebagian); (3) DAFTAR PENERIMAAN BARANG FINAL — data final yang mengisi stock Master Part."), /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari no. PO / no. penerimaan / supplier / part number / nama part / mekanik...",
+    value: search,
+    onChange: setSearch
+  }), (isJhon || isOwnerLike) && /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "PO SIAP DITERIMA (Lokal & Overseas)",
     count: approvedPOsFiltered.length,
     badgeColor: theme.purple,
@@ -19556,11 +19545,7 @@ function GoodsReceiptModule({
       flexDirection: "column",
       gap: 12
     }
-  }, /*#__PURE__*/React.createElement(Input, {
-    placeholder: "Cari no. PO / supplier / part number / nama part...",
-    value: poReceiveSearch,
-    onChange: setPoReceiveSearch
-  }), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       flexDirection: "column",
@@ -19641,14 +19626,7 @@ function GoodsReceiptModule({
     size: "sm",
     variant: "success",
     onClick: () => approveGREdit(r)
-  }, "✓ Approve"))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
-    placeholder: "Cari no. penerimaan / no. PO / mekanik...",
-    value: grSearch,
-    onChange: setGrSearch,
-    style: {
-      marginBottom: 0
-    }
-  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, "✓ Approve"))))), /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "DAFTAR PENERIMAAN BARANG FINAL",
     count: goodsReceiptsFiltered.length,
     badgeColor: theme.accent,
@@ -20426,8 +20404,10 @@ function PartsUseModule({
   const canRelease = isStefanus || isOwnerLike;
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState(null);
-  const [puSearch, setPuSearch] = useState("");
-  const [soReleaseSearch, setSoReleaseSearch] = useState("");
+  // Consolidated into ONE module-wide search bar per Jef's request.
+  const [search, setSearch] = useState("");
+  const puSearch = search;
+  const soReleaseSearch = search;
   const partsUseFiltered = (puSearch.trim() ? partsUse.filter(pu => [pu.nomor, pu.soNomor, pu.mekanikNama].filter(Boolean).some(x => String(x).toLowerCase().includes(puSearch.trim().toLowerCase()))) : partsUse).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const [form, setForm] = useState({
     soNomor: "",
@@ -20720,7 +20700,11 @@ function PartsUseModule({
       status: pu.status,
       alasanReturn: pu.returnReason || "-"
     })), "Parts_Use.xlsx", "Parts Use")
-  })), canRelease && /*#__PURE__*/React.createElement(CollapsibleSection, {
+  })), /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari no. parts use / no. SO / nama client / mekanik / part number / nama part...",
+    value: search,
+    onChange: setSearch
+  }), canRelease && /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "SO SIAP DIRELEASE (Ada Sisa Part Belum Direlease)",
     count: soReleaseListFiltered.length,
     badgeColor: theme.purple,
@@ -20732,11 +20716,7 @@ function PartsUseModule({
       flexDirection: "column",
       gap: 12
     }
-  }, /*#__PURE__*/React.createElement(Input, {
-    placeholder: "Cari no. SO / nama client / part number / nama part...",
-    value: soReleaseSearch,
-    onChange: setSoReleaseSearch
-  }), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       flexDirection: "column",
@@ -20784,14 +20764,7 @@ function PartsUseModule({
     badgeColor: theme.accent,
     storageKey: "pu_ongoing",
     defaultOpen: true
-  }, /*#__PURE__*/React.createElement(Input, {
-    placeholder: "Cari no. parts use / no. SO / mekanik...",
-    value: puSearch,
-    onChange: setPuSearch,
-    style: {
-      marginBottom: 12
-    }
-  }), /*#__PURE__*/React.createElement(Table, {
+  }, /*#__PURE__*/React.createElement(Table, {
     headers: ["No. Parts Use", "Tanggal", "No. SO", "Mekanik", "Jumlah Item", "Status"],
     rows: partsUseOngoing.map(pu => [/*#__PURE__*/React.createElement("span", {
       style: {
@@ -21092,8 +21065,10 @@ function DeliveryOrderModule({
   const isEpy = session.role === "sales_admin";
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   const isWorkshopApprover = session.role === "workshop_manager" || isOwnerLike; // WORKSHOP1/WORKSHOP2, plus HO1/HO2/HO3 as company-wide override
-  const [doSearch, setDoSearch] = useState("");
-  const [soDOSearch, setSoDOSearch] = useState("");
+  // Consolidated into ONE module-wide search bar per Jef's request.
+  const [search, setSearch] = useState("");
+  const doSearch = search;
+  const soDOSearch = search;
   const deliveryOrdersFiltered = (doSearch.trim() ? deliveryOrders.filter(d => [d.nomor, d.soNomor, d.customerNama, d.driver, d.ekspedisi].filter(Boolean).some(x => String(x).toLowerCase().includes(doSearch.trim().toLowerCase()))) : deliveryOrders).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const [editDO, setEditDO] = useState(null);
   const [editDOForm, setEditDOForm] = useState({
@@ -21343,7 +21318,11 @@ function DeliveryOrderModule({
       borderRadius: 8,
       border: `1px dashed ${theme.border}`
     }
-  }, "🔒 Description part bersifat internal — tidak ditampilkan di Delivery Order yang diserahkan ke client."), (isStefanus || isEpy || isOwnerLike) && /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, "🔒 Description part bersifat internal — tidak ditampilkan di Delivery Order yang diserahkan ke client."), /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari no. DO / no. SO / client / driver / ekspedisi / part number / nama part...",
+    value: search,
+    onChange: setSearch
+  }), (isStefanus || isEpy || isOwnerLike) && /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "SO SIAP DIKIRIM (Ada Sisa Barang Belum Dikirim)",
     count: soReadyForDOFiltered.length,
     badgeColor: theme.purple,
@@ -21355,11 +21334,7 @@ function DeliveryOrderModule({
       flexDirection: "column",
       gap: 12
     }
-  }, /*#__PURE__*/React.createElement(Input, {
-    placeholder: "Cari no. SO / nama client / part number / nama part...",
-    value: soDOSearch,
-    onChange: setSoDOSearch
-  }), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       flexDirection: "column",
@@ -21400,14 +21375,7 @@ function DeliveryOrderModule({
   }, so.customerNama || "-")), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     onClick: () => openDOForSO(so.nomor)
-  }, "Buat DO")))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
-    placeholder: "Cari no. DO / no. SO / client / driver / ekspedisi...",
-    value: doSearch,
-    onChange: setDoSearch,
-    style: {
-      marginBottom: 12
-    }
-  }), /*#__PURE__*/React.createElement(Table, {
+  }, "Buat DO"))))), /*#__PURE__*/React.createElement(Table, {
     headers: ["No. DO", "Tanggal", "No. SO", "Tipe", "Client", "Ekspedisi/Driver", "Status"],
     rows: deliveryOrdersFiltered.map(d => [/*#__PURE__*/React.createElement("span", {
       style: {
@@ -21768,7 +21736,9 @@ function InvoiceModule({
   } = store;
   const isFinance = session.role === "finance" || session.role === "finance_director";
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
-  const [invSearch, setInvSearch] = useState("");
+  // Consolidated into ONE module-wide search bar per Jef's request.
+  const [search, setSearch] = useState("");
+  const invSearch = search;
   const pendingInvEdits = editRequests.filter(r => r.module === "Invoice" && r.action === "Edit" && r.status === "Menunggu Approval GM");
   const [editInv, setEditInv] = useState(null);
   const [editInvForm, setEditInvForm] = useState({
@@ -21974,7 +21944,7 @@ function InvoiceModule({
   });
   const selectedSO = salesOrders.find(s => s.nomor === form.soNomor);
   const selectedSORemainingTermin = selectedSO ? remainingTermin(selectedSO) : null;
-  const [invSoSearch, setInvSoSearch] = useState("");
+  const invSoSearch = search;
   const invSoOngoingList = (invSoSearch.trim() ? availableSO.filter(so => [so.nomor, so.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(invSoSearch.trim().toLowerCase()))) : availableSO).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const startInvoiceFromSO = so => {
     setForm({
@@ -22324,19 +22294,16 @@ function InvoiceModule({
       borderRadius: 8,
       border: `1px dashed ${theme.border}`
     }
-  }, "🔒 Description part bersifat internal — tidak ditampilkan di Invoice yang diterima client. Invoice baru wajib disetujui GM sebelum dikirim ke client."), (isFinance || isOwnerLike) && /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, "🔒 Description part bersifat internal — tidak ditampilkan di Invoice yang diterima client. Invoice baru wajib disetujui GM sebelum dikirim ke client."), /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari no. invoice / no. SO / client...",
+    value: search,
+    onChange: setSearch
+  }), (isFinance || isOwnerLike) && /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "SO ONGOING (Bisa Dibuat Invoice — DP1/DP2/Final)",
     count: invSoOngoingList.length,
     badgeColor: theme.cyan,
     storageKey: "inv_so_ongoing"
-  }, /*#__PURE__*/React.createElement(Input, {
-    placeholder: "Cari no. SO / client...",
-    value: invSoSearch,
-    onChange: setInvSoSearch,
-    style: {
-      marginBottom: 12
-    }
-  }), invSoOngoingList.length === 0 ? /*#__PURE__*/React.createElement("p", {
+  }, invSoOngoingList.length === 0 ? /*#__PURE__*/React.createElement("p", {
     style: {
       color: theme.muted,
       fontSize: 13
@@ -22613,14 +22580,7 @@ function InvoiceModule({
   }, "✗ Tolak"), /*#__PURE__*/React.createElement(Btn, {
     variant: "success",
     onClick: () => approveInvEdit(reviewInvEdit, reviewInvEditForm)
-  }, "✓ Approve")))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
-    placeholder: "Cari no. invoice / no. SO / client...",
-    value: invSearch,
-    onChange: setInvSearch,
-    style: {
-      marginBottom: 0
-    }
-  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, "✓ Approve")))), /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "Daftar Invoice",
     count: filtered.length,
     badgeColor: theme.accent,
