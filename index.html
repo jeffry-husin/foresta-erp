@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-05.3";
+const APP_BUILD = "2026-08-05.4";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -7998,8 +7998,34 @@ function MekanikReport({
     catatan: ""
   });
   const [recCart, setRecCart] = useState([]); // items being collected before submitting 1 Part Recommendation doc for this visit
-  const [recSearch, setRecSearch] = useState(""); // Part Recommendation inline search box (visitPage)
+  const [recSearch, setRecSearch] = useState(""); // Part Recommendation inline search box (visitPage) — kept for back-compat but no longer rendered; see recAddForm below
   const [recRowInputs, setRecRowInputs] = useState({}); // Qty/Alasan staged per part number while browsing search results, keyed by partNumber
+  // Replaces the old live-search-results-table "+Add" flow, which mekaniks reported as unreliable/
+  // confusing (results sometimes appeared empty with no visible Add button). Rebuilt to reuse the
+  // exact same PartPicker + Qty + Catatan + "+ Add" compact-row pattern already used and working in
+  // Item Requisition's "Tambahan Part" form — same proven component, single dropdown-autocomplete
+  // field instead of a separate full-width search box + results table.
+  const [recAddForm, setRecAddForm] = useState({
+    partNumber: "",
+    partName: "",
+    qty: 1,
+    alasan: ""
+  });
+  const addRecItemFromForm = () => {
+    if (!recAddForm.partNumber) return alert("Pilih part terlebih dahulu");
+    setRecCart(cart => [...cart, {
+      partNumber: recAddForm.partNumber,
+      partName: recAddForm.partName,
+      qty: parseInt(recAddForm.qty) || 1,
+      alasan: recAddForm.alasan || ""
+    }]);
+    setRecAddForm({
+      partNumber: "",
+      partName: "",
+      qty: 1,
+      alasan: ""
+    });
+  };
   // Seed the cart with whatever's already been recommended for this visit whenever the Part
   // Recommendation full-screen page is opened (or switched to a different visit) — mirrors what
   // openForm used to do for the old modal, but this feature no longer goes through openForm at all.
@@ -9358,61 +9384,55 @@ function MekanikReport({
         style: {
           margin: "0 0 8px",
           fontSize: 12,
-          color: theme.muted
+          fontWeight: 600,
+          color: theme.text
         }
-      }, "🔎 Ketik nama/nomor part di bawah untuk mencari dari Master Part, lalu klik \"+ Add\" pada part yang mau ditambahkan ke daftar rekomendasi."), /*#__PURE__*/React.createElement(Input, {
-        placeholder: "Cari Part Number / Nama Part / Deskripsi...",
-        value: recSearch,
-        onChange: setRecSearch
-      }), q && (searchResults.length > 0 ? /*#__PURE__*/React.createElement(Table, {
-        headers: ["Part Number", "Part Name", "Deskripsi", "Qty", "Alasan", ""],
-        rows: searchResults.map(p => {
-          const rowInput = recRowInputs[p.partNumber] || {
-            qty: 1,
-            alasan: ""
-          };
-          return [p.partNumber, p.partName, p.description || "-", /*#__PURE__*/React.createElement(Input, {
-            type: "number",
-            min: "1",
-            value: rowInput.qty,
-            onChange: v2 => setRecRowInputs(prev => ({
-              ...prev,
-              [p.partNumber]: {
-                ...rowInput,
-                qty: v2
-              }
-            })),
-            style: {
-              width: 70
-            }
-          }), /*#__PURE__*/React.createElement(Input, {
-            value: rowInput.alasan,
-            onChange: v2 => setRecRowInputs(prev => ({
-              ...prev,
-              [p.partNumber]: {
-                ...rowInput,
-                alasan: v2
-              }
-            })),
-            placeholder: "Alasan..."
-          }), /*#__PURE__*/React.createElement(Btn, {
-            size: "sm",
-            onClick: () => addRecItemFromSearch(p)
-          }, "+ Add")];
-        })
-      }) : /*#__PURE__*/React.createElement("p", {
+      }, "Tambah Part"), /*#__PURE__*/React.createElement("div", {
         style: {
-          margin: "8px 0 0",
-          fontSize: 12,
-          color: theme.muted
+          display: "grid",
+          gridTemplateColumns: "2fr 1fr 1.4fr auto",
+          gap: 8,
+          alignItems: "end"
         }
-      }, "Tidak ada part yang cocok."), !q && recDoc && recDoc.status !== "Menunggu Approval Septi" && /*#__PURE__*/React.createElement("p", {
+      }, /*#__PURE__*/React.createElement(PartPicker, {
+        label: "Part Number",
+        value: recAddForm.partNumber,
+        parts: parts,
+        showDescription: true,
+        onChange: pn => {
+          const p = parts.find(x => x.partNumber === pn);
+          setRecAddForm({
+            ...recAddForm,
+            partNumber: pn,
+            partName: p?.partName || ""
+          });
+        }
+      }), /*#__PURE__*/React.createElement(Input, {
+        label: "Qty",
+        type: "number",
+        min: "1",
+        value: recAddForm.qty,
+        onChange: v => setRecAddForm({
+          ...recAddForm,
+          qty: v
+        })
+      }), /*#__PURE__*/React.createElement(Input, {
+        label: "Catatan / Alasan",
+        value: recAddForm.alasan,
+        onChange: v => setRecAddForm({
+          ...recAddForm,
+          alasan: v
+        })
+      }), /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        onClick: addRecItemFromForm
+      }, "+ Add")), recDoc && recDoc.status !== "Menunggu Approval Septi" && /*#__PURE__*/React.createElement("p", {
         style: {
           margin: "8px 0 0",
           fontSize: 12,
           color: theme.yellow
         }
-      }, "ℹ️ Rekomendasi ini sudah ", recDoc.status.toLowerCase(), ". Anda tetap bisa menambah/menghapus part di sini — begitu disimpan, dokumen akan diajukan ulang untuk approval Septi."))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
+      }, "ℹ️ Rekomendasi ini sudah ", recDoc.status.toLowerCase(), ". Anda tetap bisa menambah/menghapus part di sini — begitu disimpan, dokumen akan diajukan ulang untuk approval Septi.")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
         style: {
           margin: "0 0 8px",
           fontSize: 13,
@@ -22063,6 +22083,7 @@ function InvoiceModule({
     invoices,
     setInvoices,
     salesOrders,
+    setSalesOrders,
     employees,
     customers,
     editRequests,
@@ -22281,10 +22302,43 @@ function InvoiceModule({
   // can be shown as its own line in the preview/print instead of being invisible.
   const invoiceSoDiskonAmount = inv => (inv?.items || []).reduce((s, it) => s + Math.max(0, (it.subtotalSebelumDiskonSO ?? it.subtotal ?? 0) - (it.subtotal ?? 0)), 0);
   const availableSO = salesOrders.filter(so => {
+    if (so.dismissedFromInvoiceList) return false; // manual override — see dismissSOFromInvoiceList below
     const rem = remainingTermin(so);
     if (rem === null) return soUninvoicedItems(so).length > 0; // legacy: keep offering until all items invoiced
     return rem.length > 0;
   });
+  // Manual safety-net for SO ONGOING (Bisa Dibuat Invoice): the automatic "already invoiced" check
+  // (remainingTermin/soUninvoicedItems, matched by partNumber) can still miss edge cases — e.g. a
+  // termin/service line with no real part number, or an SO Jef knows is actually done but the data
+  // doesn't cleanly reflect it. Mirrors the same manual-dismiss pattern already used for Part
+  // Recommendation in Parts & Service Quotation (dismissRec) — reversible via the collapsed
+  // "SO Ditandai Selesai (Manual)" list below, doesn't touch the SO's real status/items.
+  const dismissedSO = salesOrders.filter(so => so.dismissedFromInvoiceList);
+  const dismissSOFromInvoiceList = so => {
+    if (!confirm(`Tandai ${so.nomor} selesai secara manual dan sembunyikan dari SO ONGOING? Ini tidak mengubah data SO/Invoice — bisa dikembalikan kapan saja dari daftar "Ditandai Selesai (Manual)".`)) return;
+    setSalesOrders(prev => (prev || []).map(s => s.nomor === so.nomor ? {
+      ...s,
+      dismissedFromInvoiceList: true
+    } : s));
+    logAudit(store, session, {
+      module: "Invoice",
+      docNomor: so.nomor,
+      action: "Tandai Selesai (Manual)",
+      detail: "Disembunyikan dari SO ONGOING secara manual"
+    });
+  };
+  const restoreSOToInvoiceList = so => {
+    setSalesOrders(prev => (prev || []).map(s => s.nomor === so.nomor ? {
+      ...s,
+      dismissedFromInvoiceList: false
+    } : s));
+    logAudit(store, session, {
+      module: "Invoice",
+      docNomor: so.nomor,
+      action: "Kembalikan ke SO ONGOING",
+      detail: "Dibatalkan dari status Selesai Manual"
+    });
+  };
   const selectedSO = salesOrders.find(s => s.nomor === form.soNomor);
   const selectedSORemainingTermin = selectedSO ? remainingTermin(selectedSO) : null;
   const invSoSearch = search;
@@ -22714,11 +22768,50 @@ function InvoiceModule({
       color: theme.purple
     }, t.label, " (", t.percent, "%)")) : /*#__PURE__*/React.createElement(Badge, {
       color: theme.muted
-    }, "Full")), /*#__PURE__*/React.createElement(Btn, {
+    }, "Full")), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       onClick: () => startInvoiceFromSO(so)
-    }, "+ Buat Invoice"));
-  })), isOwnerLike && /*#__PURE__*/React.createElement(CollapsibleSection, {
+    }, "+ Buat Invoice"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      title: "Tandai selesai secara manual bila SO ini sudah tidak perlu di-invoice lagi tapi masih muncul di sini",
+      onClick: () => dismissSOFromInvoiceList(so)
+    }, "✓ Selesai (Manual)")));
+  })), (isFinance || isOwnerLike) && dismissedSO.length > 0 && /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "SO Ditandai Selesai (Manual)",
+    count: dismissedSO.length,
+    badgeColor: theme.muted,
+    storageKey: "inv_so_dismissed",
+    defaultOpen: false
+  }, dismissedSO.map(so => /*#__PURE__*/React.createElement("div", {
+    key: so.nomor,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      padding: "10px 0",
+      borderBottom: `1px solid ${theme.border}33`,
+      flexWrap: "wrap",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, so.nomor), " — ", so.customerNama, " — ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.green
+    }
+  }, fmt(so.total))), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => restoreSOToInvoiceList(so)
+  }, "↩ Kembalikan ke SO ONGOING")))), isOwnerLike && /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "Approval GM — Menunggu Keputusan",
     count: invoices.filter(i => i.statusApproval === "Menunggu Approval GM").length,
     badgeColor: theme.yellow,
@@ -23243,7 +23336,7 @@ function InvoiceModule({
       setBayarModal(null);
       setEditingPayIdx(null);
     },
-    width: 420
+    width: 700
   }, bayarModal && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
