@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-05.1";
+const APP_BUILD = "2026-08-05.2";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -1017,7 +1017,7 @@ const isNewCustomerAsOf = (salesOrders, customerId, so) => {
 const customerTypeForSO = (salesOrders, so) => isNewCustomerAsOf(salesOrders, so.customerId, so) ? "NEW" : "RETURNING";
 
 // Mekanik Report sub-statuses
-const KEPARAHAN_OPTIONS = ["Ringan", "Sedang", "Berat", "Kritikal"];
+const KEPARAHAN_OPTIONS = ["Tidak ada Kendala", "Ringan", "Sedang", "Berat", "Kritikal"];
 const STATUS_PEKERJAAN_OPTIONS = ["Selesai", "Belum Selesai", "Perlu Lanjutan", "Menunggu Part"];
 const JENIS_BERITA_ACARA = ["Pemasangan", "Pemasangan & Commissioning", "Training", "Survey", "Perbaikan"];
 const KONDISI_UNIT_OPTIONS = ["Working", "Need Repair", "Break Down"];
@@ -1988,8 +1988,35 @@ const seedCOA = [{
   kategori: "Lainnya",
   perOrang: false
 }];
+// PERFORMANCE — browser cache-then-revalidate: the app used to block every module's first paint on
+// a fresh Supabase round-trip for all ~46 top-level keys in parallel, every single time the app was
+// opened (measured: up to ~9.7s for the slowest key to resolve, even though the JS bundle itself
+// loads in ~2.4s). Root cause was simply re-downloading everything from scratch on every open, with
+// no cache. Fix: on mount, synchronously seed state from localStorage (last-known-good copy) so the
+// UI is usable instantly with recent data, then still kick off the same Supabase fetch in the
+// background to silently refresh to the latest — cache is best-effort only (wrapped in try/catch)
+// and never replaces the network fetch as the source of truth.
+function readCache(cacheKey) {
+  try {
+    const raw = localStorage.getItem(cacheKey);
+    if (raw !== null) return { hit: true, value: JSON.parse(raw) };
+  } catch (e) {}
+  return { hit: false };
+}
+function writeCache(cacheKey, data) {
+  try {
+    localStorage.setItem(cacheKey, JSON.stringify(data));
+  } catch (e) {
+    // Quota exceeded or storage unavailable (private browsing, etc.) — caching is purely an
+    // optimization, so silently skip it rather than let it break the app.
+  }
+}
 function usePersisted(key, defaultVal) {
-  const [val, setValRaw] = useState(defaultVal);
+  const cacheKey = "erp_cache_" + key;
+  const [val, setValRaw] = useState(() => {
+    const cached = readCache(cacheKey);
+    return cached.hit ? cached.value : defaultVal;
+  });
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
     let cancelled = false;
@@ -2003,6 +2030,7 @@ function usePersisted(key, defaultVal) {
         if (cancelled) return;
         if (!error && data) {
           setValRaw(data.data);
+          writeCache(cacheKey, data.data);
         } else {
           // First time this key has ever been used — seed it with the default. BUG FIX: this used
           // to unconditionally call setValRaw(defaultVal) after the seed upsert, which could wipe
@@ -2028,7 +2056,11 @@ function usePersisted(key, defaultVal) {
             data: reData,
             error: reError
           } = await sb.from("erp_data").select("data").eq("key", key).maybeSingle();
-          if (!cancelled) setValRaw(!reError && reData ? reData.data : defaultVal);
+          if (!cancelled) {
+            const finalVal = !reError && reData ? reData.data : defaultVal;
+            setValRaw(finalVal);
+            writeCache(cacheKey, finalVal);
+          }
         }
       } finally {
         if (!cancelled) setLoaded(true);
@@ -2075,6 +2107,7 @@ function usePersisted(key, defaultVal) {
           console.error("Gagal menyimpan " + key + ":", error);
         } else {
           setValRaw(next);
+          writeCache(cacheKey, next);
         }
       } catch (e) {
         console.error("Gagal menyimpan " + key + ":", e);
@@ -7808,6 +7841,32 @@ function MekanikReport({
     dinasCatatan,
     setDinasCatatan
   } = store;
+  // Master Mill → Kunjungan auto-link: "Unit Terkait" for a Kunjungan pulled from a Master Mill is
+  // derived from that mill's crane brand + serial number (matches the historical manual-entry format
+  // already in use, e.g. "Crane epsilon S210LD128"). See onChange of the "Tarik Data dari Master
+  // Mill" Select below for the live auto-fill on NEW visits, and the one-time backfill effect right
+  // after this for visits created before this link existed.
+  const unitTerkaitFromMill = mill => mill && mill.crane ? `Crane ${mill.crane}${mill.snCrane ? " " + mill.snCrane : ""}`.trim() : "";
+  // One-time backfill: visits already linked to a Master Mill (millId set) from before this feature
+  // existed never got "Unit Terkait" auto-filled, so it's sitting empty even though the mill record
+  // has the crane info. Only fills in the blanks — never overwrites a value a mekanik already typed
+  // in manually, same safety rule as the customerId backfill in MasterMillModule.
+  useEffect(() => {
+    if (!mills || mills.length === 0 || !visits || visits.length === 0) return;
+    let changed = false;
+    const updated = visits.map(v => {
+      if (!v.millId || v.unitTerkait) return v;
+      const mill = mills.find(m => m.millName === v.millId);
+      const derived = unitTerkaitFromMill(mill);
+      if (!derived) return v;
+      changed = true;
+      return {
+        ...v,
+        unitTerkait: derived
+      };
+    });
+    if (changed) setVisits(updated);
+  }, [mills, visits]);
   // Canonical, deduped list of active login names — sourced from Manajemen User (Supabase profiles)
   // rather than the local `employees` array, which can drift out of sync/gain duplicate entries.
   // Used for the Surat Tugas "Dibuat Oleh"/"Menugaskan Kepada" name pickers so they never show
@@ -8843,6 +8902,7 @@ function MekanikReport({
     "Ditolak Septi": theme.red
   };
   const keparahanColor = {
+    "Tidak ada Kendala": theme.muted,
     Ringan: theme.green,
     Sedang: theme.yellow,
     Berat: theme.red,
@@ -9294,7 +9354,13 @@ function MekanikReport({
         size: "sm",
         variant: "danger",
         onClick: () => rejectRec(recDoc)
-      }, "✗ Tolak")))), canEditVisit && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
+      }, "✗ Tolak")))), canEditVisit && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("p", {
+        style: {
+          margin: "0 0 8px",
+          fontSize: 12,
+          color: theme.muted
+        }
+      }, "🔎 Ketik nama/nomor part di bawah untuk mencari dari Master Part, lalu klik \"+ Add\" pada part yang mau ditambahkan ke daftar rekomendasi."), /*#__PURE__*/React.createElement(Input, {
         placeholder: "Cari Part Number / Nama Part / Deskripsi...",
         value: recSearch,
         onChange: setRecSearch
@@ -9354,7 +9420,29 @@ function MekanikReport({
         }
       }, "Daftar Part Direkomendasikan (", recCart.length, ")"), recCart.length > 0 ? /*#__PURE__*/React.createElement(Table, {
         headers: ["Part Number", "Part Name", "Qty", "Alasan", ""],
-        rows: recCart.map((it, i) => [it.partNumber, it.partName, fmtNum(it.qty), it.alasan, canEditVisit && /*#__PURE__*/React.createElement(Btn, {
+        // Qty/Alasan are directly editable inline here (not just at add-time) — closes the gap where
+        // a mekanik could only fix a wrong qty/alasan by removing the item and re-searching/re-adding
+        // it from scratch. Editing here only changes the local cart; "💾 Simpan Part Recommendation"
+        // still has to be clicked to persist it and (if already approved/pulled) re-submit for Septi.
+        rows: recCart.map((it, i) => [it.partNumber, it.partName, canEditVisit ? /*#__PURE__*/React.createElement(Input, {
+          type: "number",
+          min: "1",
+          value: it.qty,
+          onChange: v2 => setRecCart(cart => cart.map((c2, j) => j === i ? {
+            ...c2,
+            qty: parseInt(v2) || 1
+          } : c2)),
+          style: {
+            width: 70
+          }
+        }) : fmtNum(it.qty), canEditVisit ? /*#__PURE__*/React.createElement(Input, {
+          value: it.alasan,
+          onChange: v2 => setRecCart(cart => cart.map((c2, j) => j === i ? {
+            ...c2,
+            alasan: v2
+          } : c2)),
+          placeholder: "Alasan..."
+        }) : it.alasan, canEditVisit && /*#__PURE__*/React.createElement(Btn, {
           size: "sm",
           variant: "danger",
           onClick: () => removeRecItem(i)
@@ -10873,7 +10961,8 @@ function MekanikReport({
       setVisitForm({
         ...visitForm,
         millId: v,
-        lokasi: mill ? mill.lokasi || [mill.alamat, mill.kabupaten].filter(Boolean).join(", ") : visitForm.lokasi
+        lokasi: mill ? mill.lokasi || [mill.alamat, mill.kabupaten].filter(Boolean).join(", ") : visitForm.lokasi,
+        unitTerkait: mill ? unitTerkaitFromMill(mill) || visitForm.unitTerkait : visitForm.unitTerkait
       });
     },
     options: [{
@@ -13069,6 +13158,15 @@ function QuotationPS({
     note: ""
   });
   const [pullModal, setPullModal] = useState(false);
+  // Stale-source warning: once a Part Recommendation is pulled into a Quotation, its status becomes
+  // "Ditarik ke Quotation". If the mekanik later goes back and edits/adds items on that same PR
+  // (Mekanik Report always resets its status back to "Menunggu Approval Septi" on save — see
+  // submitRecDoc), that status change is exactly the signal that the PR source has moved on since
+  // this Quotation was built from it, and Asil needs a heads-up that the two may now be out of sync.
+  const qHasStaleRec = q => (q.fromRecIds || []).some(id => {
+    const rec = partRecs.find(r => r.id === id);
+    return rec && rec.status !== "Ditarik ke Quotation";
+  });
   const [salesDiscount, setSalesDiscount] = useState({
     aktif: false,
     nominal: "",
@@ -13563,11 +13661,17 @@ function QuotationPS({
       cursor: "pointer"
     },
     onClick: () => setDetail(q)
-  }, q.nomor), q.tanggal, liveNama(q), q.salesManagerNama || "-", fmt(preTaxQ(q)), q.fromRecIds?.length ? /*#__PURE__*/React.createElement(Badge, {
+  }, q.nomor), q.tanggal, liveNama(q), q.salesManagerNama || "-", fmt(preTaxQ(q)), /*#__PURE__*/React.createElement("div", null, q.fromRecIds?.length ? /*#__PURE__*/React.createElement(Badge, {
     color: theme.purple
   }, "Dari Mekanik") : /*#__PURE__*/React.createElement(Badge, {
     color: theme.muted
-  }, "Manual"), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(Badge, {
+  }, "Manual"), qHasStaleRec(q) && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 4
+    }
+  }, /*#__PURE__*/React.createElement(Badge, {
+    color: theme.yellow
+  }, "⚠ Part Rec Direvisi"))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(Badge, {
     color: statusColor[q.status]
   }, q.status), needsFollowUp(q) && /*#__PURE__*/React.createElement("div", {
     style: {
@@ -13895,7 +13999,19 @@ function QuotationPS({
     style: {
       color: theme.text
     }
-  }, detail.revisiDari)), /*#__PURE__*/React.createElement(Table, {
+  }, detail.revisiDari)), qHasStaleRec(detail) && /*#__PURE__*/React.createElement(Card, {
+    style: {
+      background: theme.yellowBg || theme.surface,
+      border: `1px solid ${theme.yellow}`
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.yellow,
+      fontWeight: 600
+    }
+  }, "⚠ Part Recommendation sumber telah direvisi oleh mekanik setelah Quotation ini dibuat. Item/qty/alasan di bawah mungkin sudah tidak sesuai dengan rekomendasi terbaru — cek ulang di Mekanik Report sebelum melanjutkan.")), /*#__PURE__*/React.createElement(Table, {
     headers: ["Part Number", "Part Name", "Qty", "Harga", "Subtotal"],
     rows: detail.items.map(it => [it.partNumber, it.partName, fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)])
   }), /*#__PURE__*/React.createElement(PriceBreakdownBox, {
@@ -21592,7 +21708,7 @@ function DeliveryOrderModule({
   }, so.customerNama || "-")), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     onClick: () => openDOForSO(so.nomor)
-  }, "Buat DO"))))), /*#__PURE__*/React.createElement(Table, {
+  }, "Buat DO")))))), /*#__PURE__*/React.createElement(Table, {
     headers: ["No. DO", "Tanggal", "No. SO", "Tipe", "Client", "Ekspedisi/Driver", "Status"],
     rows: deliveryOrdersFiltered.map(d => [/*#__PURE__*/React.createElement("span", {
       style: {
@@ -21689,7 +21805,7 @@ function DeliveryOrderModule({
     onClick: () => setEditDO(null)
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     onClick: saveEditDO
-  }, "Simpan Perubahan"))))), /*#__PURE__*/React.createElement(Modal, {
+  }, "Simpan Perubahan")))), /*#__PURE__*/React.createElement(Modal, {
     open: !!detail,
     title: `Detail ${detail?.nomor}`,
     onClose: () => setDetail(null),
@@ -22393,15 +22509,38 @@ function InvoiceModule({
     setReviewNewInv(null);
   };
   const [bayarModal, setBayarModal] = useState(null);
-  const [bayarForm, setBayarForm] = useState({
+  const [editingPayIdx, setEditingPayIdx] = useState(null); // index into riwayatPembayaran being revised, or null = new entry
+  const emptyBayarForm = {
     tanggalPenerimaan: today(),
-    jumlah: ""
-  });
+    jumlah: "",
+    potonganPph: false,
+    biayaAdmin: ""
+  };
+  const [bayarForm, setBayarForm] = useState(emptyBayarForm);
+  // PPh 2% (Pasal 23 withholding) is computed off the invoice's "nilai pokok" — subtotal AFTER the
+  // invoice's own Diskon but BEFORE PPN — since that's the base the client's finance dept actually
+  // applies the withholding percentage to, not the PPN-inclusive total.
+  const pphBaseFor = inv => Math.max(0, (inv?.subtotal || 0) - (inv?.diskon || 0));
+  const pphAmountFor = inv => pphBaseFor(inv) * 0.02;
   const openBayar = inv => {
     setBayarModal(inv);
+    setEditingPayIdx(null);
+    setBayarForm(emptyBayarForm);
+  };
+  // Revisi entry pembayaran yang sudah tercatat sebelumnya — dibuka dari tombol ✏️ di Riwayat
+  // Pembayaran (detail modal). Mengisi ulang form dengan data entry itu supaya bisa diubah, lalu
+  // "bayar()" (lihat di bawah) mendeteksi editingPayIdx dan MENGGANTI entry itu alih-alih menambah
+  // entry baru.
+  const openEditPay = (inv, idx) => {
+    const r = (inv.riwayatPembayaran || [])[idx];
+    if (!r) return;
+    setBayarModal(inv);
+    setEditingPayIdx(idx);
     setBayarForm({
-      tanggalPenerimaan: today(),
-      jumlah: ""
+      tanggalPenerimaan: r.tanggal,
+      jumlah: String(r.jumlah || ""),
+      potonganPph: !!r.pph,
+      biayaAdmin: r.biayaAdmin ? String(r.biayaAdmin) : ""
     });
   };
   const bayar = () => {
@@ -22410,12 +22549,25 @@ function InvoiceModule({
     const inv = bayarModal;
     const arr = [...invoices];
     const idx = invoices.indexOf(inv);
-    const terbayar = (inv.terbayar || 0) + jml;
-    const riwayatPembayaran = [...(inv.riwayatPembayaran || []), {
+    const pphAmount = bayarForm.potonganPph ? pphAmountFor(inv) : 0;
+    const biayaAdminAmount = parseFloat(bayarForm.biayaAdmin) || 0;
+    // "jumlah" is cash actually received; PPh 2% and Biaya Admin never hit our bank account but both
+    // still count toward settling the invoice (PPh is remitted to the tax office by the client on
+    // our behalf; Biaya Admin is the sending bank's transfer fee deducted before it reaches us) — so
+    // both are added on top of jumlah for the purpose of tracking Sisa/Lunas, per Jef's confirmation.
+    const totalSettlement = jml + pphAmount + biayaAdminAmount;
+    const entry = {
       tanggal: bayarForm.tanggalPenerimaan,
       jumlah: jml,
+      pph: pphAmount,
+      biayaAdmin: biayaAdminAmount,
+      totalSettlement,
       dicatatOleh: session.nama
-    }];
+    };
+    const riwayatPembayaran = editingPayIdx !== null ? (inv.riwayatPembayaran || []).map((r, i) => i === editingPayIdx ? entry : r) : [...(inv.riwayatPembayaran || []), entry];
+    // terbayar is always re-derived as the sum of every entry's totalSettlement (not incrementally
+    // added) so revising one entry recomputes the running total correctly instead of drifting.
+    const terbayar = riwayatPembayaran.reduce((s, r) => s + (r.totalSettlement ?? r.jumlah ?? 0), 0);
     arr[idx] = {
       ...inv,
       terbayar,
@@ -22426,10 +22578,11 @@ function InvoiceModule({
     logAudit(store, session, {
       module: "Invoice",
       docNomor: inv.nomor,
-      action: "Input Penerimaan",
-      detail: `${fmt(jml)} pada ${bayarForm.tanggalPenerimaan} — Sisa: ${fmt(inv.total - terbayar)}`
+      action: editingPayIdx !== null ? "Revisi Penerimaan" : "Input Penerimaan",
+      detail: `${fmt(jml)}${pphAmount ? ` + PPh 2% ${fmt(pphAmount)}` : ""}${biayaAdminAmount ? ` + Biaya Admin ${fmt(biayaAdminAmount)}` : ""} pada ${bayarForm.tanggalPenerimaan} — Sisa: ${fmt(inv.total - terbayar)}`
     });
     setBayarModal(null);
+    setEditingPayIdx(null);
   };
   const openFaktur = inv => {
     setFakturModal(inv);
@@ -23076,8 +23229,11 @@ function InvoiceModule({
     onClick: () => openBayar(inv)
   }, "Catat Pembayaran")))), /*#__PURE__*/React.createElement(Modal, {
     open: !!bayarModal,
-    title: `Catat Penerimaan Pembayaran — ${bayarModal?.nomor}`,
-    onClose: () => setBayarModal(null),
+    title: editingPayIdx !== null ? `Revisi Penerimaan Pembayaran — ${bayarModal?.nomor}` : `Catat Penerimaan Pembayaran — ${bayarModal?.nomor}`,
+    onClose: () => {
+      setBayarModal(null);
+      setEditingPayIdx(null);
+    },
     width: 420
   }, bayarModal && /*#__PURE__*/React.createElement("div", {
     style: {
@@ -23105,7 +23261,7 @@ function InvoiceModule({
     type: "date",
     required: true
   }), /*#__PURE__*/React.createElement(Input, {
-    label: "Jumlah Diterima",
+    label: "Jumlah Diterima (Cash/Transfer)",
     value: bayarForm.jumlah,
     onChange: v => setBayarForm({
       ...bayarForm,
@@ -23113,7 +23269,45 @@ function InvoiceModule({
     }),
     type: "number",
     required: true
-  }), /*#__PURE__*/React.createElement("div", {
+  }), /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      fontSize: 13,
+      color: theme.text,
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: bayarForm.potonganPph,
+    onChange: e => setBayarForm({
+      ...bayarForm,
+      potonganPph: e.target.checked
+    })
+  }), "Potongan PPh 2% (dari nilai pokok sebelum PPN", bayarModal ? `: ${fmt(pphAmountFor(bayarModal))}` : "", ")"), /*#__PURE__*/React.createElement(Input, {
+    label: "Biaya Admin (opsional)",
+    value: bayarForm.biayaAdmin,
+    onChange: v => setBayarForm({
+      ...bayarForm,
+      biayaAdmin: v
+    }),
+    type: "number",
+    placeholder: "0"
+  }), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "PPh 2% dan Biaya Admin tidak masuk ke rekening tapi tetap dihitung melunaskan invoice (dipotong client / bank saat transfer)."), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 13,
+      fontWeight: 600,
+      color: theme.green
+    }
+  }, "Total Pelunasan Entry Ini: ", fmt((parseFloat(bayarForm.jumlah) || 0) + (bayarForm.potonganPph && bayarModal ? pphAmountFor(bayarModal) : 0) + (parseFloat(bayarForm.biayaAdmin) || 0))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
@@ -23121,11 +23315,14 @@ function InvoiceModule({
     }
   }, /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
-    onClick: () => setBayarModal(null)
+    onClick: () => {
+      setBayarModal(null);
+      setEditingPayIdx(null);
+    }
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     variant: "success",
     onClick: bayar
-  }, "✓ Simpan Penerimaan")))), /*#__PURE__*/React.createElement(Modal, {
+  }, editingPayIdx !== null ? "✓ Simpan Revisi" : "✓ Simpan Penerimaan")))), /*#__PURE__*/React.createElement(Modal, {
     open: !!detail,
     title: `Detail ${detail?.nomor}`,
     onClose: () => setDetail(null),
@@ -23237,8 +23434,14 @@ function InvoiceModule({
       color: theme.muted
     }
   }, "Riwayat Penerimaan Pembayaran"), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Tanggal", "Jumlah", "Dicatat Oleh"],
-    rows: detail.riwayatPembayaran.map(r => [r.tanggal, fmt(r.jumlah), r.dicatatOleh])
+    headers: ["Tanggal", "Cash/Transfer", "PPh 2%", "Biaya Admin", "Total Pelunasan", "Dicatat Oleh", ""],
+    rows: detail.riwayatPembayaran.map((r, i) => [r.tanggal, fmt(r.jumlah), r.pph ? fmt(r.pph) : "-", r.biayaAdmin ? fmt(r.biayaAdmin) : "-", fmt(r.totalSettlement ?? r.jumlah), r.dicatatOleh, (isFinance || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      onClick: () => {
+        openEditPay(detail, i);
+        setDetail(null);
+      }
+    }, "✏️")])
   })), detail.statusApproval === "Disetujui GM" && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
