@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-05.2";
+const APP_BUILD = "2026-08-05.3";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -22242,7 +22242,16 @@ function InvoiceModule({
   // Now an SO's items can be split across several invoices (e.g. jasa/parts billed separately), so
   // instead we track which specific items have already been invoiced and keep offering the SO in
   // the picker as long as at least one item still isn't on any invoice.
-  const itemKey = it => `${it.partNumber || ""}::${it.partName || ""}`;
+  // BUG FIX (SO-003/SO-004 stuck in "SO ONGOING" picker forever): this used to key on
+  // partNumber+partName combined. But an invoice's item partName is often manually
+  // expanded/clarified at invoice-creation time (e.g. SO item "SEAL KIT" -> invoice item "SEAL KIT
+  // TELESCOPIC P/N 93093") while partNumber stays identical — that partName drift alone made the
+  // combined key mismatch, so soUninvoicedItems() kept thinking the item was never invoiced even
+  // though it clearly was, leaving the SO stuck offering itself for "more" invoicing forever. Key on
+  // partNumber alone whenever it's a real part number; only fall back to the combined key for rows
+  // that don't have one (e.g. termin/service line items using "-" as a placeholder partNumber),
+  // where partName is the only thing that can disambiguate them.
+  const itemKey = it => it.partNumber && it.partNumber !== "-" ? it.partNumber : `${it.partNumber || ""}::${it.partName || ""}`;
   const invoicedItemKeySet = soNomor => new Set(soInvoices(soNomor).flatMap(inv => (inv.items || []).map(itemKey)));
   const soUninvoicedItems = so => {
     const used = invoicedItemKeySet(so.nomor);
@@ -33295,7 +33304,7 @@ function JurnalModule({
     onClick: () => setModal(false)
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     onClick: save
-  }, "Simpan"))))), /*#__PURE__*/React.createElement(Modal, {
+  }, "Simpan")))), /*#__PURE__*/React.createElement(Modal, {
     open: !!payModal,
     title: payModal?.mode === "lunas" ? `Tandai Lunas via ${payModal.metode} — ${payModal.entry.id}` : `Edit Entry — ${payModal?.entry?.id}`,
     onClose: () => setPayModal(null),
@@ -33376,7 +33385,7 @@ function JurnalModule({
     onClick: () => setPayModal(null)
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     onClick: payModal.mode === "lunas" || payModal.entry.status === "Lunas" ? confirmPayModal : savePlainEdit
-  }, payModal.mode === "lunas" ? "Konfirmasi Lunas" : "Simpan"))));
+  }, payModal.mode === "lunas" ? "Konfirmasi Lunas" : "Simpan")))));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -34966,11 +34975,16 @@ function SignatureModal({
     reader.readAsDataURL(file);
   };
   const save = () => {
-    const arr = employees.map(e => e.username === session.username ? {
+    // Functional update (not a plain `employees.map(...)` snapshot) — this modal is opened
+    // self-service by any employee at any time, so its `employees` closure can easily be stale
+    // by the time Save is clicked (e.g. HR just edited Tanggal Masuk in Payroll a moment earlier).
+    // Saving from a stale snapshot here would silently overwrite that other, more recent edit back
+    // to its old value — the same class of race condition fixed elsewhere (Payroll/CustomerDB) this
+    // session; this was the one remaining call site still using a plain array set.
+    setEmployees(prev => (prev || []).map(e => e.username === session.username ? {
       ...e,
       signature: preview
-    } : e);
-    setEmployees(arr);
+    } : e));
     alert("Tanda tangan digital berhasil disimpan.");
     onClose();
   };
