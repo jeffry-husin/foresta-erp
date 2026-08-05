@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-04.12";
+const APP_BUILD = "2026-08-05.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -907,7 +907,7 @@ const ROLE_DEFS = {
   finance_director: {
     label: "Finance Director",
     color: "#f59e0b",
-    modules: ["dashboard", "invoice", "payroll", "customer", "supplier", "financial_dashboard", "client_history", "attendance", "jurnal", "price_analysis", "price_analysis_purchase"]
+    modules: ["dashboard", "invoice", "payroll", "customer", "supplier", "financial_dashboard", "client_history", "attendance", "jurnal", "bank_recon", "price_analysis", "price_analysis_purchase"]
   },
   sales_manager: {
     label: "Sales Manager",
@@ -957,7 +957,7 @@ const ROLE_DEFS = {
   finance: {
     label: "Finance",
     color: "#eab308",
-    modules: ["dashboard", "invoice", "financial_dashboard", "attendance", "master_coa", "jurnal"]
+    modules: ["dashboard", "invoice", "financial_dashboard", "attendance", "master_coa", "jurnal", "bank_recon"]
   },
   hrd: {
     label: "HRD",
@@ -1240,6 +1240,10 @@ const ALL_MODULES = [{
   icon: "📒",
   label: "Jurnal"
 }, {
+  id: "bank_recon",
+  icon: "🏦",
+  label: "Rekonsiliasi Bank"
+}, {
   id: "audit_trail",
   icon: "📜",
   label: "Audit Trail"
@@ -1284,7 +1288,7 @@ const SIDEBAR_GROUPS = [{
 }, {
   key: "finance",
   label: "FINANCE",
-  moduleIds: ["invoice", "jurnal"]
+  moduleIds: ["invoice", "jurnal", "bank_recon"]
 }, {
   key: "hr",
   label: "HR",
@@ -2109,7 +2113,8 @@ function useStore() {
   const [salesActivities, setSalesActivities] = usePersisted("erp_sales_activities", []); // Daily sales activity log: visits, calls, operational costs
   const [attendance, setAttendance] = usePersisted("erp_attendance", []); // Absensi: daily check-in records for uang makan/harian + lembur calc
   const [rekapAbsensi, setRekapAbsensi] = usePersisted("erp_rekap_absensi", []); // Absensi "Rekap Mesin": corrected weekly recap parsed from fingerprint-machine XLS, feeds Payroll
-  const [jurnal, setJurnal] = usePersisted("erp_jurnal", []); // Jurnal: all outgoing costs (auto from PO/Payroll/Travel + manual entries), approve when paid
+  const [jurnal, setJurnal] = usePersisted("erp_jurnal", []); // Jurnal: outgoing costs (auto from PO/Payroll/Travel + manual entries) AND incoming payments (auto from Invoice) — tipe "Pengeluaran"/"Pemasukan" distinguishes the two; mark Lunas via BCA/MANDIRI/CASH, which (for BCA/MANDIRI) posts a matching entry into Rekonsiliasi Bank
+  const [bankRecon, setBankRecon] = usePersisted("erp_bank_recon", []); // Rekonsiliasi Bank: rekening koran ledger per bank (BCA/MANDIRI) — manual entries + auto-posted entries from Jurnal "Tandai Lunas"
   const [internalDOs, setInternalDOs] = usePersisted("erp_internal_do", []); // Internal Delivery Order: Office -> Workshop, auto-created on Goods Receipt
   const [workshopOpsExpenses, setWorkshopOpsExpenses] = usePersisted("erp_workshop_ops", []); // Workshop operational expenses (Epy inputs, from Master COA)
   const [basts, setBasts] = usePersisted("erp_basts", []); // BAPP (Berita Acara Penyelesaian Pekerjaan) entries, per visit
@@ -2361,6 +2366,8 @@ function useStore() {
     setRekapAbsensi,
     jurnal,
     setJurnal,
+    bankRecon,
+    setBankRecon,
     internalDOs,
     setInternalDOs,
     workshopOpsExpenses,
@@ -7870,6 +7877,40 @@ function MekanikReport({
     });
     setEditingJenisPekerjaan(false);
   };
+  // Unit Terkait / Lokasi are two separate fields on the visit record (see the create form below,
+  // which already has them as two distinct inputs) — this just lets them be corrected after the
+  // fact from the "Detail Kunjungan" popup, same edit-in-place pattern as Jenis Berita Acara above.
+  const [editingUnitLokasi, setEditingUnitLokasi] = useState(false);
+  const [unitLokasiForm, setUnitLokasiForm] = useState({
+    unitTerkait: "",
+    lokasi: ""
+  });
+  const startEditUnitLokasi = () => {
+    setUnitLokasiForm({
+      unitTerkait: detailVisit.unitTerkait || "",
+      lokasi: detailVisit.lokasi || ""
+    });
+    setEditingUnitLokasi(true);
+  };
+  const saveUnitLokasi = () => {
+    setVisits(visits.map(x => x.id === detailVisit.id ? {
+      ...x,
+      unitTerkait: unitLokasiForm.unitTerkait,
+      lokasi: unitLokasiForm.lokasi
+    } : x));
+    setDetailVisit(d => d && d.id === detailVisit.id ? {
+      ...d,
+      unitTerkait: unitLokasiForm.unitTerkait,
+      lokasi: unitLokasiForm.lokasi
+    } : d);
+    logAudit(store, session, {
+      module: "Mekanik Report",
+      docNomor: detailVisit.id,
+      action: "Edit Unit/Lokasi",
+      detail: `Unit: "${detailVisit.unitTerkait || "-"}" → "${unitLokasiForm.unitTerkait || "-"}" · Lokasi: "${detailVisit.lokasi || "-"}" → "${unitLokasiForm.lokasi || "-"}"`
+    });
+    setEditingUnitLokasi(false);
+  };
   const [formType, setFormType] = useState(null); // 'dar' | 'partrec' | 'status' | 'bast'
   // Full-screen "page" takeover for DAR / Part Recommendation / Status Report / BAPP — clicking the
   // corresponding button in the Kunjungan Kerja table sets this instead of opening a small modal,
@@ -10441,10 +10482,10 @@ function MekanikReport({
     storageKey: "mr_visits_ongoing",
     defaultOpen: true
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. Kunjungan", "Tanggal", "Jenis", "Client", "Unit/Lokasi", "Mekanik", "DAR", "Part Rec.", "Status", "BAPP", "Inspection", "Surat Tugas", "Aksi"],
+    headers: ["No. Kunjungan", "Tanggal", "Jenis", "Client", "Unit Terkait", "Lokasi", "Mekanik", "DAR", "Part Rec.", "Status", "BAPP", "Inspection", "Surat Tugas", "Aksi"],
     rows: myVisitsOngoing.map(v => [visitIdCell(v), v.tanggal, /*#__PURE__*/React.createElement(Badge, {
       color: theme.purple
-    }, v.jenisBeritaAcara), v.customerNama, v.unitTerkait || v.lokasi, (v.mekanikNamaList && v.mekanikNamaList.length ? v.mekanikNamaList.join(", ") : v.mekanikNama), openVisitPageBadge(v, "dar", visitDars(v.id).length ? theme.green : theme.muted, visitDars(v.id).length + " entri"), openVisitPageBadge(v, "partrec", visitRecDoc(v.id) ? theme.purple : theme.muted, (visitRecDoc(v.id)?.items.length || 0) + " item"), openVisitPageBadge(v, "status", visitStatus(v.id).length ? theme.cyan : theme.muted, visitStatus(v.id).length + " entri"), openVisitPageBadge(v, "bast", visitBasts(v.id).length ? theme.green : theme.muted, visitBasts(v.id).length), openVisitPageBadge(v, "inspection", visitInspections(v.id).length ? theme.cyan : theme.muted, visitInspections(v.id).length + " entri"), openVisitPageBadge(v, "surattugas", visitSuratTugas(v.id).length ? theme.purple : theme.muted, visitSuratTugas(v.id).length + " entri"), /*#__PURE__*/React.createElement(Btn, {
+    }, v.jenisBeritaAcara), v.customerNama, v.unitTerkait || "-", v.lokasi || "-", (v.mekanikNamaList && v.mekanikNamaList.length ? v.mekanikNamaList.join(", ") : v.mekanikNama), openVisitPageBadge(v, "dar", visitDars(v.id).length ? theme.green : theme.muted, visitDars(v.id).length + " entri"), openVisitPageBadge(v, "partrec", visitRecDoc(v.id) ? theme.purple : theme.muted, (visitRecDoc(v.id)?.items.length || 0) + " item"), openVisitPageBadge(v, "status", visitStatus(v.id).length ? theme.cyan : theme.muted, visitStatus(v.id).length + " entri"), openVisitPageBadge(v, "bast", visitBasts(v.id).length ? theme.green : theme.muted, visitBasts(v.id).length), openVisitPageBadge(v, "inspection", visitInspections(v.id).length ? theme.cyan : theme.muted, visitInspections(v.id).length + " entri"), openVisitPageBadge(v, "surattugas", visitSuratTugas(v.id).length ? theme.purple : theme.muted, visitSuratTugas(v.id).length + " entri"), /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       onClick: () => markVisitSelesai(v)
     }, "✓ Selesai")]),
@@ -10457,16 +10498,19 @@ function MekanikReport({
     storageKey: "mr_visits_selesai",
     defaultOpen: false
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. Kunjungan", "Tanggal", "Selesai", "Jenis", "Client", "Unit/Lokasi", "Mekanik", "DAR", "Part Rec.", "BAPP", "Inspection", "Surat Tugas"],
+    headers: ["No. Kunjungan", "Tanggal", "Selesai", "Jenis", "Client", "Unit Terkait", "Lokasi", "Mekanik", "DAR", "Part Rec.", "BAPP", "Inspection", "Surat Tugas"],
     rows: myVisitsSelesai.map(v => [visitIdCell(v), v.tanggal, v.tanggalSelesai || "-", /*#__PURE__*/React.createElement(Badge, {
       color: theme.purple
-    }, v.jenisBeritaAcara), v.customerNama, v.unitTerkait || v.lokasi, (v.mekanikNamaList && v.mekanikNamaList.length ? v.mekanikNamaList.join(", ") : v.mekanikNama), openVisitPageBadge(v, "dar", visitDars(v.id).length ? theme.green : theme.muted, visitDars(v.id).length + " entri"), openVisitPageBadge(v, "partrec", visitRecDoc(v.id) ? theme.purple : theme.muted, (visitRecDoc(v.id)?.items.length || 0) + " item"), openVisitPageBadge(v, "bast", visitBasts(v.id).length ? theme.green : theme.muted, visitBasts(v.id).length), openVisitPageBadge(v, "inspection", visitInspections(v.id).length ? theme.cyan : theme.muted, visitInspections(v.id).length + " entri"), openVisitPageBadge(v, "surattugas", visitSuratTugas(v.id).length ? theme.purple : theme.muted, visitSuratTugas(v.id).length + " entri")]),
+    }, v.jenisBeritaAcara), v.customerNama, v.unitTerkait || "-", v.lokasi || "-", (v.mekanikNamaList && v.mekanikNamaList.length ? v.mekanikNamaList.join(", ") : v.mekanikNama), openVisitPageBadge(v, "dar", visitDars(v.id).length ? theme.green : theme.muted, visitDars(v.id).length + " entri"), openVisitPageBadge(v, "partrec", visitRecDoc(v.id) ? theme.purple : theme.muted, (visitRecDoc(v.id)?.items.length || 0) + " item"), openVisitPageBadge(v, "bast", visitBasts(v.id).length ? theme.green : theme.muted, visitBasts(v.id).length), openVisitPageBadge(v, "inspection", visitInspections(v.id).length ? theme.cyan : theme.muted, visitInspections(v.id).length + " entri"), openVisitPageBadge(v, "surattugas", visitSuratTugas(v.id).length ? theme.purple : theme.muted, visitSuratTugas(v.id).length + " entri")]),
     onDelete: isOwnerLike ? i => deleteVisit(myVisitsSelesai[i]) : undefined,
     emptyMsg: "Belum ada kunjungan kerja selesai"
   }))), /*#__PURE__*/React.createElement(Modal, {
     open: !!detailVisit && !formType && !visitPage,
     title: `Detail Kunjungan: ${detailVisit?.id}`,
-    onClose: () => setDetailVisit(null),
+    onClose: () => {
+      setDetailVisit(null);
+      setEditingUnitLokasi(false);
+    },
     width: 720
   }, detailVisit && /*#__PURE__*/React.createElement("div", {
     style: {
@@ -10524,15 +10568,68 @@ function MekanikReport({
     size: "sm",
     variant: "ghost",
     onClick: () => setEditingJenisPekerjaan(true)
-  }, "✏️"))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+  }, "✏️"))), editingUnitLokasi ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      gridColumn: "1 / -1",
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+      background: theme.surface,
+      borderRadius: 8,
+      padding: 10
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Unit Terkait",
+    value: unitLokasiForm.unitTerkait,
+    onChange: v => setUnitLokasiForm({
+      ...unitLokasiForm,
+      unitTerkait: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Lokasi",
+    value: unitLokasiForm.lokasi,
+    onChange: v => setUnitLokasiForm({
+      ...unitLokasiForm,
+      lokasi: v
+    })
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => setEditingUnitLokasi(false)
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    onClick: saveUnitLokasi
+  }, "Simpan"))) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.muted
     }
-  }, "Unit/Lokasi:"), " ", /*#__PURE__*/React.createElement("strong", {
+  }, "Unit Terkait:"), " ", /*#__PURE__*/React.createElement("strong", {
     style: {
       color: theme.text
     }
-  }, detailVisit.unitTerkait || detailVisit.lokasi)), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+  }, detailVisit.unitTerkait || "-"), (isOwnerLike || isSepti || isMekanik) && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: startEditUnitLokasi
+  }, "✏️")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted
+    }
+  }, "Lokasi:"), " ", /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, detailVisit.lokasi || "-"), (isOwnerLike || isSepti || isMekanik) && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: startEditUnitLokasi
+  }, "✏️"))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.muted
     }
@@ -17093,6 +17190,7 @@ function PurchaseOrderModule({
       supplierId: form.supplierId,
       supplierNama: sup?.nama,
       currency: isLocal ? "IDR" : form.currency,
+      kursReferensi: isLocal ? null : parseFloat(form.kursReferensi) || null,
       items,
       subtotal: itemsSubtotal,
       biayaTambahan,
@@ -17897,7 +17995,15 @@ function PurchaseOrderModule({
     style: {
       color: theme.text
     }
-  }, detail.currency)), detail.irNomors && detail.irNomors.length > 0 && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+  }, detail.currency)), detail.kursReferensi && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted
+    }
+  }, "Kurs Referensi:"), " ", /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, "Rp ", fmtNum(detail.kursReferensi), " / ", detail.currency)), detail.irNomors && detail.irNomors.length > 0 && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.muted
     }
@@ -18058,7 +18164,22 @@ function PurchaseOrderModule({
       value: c,
       label: c
     }))
-  })), /*#__PURE__*/React.createElement("div", {
+  }), !isLocal && /*#__PURE__*/React.createElement(Input, {
+    label: "Kurs Referensi (opsional)",
+    type: "number",
+    value: form.kursReferensi || "",
+    onChange: v => setForm({
+      ...form,
+      kursReferensi: v
+    }),
+    placeholder: `IDR per 1 ${form.currency || "unit"} saat PO dibuat`
+  })), form.kursReferensi && !isLocal && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 11,
+      color: theme.muted
+    }
+  }, "ℹ️ Kurs referensi ini hanya catatan estimasi — dipakai untuk menghitung selisih kurs otomatis nanti saat pembayaran PO ini ditandai Lunas di Jurnal."), /*#__PURE__*/React.createElement("div", {
     style: {
       border: `1px solid ${theme.border}`,
       borderRadius: 10,
@@ -28240,8 +28361,19 @@ function PriceAnalysisModule({
 }) {
   const {
     quotationsUnit,
-    quotationsPS
+    quotationsPS,
+    customers,
+    clientGroups
   } = store;
+  // Look up a customer's Master Group name (added to Database Client per task #97) by their
+  // display name as stored on the quotation snapshot (customerNama) — quotations don't carry a
+  // live customerId reference, so we match by name the same way the rest of this module already
+  // groups history entries (custMap keyed by p.customerNama).
+  const groupNamaForCustomerNama = nama => {
+    const cust = (customers || []).find(c => c.nama === nama);
+    if (!cust || !cust.groupId) return "-";
+    return (clientGroups || []).find(g => g.id === cust.groupId)?.nama || "-";
+  };
   const allPoints = [];
   (quotationsUnit || []).forEach(q => {
     if (q.status === "Draft") return;
@@ -28502,8 +28634,8 @@ function PriceAnalysisModule({
       fontSize: 15
     }
   }, "Perbandingan Antar Customer"), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Customer", "Jumlah Transaksi", "Harga Terendah", "Harga Tertinggi", "Harga Terakhir", "Tanggal Terakhir"],
-    rows: perCustomer.map(c => [c.customerNama, c.count, fmt(c.min), fmt(c.max), fmt(c.lastHarga), c.lastTanggal]),
+    headers: ["Customer", "Group", "Jumlah Transaksi", "Harga Terendah", "Harga Tertinggi", "Harga Terakhir", "Tanggal Terakhir"],
+    rows: perCustomer.map(c => [c.customerNama, groupNamaForCustomerNama(c.customerNama), c.count, fmt(c.min), fmt(c.max), fmt(c.lastHarga), c.lastTanggal]),
     emptyMsg: "-"
   })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
     style: {
@@ -31977,6 +32109,280 @@ function KPISalesModule({
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// REKONSILIASI BANK — rekening koran ledger per bank account (BCA / MANDIRI). Entries arrive two
+// ways: (1) auto-posted when a Jurnal entry is "Tandai Lunas" via BCA/MANDIRI (Pengeluaran =
+// Keluar, Pemasukan = Masuk — see JurnalModule's markLunasVia below, which is the only place that
+// writes bankRecon entries with a sourceModule/sourceId), and (2) manual entries (deposits,
+// transfers, bank fees, opening balance, etc.) added directly here. "Saldo Awal" is deliberately
+// just a normal manual Masuk entry (dated whenever the ledger starts) rather than a separate
+// schema field — keeps this module's data model to one flat list, consistent with how every other
+// module in this app stores its records.
+const BANK_ACCOUNTS = ["BCA", "MANDIRI"];
+function BankReconModule({
+  store,
+  session
+}) {
+  const {
+    bankRecon,
+    setBankRecon
+  } = store;
+  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director" || session.role === "finance";
+  const [modal, setModal] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [form, setForm] = useState({
+    bank: "BCA",
+    tanggal: today(),
+    keterangan: "",
+    tipe: "Masuk",
+    nominal: ""
+  });
+  const openAdd = (bank = "BCA") => {
+    setForm({
+      bank,
+      tanggal: today(),
+      keterangan: "",
+      tipe: "Masuk",
+      nominal: ""
+    });
+    setEditingId(null);
+    setModal(true);
+  };
+  const openEdit = e => {
+    setForm({
+      bank: e.bank,
+      tanggal: e.tanggal,
+      keterangan: e.keterangan,
+      tipe: e.tipe,
+      nominal: e.nominal
+    });
+    setEditingId(e.id);
+    setModal(true);
+  };
+  const save = () => {
+    if (!form.keterangan || !form.nominal) return alert("Keterangan dan nominal wajib diisi");
+    if (editingId) {
+      setBankRecon(bankRecon.map(e => e.id === editingId ? {
+        ...e,
+        ...form,
+        nominal: parseFloat(form.nominal) || 0
+      } : e));
+      logAudit(store, session, {
+        module: "Rekonsiliasi Bank",
+        docNomor: editingId,
+        action: "Edit",
+        detail: `${form.bank} — ${form.keterangan} — ${fmt(parseFloat(form.nominal) || 0)}`
+      });
+    } else {
+      const entry = {
+        id: "BRC-" + uid(),
+        ...form,
+        nominal: parseFloat(form.nominal) || 0,
+        createdBy: session.nama
+      };
+      setBankRecon([...bankRecon, entry]);
+      logAudit(store, session, {
+        module: "Rekonsiliasi Bank",
+        docNomor: entry.id,
+        action: "Tambah",
+        detail: `${form.bank} — ${form.keterangan} — ${fmt(entry.nominal)}`
+      });
+    }
+    setModal(false);
+    setEditingId(null);
+  };
+  const deleteEntry = e => {
+    const warn = e.sourceId ? ` Entry ini tersinkron otomatis dari Jurnal (${e.sourceId}) — jika status Lunas di Jurnal diedit lagi, entry ini bisa muncul kembali secara terpisah.` : "";
+    if (!confirm("Hapus entry Rekonsiliasi Bank ini?" + warn)) return;
+    setBankRecon(bankRecon.filter(x => x.id !== e.id));
+    logAudit(store, session, {
+      module: "Rekonsiliasi Bank",
+      docNomor: e.id,
+      action: "Hapus",
+      detail: `${e.bank} — ${e.keterangan}`
+    });
+  };
+  const [search, setSearch] = useState("");
+  const matchesSearch = e => !search.trim() || [e.bank, e.keterangan, e.sourceId].filter(Boolean).some(x => String(x).toLowerCase().includes(search.trim().toLowerCase()));
+  const saldoFor = bank => bankRecon.filter(e => e.bank === bank).reduce((s, e) => s + (e.tipe === "Masuk" ? e.nominal : -e.nominal), 0);
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      flexWrap: "wrap",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("h2", {
+    style: {
+      margin: 0,
+      color: theme.text
+    }
+  }, "Rekonsiliasi Bank")), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Mencatat mutasi rekening koran per bank. Entry Masuk/Keluar tersinkron otomatis saat entry Jurnal ditandai Lunas via BCA/MANDIRI — CASH tidak memengaruhi saldo di sini."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+      gap: 14
+    }
+  }, BANK_ACCOUNTS.map(bank => /*#__PURE__*/React.createElement(Card, {
+    key: bank
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "Saldo ", bank), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 24,
+      fontWeight: 800,
+      color: saldoFor(bank) >= 0 ? theme.green : theme.red,
+      marginTop: 6
+    }
+  }, fmt(saldoFor(bank))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "Total Saldo Bank"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 24,
+      fontWeight: 800,
+      color: theme.text,
+      marginTop: 6
+    }
+  }, fmt(BANK_ACCOUNTS.reduce((s, b) => s + saldoFor(b), 0))))), isOwnerLike && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      flexWrap: "wrap"
+    }
+  }, BANK_ACCOUNTS.map(bank => /*#__PURE__*/React.createElement(Btn, {
+    key: bank,
+    onClick: () => openAdd(bank)
+  }, "+ Entry Manual ", bank))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari bank / keterangan...",
+    value: search,
+    onChange: setSearch,
+    style: {
+      marginBottom: 12
+    }
+  }), BANK_ACCOUNTS.map(bank => /*#__PURE__*/React.createElement(CollapsibleSection, {
+    key: bank,
+    title: `MUTASI ${bank}`,
+    count: bankRecon.filter(e => e.bank === bank && matchesSearch(e)).length,
+    badgeColor: theme.cyan,
+    storageKey: `bank_recon_${bank}`,
+    defaultOpen: true
+  }, /*#__PURE__*/React.createElement(Table, {
+    headers: ["Tanggal", "Keterangan", "Tipe", "Nominal", "Sumber", "Aksi"],
+    rows: bankRecon.filter(e => e.bank === bank && matchesSearch(e)).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || "")).map(e => [e.tanggal, e.keterangan, /*#__PURE__*/React.createElement(Badge, {
+      color: e.tipe === "Masuk" ? theme.green : theme.red
+    }, e.tipe), fmt(e.nominal), e.sourceModule ? `${e.sourceModule} (${e.sourceId})` : "Manual", isOwnerLike && /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => openEdit(e)
+    }, "✏️"), /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "danger",
+      onClick: () => deleteEntry(e)
+    }, "🗑️"))]),
+    emptyMsg: `Belum ada mutasi ${bank}`
+  })))), /*#__PURE__*/React.createElement(Modal, {
+    open: modal,
+    title: editingId ? "Edit Entry Rekonsiliasi Bank" : "Entry Manual Rekonsiliasi Bank",
+    onClose: () => {
+      setModal(false);
+      setEditingId(null);
+    },
+    width: 480
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    label: "Bank",
+    value: form.bank,
+    onChange: v => setForm({
+      ...form,
+      bank: v
+    }),
+    options: BANK_ACCOUNTS.map(b => ({
+      value: b,
+      label: b
+    }))
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal",
+    type: "date",
+    value: form.tanggal,
+    onChange: v => setForm({
+      ...form,
+      tanggal: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Keterangan",
+    value: form.keterangan,
+    onChange: v => setForm({
+      ...form,
+      keterangan: v
+    })
+  }), /*#__PURE__*/React.createElement(Select, {
+    label: "Tipe",
+    value: form.tipe,
+    onChange: v => setForm({
+      ...form,
+      tipe: v
+    }),
+    options: [{
+      value: "Masuk",
+      label: "Masuk (menambah saldo)"
+    }, {
+      value: "Keluar",
+      label: "Keluar (mengurangi saldo)"
+    }]
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Nominal",
+    type: "number",
+    value: form.nominal,
+    onChange: v => setForm({
+      ...form,
+      nominal: v
+    })
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => {
+      setModal(false);
+      setEditingId(null);
+    }
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: save
+  }, "Simpan")))));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // JURNAL — all outgoing costs (auto from PO/Payroll + manual), approve = mark paid
 // ════════════════════════════════════════════════════════════════════════════
 function JurnalModule({
@@ -31986,12 +32392,15 @@ function JurnalModule({
   const {
     jurnal,
     setJurnal,
+    bankRecon,
+    setBankRecon,
     poLocal,
     poOverseas,
     payrollRuns,
-    tickets
+    tickets,
+    invoices
   } = store;
-  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
+  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director" || session.role === "finance";
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState(null);
   const [form, setForm] = useState({
@@ -32000,10 +32409,15 @@ function JurnalModule({
     keterangan: "",
     nominal: ""
   });
-  const [filter, setFilter] = useState("Semua");
 
   // Auto-sync sources into jurnal entries (idempotent: skip if sourceId already logged).
-  // Runs in an effect (not during render) to avoid re-render loops.
+  // Runs in an effect (not during render) to avoid re-render loops. Two sides now: Pengeluaran
+  // (PO Lokal/Overseas, Payroll, Tiket — money going out, unchanged from before) and Pemasukan
+  // (Invoice — money coming in from customers), so the Debit/Kredit split has real meaning.
+  // Invoices already fully paid historically are sync'd straight to "Lunas" (no bank tagged, since
+  // we don't retroactively know which account received old payments) so they don't inflate
+  // "Piutang Belum Diterima" for money that was, in fact, already collected before this feature
+  // existed; anything not yet fully paid syncs as "Belum Lunas" awaiting a bank-tagged Tandai Lunas.
   useEffect(() => {
     const existingSourceIds = new Set(jurnal.map(j => j.sourceId).filter(Boolean));
     const autoEntries = [];
@@ -32014,8 +32428,10 @@ function JurnalModule({
         kategori: "Purchase Order Lokal",
         keterangan: `${p.nomor} — ${p.supplierNama}`,
         nominal: p.total,
+        currency: "IDR",
         sourceId: p.nomor,
         sourceModule: "PO Lokal",
+        tipe: "Pengeluaran",
         status: "Belum Lunas"
       });
     });
@@ -32026,8 +32442,11 @@ function JurnalModule({
         kategori: "Purchase Order Overseas",
         keterangan: `${p.nomor} — ${p.supplierNama}`,
         nominal: p.total,
+        currency: p.currency || "IDR",
+        kursReferensi: p.kursReferensi || null,
         sourceId: p.nomor,
         sourceModule: "PO Overseas",
+        tipe: "Pengeluaran",
         status: "Belum Lunas"
       });
     });
@@ -32039,8 +32458,10 @@ function JurnalModule({
         kategori: "Payroll",
         keterangan: `Payroll bulan ${run.bulan}`,
         nominal: run.runs.reduce((s, r) => s + r.totalGaji, 0),
+        currency: "IDR",
         sourceId: srcId,
         sourceModule: "Payroll",
+        tipe: "Pengeluaran",
         status: "Belum Lunas"
       });
     });
@@ -32051,19 +32472,44 @@ function JurnalModule({
         kategori: "Tiket Perjalanan",
         keterangan: `${t.nomor} — ${t.mekanikNama} (${t.dari}→${t.ke})`,
         nominal: t.harga,
+        currency: "IDR",
         sourceId: t.nomor,
         sourceModule: "Tiket",
+        tipe: "Pengeluaran",
         status: "Belum Lunas"
       });
     });
+    (invoices || []).forEach(inv => {
+      if (!existingSourceIds.has(inv.nomor)) autoEntries.push({
+        id: "JRN-" + uid(),
+        tanggal: inv.tanggal,
+        kategori: "Pembayaran Invoice",
+        keterangan: `${inv.nomor} — ${inv.customerNama}`,
+        nominal: inv.total,
+        currency: "IDR",
+        sourceId: inv.nomor,
+        sourceModule: "Invoice",
+        tipe: "Pemasukan",
+        ...(inv.statusBayar === "Lunas" ? {
+          status: "Lunas",
+          paidBy: "(riwayat sebelum Rekonsiliasi Bank)",
+          paidDate: inv.tanggal,
+          metodeBayar: null
+        } : {
+          status: "Belum Lunas"
+        })
+      });
+    });
     if (autoEntries.length > 0) setJurnal(prev => [...prev, ...autoEntries]);
-  }, [poLocal, poOverseas, payrollRuns, tickets]);
+  }, [poLocal, poOverseas, payrollRuns, tickets, invoices]);
   const save = () => {
     if (!form.keterangan || !form.nominal) return alert("Keterangan dan nominal wajib diisi");
     setJurnal([...jurnal, {
       id: "JRN-" + uid(),
       ...form,
       nominal: parseFloat(form.nominal) || 0,
+      currency: "IDR",
+      tipe: form.tipe || "Pengeluaran",
       status: "Belum Lunas",
       createdBy: session.nama
     }]);
@@ -32072,29 +32518,140 @@ function JurnalModule({
       tanggal: today(),
       kategori: "Lainnya",
       keterangan: "",
-      nominal: ""
+      nominal: "",
+      tipe: "Pengeluaran"
     });
   };
-  const markLunas = j => {
+  // Tandai Lunas is now a bank-aware flow: BCA/MANDIRI post a matching entry into Rekonsiliasi
+  // Bank (Masuk for Pemasukan entries, Keluar for Pengeluaran), CASH does not touch any bank
+  // balance — but all three still ask for the actual payment date (per request, not just
+  // BCA/MANDIRI). Foreign-currency entries (PO Overseas) additionally ask for the Kurs (rate) used
+  // for THIS payment, since that's what actually determines the IDR amount leaving the bank and
+  // (if a Kurs Referensi was set on the PO) the resulting selisih kurs gain/loss.
+  const [payModal, setPayModal] = useState(null); // { entry, mode: 'lunas'|'edit', metode, tanggal, kursBayar, nominal, keterangan }
+  const openLunas = (entry, metode) => setPayModal({
+    entry,
+    mode: "lunas",
+    metode,
+    tanggal: today(),
+    kursBayar: entry.kursBayar || entry.kursReferensi || "",
+    nominal: entry.nominal,
+    keterangan: entry.keterangan
+  });
+  const openEditEntry = entry => setPayModal({
+    entry,
+    mode: "edit",
+    metode: entry.metodeBayar || "CASH",
+    tanggal: entry.status === "Lunas" ? entry.paidDate || today() : entry.tanggal,
+    kursBayar: entry.kursBayar || entry.kursReferensi || "",
+    nominal: entry.nominal,
+    keterangan: entry.keterangan
+  });
+  // Creates/updates/removes the matching Rekonsiliasi Bank entry for a jurnal entry, keeping the
+  // two in sync whenever Tandai Lunas is used or an already-Lunas entry is edited.
+  const syncBankRecon = (entry, metode, tanggal, nominalIDR) => {
+    setBankRecon(prev => {
+      const idx = prev.findIndex(b => b.sourceModule === "Jurnal" && b.sourceId === entry.id);
+      if (metode === "CASH") {
+        // Cash doesn't touch any bank balance — remove any previously-posted bank entry (e.g. if
+        // this entry was edited from BCA/MANDIRI back to CASH).
+        return idx >= 0 ? prev.filter((_, i) => i !== idx) : prev;
+      }
+      const posted = {
+        id: idx >= 0 ? prev[idx].id : "BRC-" + uid(),
+        bank: metode,
+        tanggal,
+        keterangan: `Jurnal ${entry.id} — ${entry.keterangan}`,
+        tipe: entry.tipe === "Pemasukan" ? "Masuk" : "Keluar",
+        nominal: nominalIDR,
+        sourceModule: "Jurnal",
+        sourceId: entry.id,
+        createdBy: session.nama
+      };
+      if (idx >= 0) {
+        const arr = [...prev];
+        arr[idx] = posted;
+        return arr;
+      }
+      return [...prev, posted];
+    });
+  };
+  const confirmPayModal = () => {
+    if (!payModal) return;
+    const {
+      entry,
+      mode,
+      metode,
+      tanggal,
+      kursBayar,
+      nominal,
+      keterangan
+    } = payModal;
+    if (!tanggal) return alert("Tanggal wajib diisi");
+    const isForeign = entry.currency && entry.currency !== "IDR";
+    if (isForeign && !kursBayar) return alert(`Isi Kurs (IDR per 1 ${entry.currency}) yang dipakai untuk pembayaran ini`);
+    const nominalNum = parseFloat(nominal) || 0;
+    const kursNum = parseFloat(kursBayar) || 0;
+    const nominalIDR = isForeign ? nominalNum * kursNum : nominalNum;
+    const selisihKurs = isForeign && entry.kursReferensi ? (kursNum - entry.kursReferensi) * nominalNum : null;
     const arr = [...jurnal];
-    arr[jurnal.indexOf(j)] = {
-      ...j,
+    const idx = jurnal.indexOf(entry);
+    const updated = {
+      ...entry,
+      keterangan,
+      nominal: nominalNum,
       status: "Lunas",
+      metodeBayar: metode,
       paidBy: session.nama,
-      paidDate: today()
+      paidDate: tanggal,
+      ...(isForeign ? {
+        kursBayar: kursNum,
+        nominalIDR,
+        selisihKurs
+      } : {})
+    };
+    arr[idx] = updated;
+    setJurnal(arr);
+    syncBankRecon(updated, metode, tanggal, nominalIDR);
+    logAudit(store, session, {
+      module: "Jurnal",
+      docNomor: entry.id,
+      action: mode === "lunas" ? "Tandai Lunas" : "Edit",
+      detail: `${entry.keterangan} — ${metode} — ${fmt(nominalIDR)}${tanggal ? " pada " + tanggal : ""}${selisihKurs ? ` — Selisih Kurs: ${fmt(selisihKurs)}` : ""}`
+    });
+    setPayModal(null);
+  };
+  // Plain (non-payment) edit — for a "Belum Lunas" entry, or when only keterangan/nominal needs
+  // correcting without touching payment method. Kept separate from confirmPayModal so editing an
+  // unpaid manual entry doesn't force a bank/date choice.
+  const savePlainEdit = () => {
+    if (!payModal) return;
+    const {
+      entry,
+      nominal,
+      keterangan
+    } = payModal;
+    const arr = [...jurnal];
+    const idx = jurnal.indexOf(entry);
+    arr[idx] = {
+      ...entry,
+      keterangan,
+      nominal: parseFloat(nominal) || 0
     };
     setJurnal(arr);
     logAudit(store, session, {
       module: "Jurnal",
-      docNomor: j.id,
-      action: "Mark Lunas",
-      detail: j.keterangan
+      docNomor: entry.id,
+      action: "Edit",
+      detail: keterangan
     });
+    setPayModal(null);
   };
   const deleteJurnal = j => {
     const warn = j.sourceId ? " Entry ini tersinkron otomatis dari " + j.sourceModule + " — jika dokumen sumbernya masih ada, entry ini bisa muncul kembali." : "";
     if (!confirm("Hapus entry jurnal ini?" + warn)) return;
     setJurnal(jurnal.filter(x => x.id !== j.id));
+    setBankRecon(bankRecon.filter(b => !(b.sourceModule === "Jurnal" && b.sourceId === j.id)));
     logAudit(store, session, {
       module: "Jurnal",
       docNomor: j.id,
@@ -32102,15 +32659,19 @@ function JurnalModule({
       detail: j.keterangan
     });
   };
-  const filteredByStatus = filter === "Semua" ? jurnal : jurnal.filter(j => j.status === filter);
   const [jurnalSearch, setJurnalSearch] = useState("");
-  const filtered = (jurnalSearch.trim() ? filteredByStatus.filter(j => [j.kategori, j.keterangan, j.id].filter(Boolean).some(x => String(x).toLowerCase().includes(jurnalSearch.trim().toLowerCase()))) : filteredByStatus).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
-  const totalHutangBerjalan = jurnal.filter(j => j.status === "Belum Lunas").reduce((s, j) => s + j.nominal, 0);
+  const matchesSearch = j => !jurnalSearch.trim() || [j.kategori, j.keterangan, j.id].filter(Boolean).some(x => String(x).toLowerCase().includes(jurnalSearch.trim().toLowerCase()));
+  const filtered = jurnal.filter(matchesSearch).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  const ongoing = filtered.filter(j => j.status === "Belum Lunas");
+  const closed = filtered.filter(j => j.status === "Lunas");
+  const totalHutangBerjalan = jurnal.filter(j => j.status === "Belum Lunas" && j.tipe !== "Pemasukan").reduce((s, j) => s + j.nominal, 0);
+  const totalPiutangBerjalan = jurnal.filter(j => j.status === "Belum Lunas" && j.tipe === "Pemasukan").reduce((s, j) => s + j.nominal, 0);
   const kategoriColor = {
     "Purchase Order Lokal": theme.purple,
     "Purchase Order Overseas": theme.yellow,
     Payroll: theme.green,
     "Tiket Perjalanan": theme.cyan,
+    "Pembayaran Invoice": theme.accent,
     Lainnya: theme.muted
   };
 
@@ -32147,23 +32708,16 @@ function JurnalModule({
       gap: 10,
       flexWrap: "wrap"
     }
-  }, /*#__PURE__*/React.createElement(Select, {
-    value: filter,
-    onChange: setFilter,
-    options: ["Semua", "Belum Lunas", "Lunas"].map(v => ({
-      value: v,
-      label: v
-    })),
-    style: {
-      width: 150
-    }
-  }), /*#__PURE__*/React.createElement(ExportExcelBtn, {
+  }, /*#__PURE__*/React.createElement(ExportExcelBtn, {
     onClick: () => exportToExcel(filtered.map(j => ({
       tanggal: j.tanggal,
+      tipe: j.tipe,
       kategori: j.kategori,
       keterangan: j.keterangan,
       nominal: j.nominal,
-      status: j.status
+      currency: j.currency || "IDR",
+      status: j.status,
+      metodeBayar: j.metodeBayar || ""
     })), "Jurnal.xlsx", "Jurnal")
   }), /*#__PURE__*/React.createElement(Btn, {
     onClick: () => setModal(true)
@@ -32173,28 +32727,54 @@ function JurnalModule({
       fontSize: 12,
       color: theme.muted
     }
-  }, "Otomatis tersinkron dari Purchase Order, Payroll, dan Tiket Perjalanan. Belum lunas = tercatat sebagai hutang berjalan."), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("span", {
+  }, "Pengeluaran (Kredit) otomatis tersinkron dari Purchase Order, Payroll, dan Tiket Perjalanan. Pemasukan (Debit) otomatis tersinkron dari Invoice. Tandai Lunas via BCA/MANDIRI akan tercatat juga di Rekonsiliasi Bank — CASH tidak memengaruhi saldo bank."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.muted,
       fontSize: 13
     }
-  }, "Total Hutang Berjalan (Belum Lunas)"), /*#__PURE__*/React.createElement("div", {
+  }, "Total Hutang Berjalan (Pengeluaran Belum Lunas)"), /*#__PURE__*/React.createElement("div", {
     style: {
-      fontSize: 26,
+      fontSize: 22,
       fontWeight: 800,
       color: theme.red,
       marginTop: 6
     }
-  }, fmt(totalHutangBerjalan))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
+  }, fmt(totalHutangBerjalan))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "Total Piutang Berjalan (Pemasukan Belum Lunas)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 22,
+      fontWeight: 800,
+      color: theme.green,
+      marginTop: 6
+    }
+  }, fmt(totalPiutangBerjalan)))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari kategori / keterangan...",
     value: jurnalSearch,
     onChange: setJurnalSearch,
     style: {
       marginBottom: 12
     }
-  }), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Tanggal", "Kategori", "Keterangan", "Nominal", "Status", "Aksi"],
-    rows: filtered.map(j => [j.tanggal, /*#__PURE__*/React.createElement(Badge, {
+  }), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "JURNAL ON GOING (Belum Lunas)",
+    count: ongoing.length,
+    badgeColor: theme.red,
+    storageKey: "jurnal_ongoing",
+    defaultOpen: true
+  }, /*#__PURE__*/React.createElement(Table, {
+    headers: ["Tanggal", "Tipe", "Kategori", "Keterangan", "Nominal", "Aksi"],
+    rows: ongoing.map(j => [j.tanggal, /*#__PURE__*/React.createElement(Badge, {
+      color: j.tipe === "Pemasukan" ? theme.green : theme.red
+    }, j.tipe === "Pemasukan" ? "Debit" : "Kredit"), /*#__PURE__*/React.createElement(Badge, {
       color: kategoriColor[j.kategori] || theme.muted
     }, j.kategori), /*#__PURE__*/React.createElement("span", {
       style: {
@@ -32202,9 +32782,50 @@ function JurnalModule({
         cursor: "pointer"
       },
       onClick: () => setDetail(j)
-    }, j.keterangan), fmt(j.nominal), /*#__PURE__*/React.createElement(Badge, {
-      color: j.status === "Lunas" ? theme.green : theme.red
-    }, j.status), /*#__PURE__*/React.createElement("div", {
+    }, j.keterangan), fmtMoney(j.nominal, j.currency), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 6,
+        flexWrap: "wrap"
+      }
+    }, /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => setDetail(j)
+    }, "Detail"), isOwnerLike && ["BCA", "MANDIRI", "CASH"].map(m => /*#__PURE__*/React.createElement(Btn, {
+      key: m,
+      size: "sm",
+      variant: "success",
+      onClick: () => openLunas(j, m)
+    }, "✓ ", m)), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => openEditEntry(j)
+    }, "✏️"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "danger",
+      onClick: () => deleteJurnal(j)
+    }, "🗑️"))]),
+    emptyMsg: "Tidak ada entry Belum Lunas"
+  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "JURNAL CLOSED (Lunas)",
+    count: closed.length,
+    badgeColor: theme.green,
+    storageKey: "jurnal_closed",
+    defaultOpen: false
+  }, /*#__PURE__*/React.createElement(Table, {
+    headers: ["Tanggal", "Tipe", "Kategori", "Keterangan", "Nominal", "Metode", "Aksi"],
+    rows: closed.map(j => [j.tanggal, /*#__PURE__*/React.createElement(Badge, {
+      color: j.tipe === "Pemasukan" ? theme.green : theme.red
+    }, j.tipe === "Pemasukan" ? "Debit" : "Kredit"), /*#__PURE__*/React.createElement(Badge, {
+      color: kategoriColor[j.kategori] || theme.muted
+    }, j.kategori), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.accentLight,
+        cursor: "pointer"
+      },
+      onClick: () => setDetail(j)
+    }, j.keterangan), fmtMoney(j.nominal, j.currency), j.metodeBayar || "-", /*#__PURE__*/React.createElement("div", {
       style: {
         display: "flex",
         gap: 6
@@ -32213,17 +32834,17 @@ function JurnalModule({
       size: "sm",
       variant: "ghost",
       onClick: () => setDetail(j)
-    }, "Detail"), j.status === "Belum Lunas" && isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+    }, "Detail"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
-      variant: "success",
-      onClick: () => markLunas(j)
-    }, "✓ Tandai Lunas"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+      variant: "ghost",
+      onClick: () => openEditEntry(j)
+    }, "✏️"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "danger",
       onClick: () => deleteJurnal(j)
     }, "🗑️"))]),
-    emptyMsg: "Belum ada entry jurnal"
-  })), /*#__PURE__*/React.createElement(Modal, {
+    emptyMsg: "Belum ada entry Lunas"
+  }))), /*#__PURE__*/React.createElement(Modal, {
     open: !!detail,
     title: `Detail Transaksi — ${detail?.id}`,
     onClose: () => setDetail(null),
@@ -32261,11 +32882,17 @@ function JurnalModule({
       style: {
         color: theme.muted
       }
+    }, "Tipe:"), " ", /*#__PURE__*/React.createElement(Badge, {
+      color: detail.tipe === "Pemasukan" ? theme.green : theme.red
+    }, detail.tipe === "Pemasukan" ? "Debit (Pemasukan)" : "Kredit (Pengeluaran)")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.muted
+      }
     }, "Nominal:"), " ", /*#__PURE__*/React.createElement("strong", {
       style: {
         color: theme.green
       }
-    }, fmt(detail.nominal))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+    }, fmtMoney(detail.nominal, detail.currency))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
       style: {
         color: theme.muted
       }
@@ -32287,7 +32914,37 @@ function JurnalModule({
       style: {
         color: theme.text
       }
-    }, detail.paidDate)))), /*#__PURE__*/React.createElement("p", {
+    }, detail.paidDate)), detail.metodeBayar && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.muted
+      }
+    }, "Metode:"), " ", /*#__PURE__*/React.createElement(Badge, {
+      color: theme.cyan
+    }, detail.metodeBayar)), detail.kursBayar && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.muted
+      }
+    }, "Kurs Bayar:"), " ", /*#__PURE__*/React.createElement("strong", {
+      style: {
+        color: theme.text
+      }
+    }, "Rp ", fmtNum(detail.kursBayar), " / ", detail.currency)), detail.nominalIDR && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.muted
+      }
+    }, "Setara IDR:"), " ", /*#__PURE__*/React.createElement("strong", {
+      style: {
+        color: theme.text
+      }
+    }, fmt(detail.nominalIDR))), (detail.selisihKurs !== null && detail.selisihKurs !== undefined) && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.muted
+      }
+    }, "Selisih Kurs:"), " ", /*#__PURE__*/React.createElement("strong", {
+      style: {
+        color: detail.selisihKurs >= 0 ? theme.green : theme.red
+      }
+    }, detail.selisihKurs >= 0 ? "Untung " : "Rugi ", fmt(Math.abs(detail.selisihKurs)))))), /*#__PURE__*/React.createElement("p", {
       style: {
         margin: 0,
         fontSize: 13,
@@ -32351,7 +33008,18 @@ function JurnalModule({
         fontSize: 12,
         color: theme.yellow
       }
-    }, "⚠️ Dokumen sumber tidak ditemukan (mungkin sudah dihapus)."));
+    }, "⚠️ Dokumen sumber tidak ditemukan (mungkin sudah dihapus)."), isOwnerLike && /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        justifyContent: "flex-end"
+      }
+    }, /*#__PURE__*/React.createElement(Btn, {
+      variant: "ghost",
+      onClick: () => {
+        openEditEntry(detail);
+        setDetail(null);
+      }
+    }, "✏️ Edit Entry")));
   })()), /*#__PURE__*/React.createElement(Modal, {
     open: modal,
     title: "Entry Jurnal Manual",
@@ -32362,7 +33030,21 @@ function JurnalModule({
       flexDirection: "column",
       gap: 14
     }
-  }, /*#__PURE__*/React.createElement(Input, {
+  }, /*#__PURE__*/React.createElement(Select, {
+    label: "Tipe",
+    value: form.tipe || "Pengeluaran",
+    onChange: v => setForm({
+      ...form,
+      tipe: v
+    }),
+    options: [{
+      value: "Pengeluaran",
+      label: "Pengeluaran (Kredit)"
+    }, {
+      value: "Pemasukan",
+      label: "Pemasukan (Debit)"
+    }]
+  }), /*#__PURE__*/React.createElement(Input, {
     label: "Tanggal",
     value: form.tanggal,
     onChange: v => setForm({
@@ -32410,7 +33092,88 @@ function JurnalModule({
     onClick: () => setModal(false)
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     onClick: save
-  }, "Simpan")))));
+  }, "Simpan"))))), /*#__PURE__*/React.createElement(Modal, {
+    open: !!payModal,
+    title: payModal?.mode === "lunas" ? `Tandai Lunas via ${payModal.metode} — ${payModal.entry.id}` : `Edit Entry — ${payModal?.entry?.id}`,
+    onClose: () => setPayModal(null),
+    width: 480
+  }, payModal && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 13,
+      color: theme.text
+    }
+  }, payModal.entry.keterangan), /*#__PURE__*/React.createElement(Input, {
+    label: "Keterangan",
+    value: payModal.keterangan,
+    onChange: v => setPayModal({
+      ...payModal,
+      keterangan: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: `Nominal${payModal.entry.currency && payModal.entry.currency !== "IDR" ? ` (${payModal.entry.currency})` : " (Rp)"}`,
+    type: "number",
+    value: payModal.nominal,
+    onChange: v => setPayModal({
+      ...payModal,
+      nominal: v
+    })
+  }), (payModal.mode === "lunas" || payModal.entry.status === "Lunas") && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Select, {
+    label: "Metode Pembayaran",
+    value: payModal.metode,
+    onChange: v => setPayModal({
+      ...payModal,
+      metode: v
+    }),
+    options: ["BCA", "MANDIRI", "CASH"].map(m => ({
+      value: m,
+      label: m
+    }))
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal Pembayaran",
+    type: "date",
+    value: payModal.tanggal,
+    onChange: v => setPayModal({
+      ...payModal,
+      tanggal: v
+    })
+  }), payModal.entry.currency && payModal.entry.currency !== "IDR" && /*#__PURE__*/React.createElement(Input, {
+    label: `Kurs Bayar (IDR per 1 ${payModal.entry.currency})`,
+    type: "number",
+    value: payModal.kursBayar,
+    onChange: v => setPayModal({
+      ...payModal,
+      kursBayar: v
+    }),
+    placeholder: payModal.entry.kursReferensi ? `Referensi saat PO: ${fmtNum(payModal.entry.kursReferensi)}` : ""
+  }), payModal.entry.currency && payModal.entry.currency !== "IDR" && payModal.kursBayar && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "≈ ", fmt((parseFloat(payModal.nominal) || 0) * (parseFloat(payModal.kursBayar) || 0)), payModal.entry.kursReferensi ? /*#__PURE__*/React.createElement("span", null, " · Selisih Kurs: ", /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: (parseFloat(payModal.kursBayar) - payModal.entry.kursReferensi) >= 0 ? theme.green : theme.red
+    }
+  }, (parseFloat(payModal.kursBayar) - payModal.entry.kursReferensi) >= 0 ? "Untung " : "Rugi ", fmt(Math.abs((parseFloat(payModal.kursBayar) - payModal.entry.kursReferensi) * (parseFloat(payModal.nominal) || 0))))) : null)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setPayModal(null)
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: payModal.mode === "lunas" || payModal.entry.status === "Lunas" ? confirmPayModal : savePlainEdit
+  }, payModal.mode === "lunas" ? "Konfirmasi Lunas" : "Simpan"))));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -34600,6 +35363,11 @@ function App() {
         });
       case "jurnal":
         return /*#__PURE__*/React.createElement(JurnalModule, {
+          store: store,
+          session: session
+        });
+      case "bank_recon":
+        return /*#__PURE__*/React.createElement(BankReconModule, {
           store: store,
           session: session
         });
