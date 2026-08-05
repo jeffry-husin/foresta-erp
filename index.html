@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-05.4";
+const APP_BUILD = "2026-08-05.5";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -12289,7 +12289,7 @@ function QuotationUnit({
     size: "sm",
     variant: "ghost",
     onClick: () => openReassignSM(q)
-  }, "🔁 Sales Manager"), q.status === "Disetujui GM" && !quotAlreadyHasSO(q.nomor) && quotIsLatestRevision(quotationsUnit, q) && onRequestSO && /*#__PURE__*/React.createElement(Btn, {
+  }, "🔁 Sales Manager"), q.status === "Disetujui GM" && !q.dismissedFromSOList && !quotAlreadyHasSO(q) && quotIsLatestRevision(quotationsUnit, q) && onRequestSO && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "success",
     onClick: () => onRequestSO(q.nomor)
@@ -12305,7 +12305,18 @@ function QuotationUnit({
   // family; a superseded older revision is dead history, not something still "on going".
   // Used by the "Buat SO" button (task: create SO directly from Unit Quotation's ON GOING list,
   // not just from the Sales Order module's own pull screen) to know whether an SO already exists.
-  const quotAlreadyHasSO = nomor => salesOrders.some(so => so.sourceNomor === nomor);
+  // BUG FIX (SQ-099-FRT-VII-2026-R5 — Sirajasa Bentalatama): mirrors the identical fix in
+  // SalesOrderModule — only treat a quotation as "already has SO" once every one of its items has
+  // actually been pulled into an SO, not the moment ANY (possibly partial) SO exists for it.
+  const quotItemKeyUQ = it => it.partNumber && it.partNumber !== "-" ? it.partNumber : `${it.partNumber || ""}::${it.partName || ""}`;
+  const quotAlreadyHasSO = q => {
+    const nomor = typeof q === "string" ? q : q.nomor;
+    const relatedSO = salesOrders.filter(so => so.sourceNomor === nomor);
+    if (relatedSO.length === 0) return false;
+    if (typeof q === "string") return true;
+    const pulled = new Set(relatedSO.flatMap(so => (so.items || []).map(quotItemKeyUQ)));
+    return (q.items || []).every(it => pulled.has(quotItemKeyUQ(it)));
+  };
   const quotIsLatestRevision = (arr, q) => {
     const fam = q.revisiDari || q.nomor;
     const members = arr.filter(x => (x.revisiDari || x.nomor) === fam);
@@ -14783,7 +14794,35 @@ function SalesOrderModule({
   // a new SO if its status is "Disetujui GM" AND no live Sales Order already references it as its
   // source — this guards against the status field ever getting out of sync (e.g. a bug or manual
   // data fix) and a quotation that's already been pulled reappearing in the picker.
-  const quotAlreadyHasSO = nomor => salesOrders.some(so => so.sourceNomor === nomor);
+  // BUG FIX (SQ-099-FRT-VII-2026-R5 — Sirajasa Bentalatama): this used to fire the moment ANY SO
+  // existed referencing the quotation, even one created from only SOME of its items (via the
+  // item-pick step above) — hiding the quotation from SQ ON GOING while its remaining items (often
+  // Jasa needing a separate follow-up MR) were still un-ordered, with no way to come back and
+  // finish ordering them. Now it only fires once every item on the quotation has actually been
+  // pulled into at least one SO; a quotation with a leftover un-pulled item keeps showing in ON
+  // GOING (so "Buat SO" can be used again for the rest) until it does, or is closed manually via
+  // dismissQuotFromSOList below.
+  const quotItemKey = it => it.partNumber && it.partNumber !== "-" ? it.partNumber : `${it.partNumber || ""}::${it.partName || ""}`;
+  const quotPulledItemKeySet = nomor => new Set(salesOrders.filter(so => so.sourceNomor === nomor).flatMap(so => (so.items || []).map(quotItemKey)));
+  const quotUninvoicedItems = q => (q.items || []).filter(it => !quotPulledItemKeySet(q.nomor).has(quotItemKey(it)));
+  const quotAlreadyHasSO = q => {
+    const nomor = typeof q === "string" ? q : q.nomor;
+    const hasAnySO = salesOrders.some(so => so.sourceNomor === nomor);
+    if (!hasAnySO) return false;
+    if (typeof q === "string") return true; // fallback: no item detail available, keep old (any-SO) behavior
+    return quotUninvoicedItems(q).length === 0;
+  };
+  const dismissQuotFromSOList = (q, type) => {
+    if (!confirm(`Tandai ${q.nomor} selesai secara manual dan sembunyikan dari SQ ON GOING? Ini berarti IR/MR sudah dibuat untuk sebagian item, dan sisanya tidak jadi diorder oleh client. Bisa dikembalikan kapan saja dari daftar "Ditandai Selesai (Manual)".`)) return;
+    const setter = type === "Unit" ? setQuotationsUnit : setQuotationsPS;
+    setter(prev => (prev || []).map(x => x.nomor === q.nomor ? { ...x, dismissedFromSOList: true } : x));
+    logAudit(store, session, { module: "Sales Order", docNomor: q.nomor, action: "Tandai Selesai (Manual)", detail: "Disembunyikan dari SQ ON GOING secara manual" });
+  };
+  const restoreQuotToSOList = (q, type) => {
+    const setter = type === "Unit" ? setQuotationsUnit : setQuotationsPS;
+    setter(prev => (prev || []).map(x => x.nomor === q.nomor ? { ...x, dismissedFromSOList: false } : x));
+    logAudit(store, session, { module: "Sales Order", docNomor: q.nomor, action: "Kembalikan ke SQ ON GOING", detail: "Dibatalkan dari status Selesai Manual" });
+  };
   // Consolidated into ONE module-wide search bar per Jef's request — previously this module had
   // 5 separate search boxes stacked across its sections (SQ ON GOING, plus one "Cari di tabel
   // ini..." box built into each of the ON GOING / SO TO PO / COMPLETED tables on top of their own
@@ -14808,8 +14847,13 @@ function SalesOrderModule({
     const latest = members.reduce((a, b) => revNum(b) > revNum(a) ? b : a);
     return latest.nomor === q.nomor;
   };
-  const approvedUnit = quotationsUnit.filter(q => q.status === "Disetujui GM" && !quotAlreadyHasSO(q.nomor) && quotIsLatestRevision(quotationsUnit, q)).filter(q => !pullSearch.trim() || [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(pullSearch.trim().toLowerCase())));
-  const approvedPS = quotationsPS.filter(q => q.status === "Disetujui GM" && !quotAlreadyHasSO(q.nomor) && quotIsLatestRevision(quotationsPS, q)).filter(q => !pullSearch.trim() || [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(pullSearch.trim().toLowerCase())));
+  const approvedUnit = quotationsUnit.filter(q => q.status === "Disetujui GM" && !q.dismissedFromSOList && !quotAlreadyHasSO(q) && quotIsLatestRevision(quotationsUnit, q)).filter(q => !pullSearch.trim() || [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(pullSearch.trim().toLowerCase())));
+  const approvedPS = quotationsPS.filter(q => q.status === "Disetujui GM" && !q.dismissedFromSOList && !quotAlreadyHasSO(q) && quotIsLatestRevision(quotationsPS, q)).filter(q => !pullSearch.trim() || [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(pullSearch.trim().toLowerCase())));
+  // Quotations manually marked "Selesai" via dismissQuotFromSOList even though not every item was
+  // pulled into an SO (e.g. client never ordered the remaining item) — shown in their own
+  // collapsible section with a restore option, mirroring Invoice's SO ONGOING dismiss/restore.
+  const dismissedQuotUnit = quotationsUnit.filter(q => q.dismissedFromSOList && quotIsLatestRevision(quotationsUnit, q));
+  const dismissedQuotPS = quotationsPS.filter(q => q.dismissedFromSOList && quotIsLatestRevision(quotationsPS, q));
   const soSearch = search;
   const salesOrdersFiltered = (soSearch.trim() ? salesOrders.filter(so => [so.nomor, so.customerNama, so.salesManagerNama, so.sourceNomor].filter(Boolean).some(x => String(x).toLowerCase().includes(soSearch.trim().toLowerCase()))) : salesOrders).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   // Compute the next number from the max existing sequence in the given (ideally freshly-fetched)
@@ -15062,10 +15106,44 @@ function SalesOrderModule({
       fontSize: 13,
       color: theme.text
     }
-  }, q.nomor, " — ", q.customerNama, " — ", fmt(q.total)), (isEpy || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+  }, q.nomor, " — ", q.customerNama, " — ", fmt(q.total)), (isEpy || isOwnerLike) && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     onClick: () => openPickItems(q, "Unit")
-  }, "Buat SO")))), /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, "Buat SO"), quotUninvoicedItems(q).length < (q.items || []).length && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => dismissQuotFromSOList(q, "Unit")
+  }, "✓ Selesai (Manual)"))))), dismissedQuotUnit.length > 0 && /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "Unit Quotation Ditandai Selesai (Manual)",
+    count: dismissedQuotUnit.length,
+    badgeColor: theme.muted,
+    storageKey: "so_sq_dismissed_unit",
+    defaultOpen: false
+  }, dismissedQuotUnit.map(q => /*#__PURE__*/React.createElement("div", {
+    key: q.nomor,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      padding: "8px 12px",
+      background: theme.surface,
+      borderRadius: 8,
+      marginBottom: 6
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13,
+      color: theme.text
+    }
+  }, q.nomor, " — ", q.customerNama, " — ", fmt(q.total)), (isEpy || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => restoreQuotToSOList(q, "Unit")
+  }, "↩ Kembalikan ke ON GOING")))), /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "PARTS & SERVICE QUOTATION",
     count: approvedPS.length,
     badgeColor: theme.cyan,
@@ -15091,10 +15169,44 @@ function SalesOrderModule({
       fontSize: 13,
       color: theme.text
     }
-  }, q.nomor, " — ", q.customerNama, " — ", fmt(q.total)), (isEpy || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+  }, q.nomor, " — ", q.customerNama, " — ", fmt(q.total)), (isEpy || isOwnerLike) && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     onClick: () => openPickItems(q, "Parts/Service")
-  }, "Buat SO")))))), /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, "Buat SO"), quotUninvoicedItems(q).length < (q.items || []).length && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => dismissQuotFromSOList(q, "Parts/Service")
+  }, "✓ Selesai (Manual)")))))), dismissedQuotPS.length > 0 && /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "Parts & Service Quotation Ditandai Selesai (Manual)",
+    count: dismissedQuotPS.length,
+    badgeColor: theme.muted,
+    storageKey: "so_sq_dismissed_ps",
+    defaultOpen: false
+  }, dismissedQuotPS.map(q => /*#__PURE__*/React.createElement("div", {
+    key: q.nomor,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      padding: "8px 12px",
+      background: theme.surface,
+      borderRadius: 8,
+      marginBottom: 6
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13,
+      color: theme.text
+    }
+  }, q.nomor, " — ", q.customerNama, " — ", fmt(q.total)), (isEpy || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => restoreQuotToSOList(q, "Parts/Service")
+  }, "↩ Kembalikan ke ON GOING"))))), /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "ON GOING",
     count: salesOrdersFiltered.filter(so => !soHasBecomePO(so) && !soIsCompleted(so)).length,
     badgeColor: theme.accent,
@@ -22241,8 +22353,12 @@ function InvoiceModule({
     diskonMode: "persen",
     diskonValue: "0",
     uangMuka: "0",
+    uangMukaMode: "rp",
     catatan: "",
-    selectedItemKeys: []
+    selectedItemKeys: [],
+    invoiceMode: "item",
+    dpMode: "persen",
+    dpValue: ""
   });
   const [filter, setFilter] = useState("Semua");
   const [fakturModal, setFakturModal] = useState(null);
@@ -22301,10 +22417,29 @@ function InvoiceModule({
   // hargaSebelumDiskonSO/subtotalSebelumDiskonSO snapshot applySoDiskon leaves on each item, so it
   // can be shown as its own line in the preview/print instead of being invisible.
   const invoiceSoDiskonAmount = inv => (inv?.items || []).reduce((s, it) => s + Math.max(0, (it.subtotalSebelumDiskonSO ?? it.subtotal ?? 0) - (it.subtotal ?? 0)), 0);
+  // Ad-hoc DP / partial-payment invoices for legacy SOs (no Term of Payment defined).
+  // Unlike termin invoices (which bill a pre-defined % against a named DP1/DP2/Final label),
+  // ad-hoc DP invoices let the user type any % or Rp amount at invoice-creation time (e.g. "DP 30%"
+  // for SO-061 Sirajasa) without needing the SO to have been set up with termin labels in advance.
+  // Tracked via `isAdhocDP: true` + `subtotal` (the pre-tax, post-SO-discount nominal actually
+  // billed) on each such invoice — no new field is needed on the SO record itself.
+  // Basis: pre-tax, post-discount (so.subtotal - so.diskon) — matches the confirmed answer that %
+  // is computed "dari Subtotal SO sebelum PPN".
+  const soAdhocPreTaxBase = so => Math.max(0, (so.subtotal || 0) - (so.diskon || 0));
+  const soAdhocInvoices = so => soInvoices(so.nomor).filter(i => i.isAdhocDP);
+  const soHasAdhocDP = so => soAdhocInvoices(so).length > 0;
+  const soAdhocPreTaxBilled = so => soAdhocInvoices(so).reduce((s, i) => s + (i.subtotal || 0), 0);
+  const soAdhocPreTaxRemaining = so => Math.max(0, soAdhocPreTaxBase(so) - soAdhocPreTaxBilled(so));
   const availableSO = salesOrders.filter(so => {
     if (so.dismissedFromInvoiceList) return false; // manual override — see dismissSOFromInvoiceList below
     const rem = remainingTermin(so);
-    if (rem === null) return soUninvoicedItems(so).length > 0; // legacy: keep offering until all items invoiced
+    if (rem === null) {
+      // legacy SO: keep offering while there are un-invoiced items OR an open ad-hoc DP balance
+      // (an SO can be billed via ad-hoc DP even if soUninvoicedItems() already looks "empty", since
+      // ad-hoc DP invoices don't consume specific item rows the way per-item invoices do)
+      if (soHasAdhocDP(so)) return soAdhocPreTaxRemaining(so) > 1; // >1 Rp to absorb rounding
+      return soUninvoicedItems(so).length > 0;
+    }
     return rem.length > 0;
   });
   // Manual safety-net for SO ONGOING (Bisa Dibuat Invoice): the automatic "already invoiced" check
@@ -22356,8 +22491,12 @@ function InvoiceModule({
       diskonMode: "persen",
       diskonValue: "0",
       uangMuka: "0",
+      uangMukaMode: "rp",
       catatan: "",
-      selectedItemKeys: []
+      selectedItemKeys: [],
+      invoiceMode: soHasAdhocDP(so) ? "dp" : "item",
+      dpMode: "persen",
+      dpValue: ""
     });
     setModal(true);
   };
@@ -22388,6 +22527,20 @@ function InvoiceModule({
     const so = salesOrders.find(s => s.nomor === form.soNomor);
     const hasTop = so && (so.termOfPayment || []).length > 0;
     if (hasTop && !form.terminLabel) return alert("Pilih Termin (DP/Pelunasan) untuk SO ini — Term of Payment sudah dikunci dari Quotation.");
+    // Ad-hoc DP / partial-payment invoicing (legacy SOs without Term of Payment): once an SO has
+    // received one ad-hoc DP invoice, force it to stay in DP mode for subsequent invoices too — mixing
+    // ad-hoc DP and per-item invoicing on the same SO would make soAdhocPreTaxRemaining() ambiguous.
+    const isLegacy = !!so && !hasTop;
+    const useDpMode = isLegacy && (form.invoiceMode === "dp" || soHasAdhocDP(so));
+    const preTaxBase = useDpMode ? soAdhocPreTaxBase(so) : 0;
+    const preTaxRemaining = useDpMode ? soAdhocPreTaxRemaining(so) : 0;
+    let dpNominalPreTax = 0;
+    if (useDpMode) {
+      const dpInputValue = parseFloat(form.dpValue) || 0;
+      if (form.dpMode === "persen") dpNominalPreTax = preTaxBase * dpInputValue / 100;else if (form.dpMode === "rp") dpNominalPreTax = dpInputValue;else dpNominalPreTax = preTaxRemaining; // "sisa" = pelunasan sisa tagihan
+      if (dpNominalPreTax <= 0) return alert("Masukkan nilai DP / pembayaran yang valid.");
+      if (dpNominalPreTax > preTaxRemaining + 1) return alert(`Nilai melebihi sisa tagihan SO ini (sisa: ${fmt(preTaxRemaining)}).`);
+    }
     let tanggalJatuhTempo = null;
     if (form.tipePembayaran === "TEMPO") {
       if (form.jatuhTempoMode === "tanggal") {
@@ -22398,13 +22551,13 @@ function InvoiceModule({
         tanggalJatuhTempo = addDays(today(), form.jumlahHari);
       }
     }
-    const uninvoicedItems = !hasTop && so ? soUninvoicedItems(so) : [];
-    const chosenItemsRaw = !hasTop && so ? (form.selectedItemKeys.length > 0 ? uninvoicedItems.filter(it => form.selectedItemKeys.includes(itemKey(it))) : uninvoicedItems) : [];
-    if (!hasTop && chosenItemsRaw.length === 0) return alert("Pilih minimal satu item SO untuk dijadikan invoice ini.");
+    const uninvoicedItems = !hasTop && !useDpMode && so ? soUninvoicedItems(so) : [];
+    const chosenItemsRaw = !hasTop && !useDpMode && so ? (form.selectedItemKeys.length > 0 ? uninvoicedItems.filter(it => form.selectedItemKeys.includes(itemKey(it))) : uninvoicedItems) : [];
+    if (!hasTop && !useDpMode && chosenItemsRaw.length === 0) return alert("Pilih minimal satu item SO untuk dijadikan invoice ini.");
     // Bill at the SO's actual post-discount price — not the pre-discount list price the items
     // were originally added at (see applySoDiskon above).
-    const chosenItems = !hasTop ? applySoDiskon(chosenItemsRaw, so) : [];
-    const terminAmount = hasTop ? computeTerminAmount(so, form.terminLabel) : chosenItems.reduce((s, it) => s + (it.subtotal ?? (it.qty || 0) * (it.harga || 0)), 0);
+    const chosenItems = !hasTop && !useDpMode ? applySoDiskon(chosenItemsRaw, so) : [];
+    const terminAmount = hasTop ? computeTerminAmount(so, form.terminLabel) : useDpMode ? dpNominalPreTax : chosenItems.reduce((s, it) => s + (it.subtotal ?? (it.qty || 0) * (it.harga || 0)), 0);
     const termin = hasTop ? so.termOfPayment.find(t => t.label === form.terminLabel) : null;
     // Invoice-level Discount + PPN (11%) + Uang Muka (DP) are entered independently at invoice
     // creation time — they no longer just inherit the SO's own diskon/pajak. Discount is taken off
@@ -22420,12 +22573,19 @@ function InvoiceModule({
     // termin invoice, inflating the total. Non-termin (per-item) invoices don't have this problem:
     // `so.items[].harga` are pre-tax unit prices (PPN is never baked into individual items), so
     // applying 11% on `chosenItems`' subtotal is the correct — and only — point of taxation.
+    // Ad-hoc DP invoices are ALSO pre-tax (dpNominalPreTax is a slice of preTaxBase, not of
+    // so.total), so they need PPN added like per-item invoices do — but at the SO's own effective
+    // rate (so.pajak / preTaxBase) rather than a flat 11%, so a discounted/negotiated SO still bills
+    // DP invoices proportionally consistent with the SO's real tax ratio.
     const soPajakRatio = hasTop && so && so.total ? (so.pajak || 0) / so.total : 0;
-    const pajakNominal = hasTop ? afterDiskon * soPajakRatio : afterDiskon * 0.11;
-    const uangMukaNominal = parseFloat(form.uangMuka) || 0;
+    const dpPajakRatio = useDpMode && preTaxBase ? (so.pajak || 0) / preTaxBase : 0;
+    const pajakNominal = hasTop ? afterDiskon * soPajakRatio : useDpMode ? afterDiskon * dpPajakRatio : afterDiskon * 0.11;
+    const uangMukaInputValue = parseFloat(form.uangMuka) || 0;
+    const uangMukaNominal = form.uangMukaMode === "persen" ? baseSubtotal * uangMukaInputValue / 100 : uangMukaInputValue;
     // For termin invoices `afterDiskon` is already tax-inclusive, so the PPN portion must not be
     // added again — only Uang Muka is deducted from it to reach the total.
     const invoiceTotal = hasTop ? Math.max(0, afterDiskon - uangMukaNominal) : Math.max(0, afterDiskon + pajakNominal - uangMukaNominal);
+    const dpLabel = form.dpMode === "sisa" ? "Pelunasan / Sisa Pembayaran" : `Uang Muka (DP) ${form.dpMode === "persen" ? `${parseFloat(form.dpValue) || 0}%` : fmt(dpNominalPreTax)}`;
     setInvoices(prev => [...prev, {
       nomor: newNomor(prev),
       tanggal: today(),
@@ -22439,15 +22599,23 @@ function InvoiceModule({
         qty: 1,
         harga: terminAmount,
         subtotal: terminAmount
+      }] : useDpMode ? [{
+        partNumber: "-",
+        partName: `${dpLabel} — SO ${form.soNomor}`,
+        qty: 1,
+        harga: dpNominalPreTax,
+        subtotal: dpNominalPreTax
       }] : chosenItems,
       terminLabel: hasTop ? form.terminLabel : null,
       terminPercent: termin?.percent ?? null,
+      isAdhocDP: useDpMode,
       soTotal: so?.total,
       subtotal: baseSubtotal,
       diskon: diskonNominal,
       diskonPersen: form.diskonMode === "persen" ? diskonInputValue : null,
       pajak: pajakNominal,
       uangMuka: uangMukaNominal,
+      uangMukaPersen: form.uangMukaMode === "persen" ? uangMukaInputValue : null,
       total: invoiceTotal,
       tipePembayaran: form.tipePembayaran,
       tanggalJatuhTempo,
@@ -22472,8 +22640,12 @@ function InvoiceModule({
       diskonMode: "persen",
       diskonValue: "0",
       uangMuka: "0",
+      uangMukaMode: "rp",
       catatan: "",
-      selectedItemKeys: []
+      selectedItemKeys: [],
+      invoiceMode: "item",
+      dpMode: "persen",
+      dpValue: ""
     });
   };
   const gmApprove = inv => {
@@ -23336,7 +23508,7 @@ function InvoiceModule({
       setBayarModal(null);
       setEditingPayIdx(null);
     },
-    width: 700
+    width: 900
   }, bayarModal && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -23643,13 +23815,45 @@ function InvoiceModule({
       fontSize: 12,
       color: theme.accentLight
     }
-  }, "Jumlah invoice untuk termin ini: ", /*#__PURE__*/React.createElement("strong", null, fmt(computeTerminAmount(selectedSO, form.terminLabel))), " · Sudah tertagih sebelumnya: ", fmt(soTerbayarSoFar(selectedSO.nomor)), " dari total SO ", fmt(selectedSO.total))), selectedSO && selectedSORemainingTermin === null && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
+  }, "Jumlah invoice untuk termin ini: ", /*#__PURE__*/React.createElement("strong", null, fmt(computeTerminAmount(selectedSO, form.terminLabel))), " · Sudah tertagih sebelumnya: ", fmt(soTerbayarSoFar(selectedSO.nomor)), " dari total SO ", fmt(selectedSO.total))), selectedSO && selectedSORemainingTermin === null && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      alignItems: "center",
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Mode Invoice:"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: form.invoiceMode !== "dp" ? "primary" : "ghost",
+    disabled: soHasAdhocDP(selectedSO),
+    onClick: () => setForm(f => ({
+      ...f,
+      invoiceMode: "item"
+    }))
+  }, "Per Item"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: form.invoiceMode === "dp" ? "primary" : "ghost",
+    onClick: () => setForm(f => ({
+      ...f,
+      invoiceMode: "dp"
+    }))
+  }, "DP / Pembayaran Sebagian"), soHasAdhocDP(selectedSO) && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      color: theme.yellow
+    }
+  }, "SO ini sudah pernah ditagih via DP — mode Per Item dikunci; lanjutkan dengan DP/Pelunasan berikutnya.")), form.invoiceMode !== "dp" && !soHasAdhocDP(selectedSO) && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
     style: {
       margin: 0,
       fontSize: 12,
       color: theme.muted
     }
-  }, "SO ini tidak memiliki Term of Payment — pilih item mana saja dari SO ini yang akan dijadikan invoice (mis. jasa dan parts bisa ditagih terpisah)."), (() => {
+  }, "Pilih item mana saja dari SO ini yang akan dijadikan invoice (mis. jasa dan parts bisa ditagih terpisah)."), (() => {
     const uninvoiced = soUninvoicedItems(selectedSO);
     if (uninvoiced.length === 0) return /*#__PURE__*/React.createElement("p", {
       style: {
@@ -23724,6 +23928,69 @@ function InvoiceModule({
         color: theme.muted
       }
     }, "Tidak dicentang satupun = semua item di atas akan dijadikan invoice ini.", soDiskonRatioOf(selectedSO) > 0 ? ` Harga sudah termasuk Discount SO (${(soDiskonRatioOf(selectedSO) * 100).toFixed(1)}%).` : ""));
+  })()), (form.invoiceMode === "dp" || soHasAdhocDP(selectedSO)) && (() => {
+    const preTaxBase = soAdhocPreTaxBase(selectedSO);
+    const billed = soAdhocPreTaxBilled(selectedSO);
+    const remaining = soAdhocPreTaxRemaining(selectedSO);
+    const dpNominalPreview = form.dpMode === "sisa" ? remaining : form.dpMode === "persen" ? preTaxBase * (parseFloat(form.dpValue) || 0) / 100 : parseFloat(form.dpValue) || 0;
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+        border: `1px solid ${theme.border}`,
+        borderRadius: 8,
+        padding: 10
+      }
+    }, /*#__PURE__*/React.createElement("p", {
+      style: {
+        margin: 0,
+        fontSize: 12,
+        color: theme.muted
+      }
+    }, "Dasar perhitungan (Subtotal SO sebelum PPN): ", /*#__PURE__*/React.createElement("strong", null, fmt(preTaxBase)), " · Sudah ditagih via DP: ", fmt(billed), " · Sisa: ", /*#__PURE__*/React.createElement("strong", null, fmt(remaining))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 8,
+        flexWrap: "wrap"
+      }
+    }, /*#__PURE__*/React.createElement(Select, {
+      label: "Tipe DP",
+      value: form.dpMode,
+      onChange: v => setForm({
+        ...form,
+        dpMode: v,
+        dpValue: v === "sisa" ? "" : form.dpValue
+      }),
+      options: [{
+        value: "persen",
+        label: "% dari Subtotal (sebelum PPN)"
+      }, {
+        value: "rp",
+        label: "Nilai Rp (sebelum PPN)"
+      }, {
+        value: "sisa",
+        label: "Sisa / Pelunasan Penuh"
+      }]
+    }), form.dpMode !== "sisa" && /*#__PURE__*/React.createElement(Input, {
+      label: form.dpMode === "persen" ? "Persentase (%)" : "Nilai (Rp)",
+      type: "number",
+      value: form.dpValue,
+      onChange: v => setForm({
+        ...form,
+        dpValue: v
+      })
+    })), /*#__PURE__*/React.createElement("p", {
+      style: {
+        margin: 0,
+        fontSize: 12,
+        color: theme.accentLight
+      }
+    }, "Nominal invoice ini (sebelum PPN): ", /*#__PURE__*/React.createElement("strong", null, fmt(dpNominalPreview)), dpNominalPreview > remaining + 1 ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.red
+      }
+    }, " — melebihi sisa tagihan!") : null));
   })()), /*#__PURE__*/React.createElement(Select, {
     label: "Tipe Pembayaran",
     value: form.tipePembayaran,
@@ -23882,8 +24149,45 @@ function InvoiceModule({
     type: "number",
     min: "0",
     placeholder: "0"
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "Uang Muka / Down Payment (Rp)",
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      fontSize: 13,
+      color: theme.text,
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "radio",
+    checked: form.uangMukaMode === "persen",
+    onChange: () => setForm({
+      ...form,
+      uangMukaMode: "persen"
+    })
+  }), " Uang Muka %"), /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      fontSize: 13,
+      color: theme.text,
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "radio",
+    checked: form.uangMukaMode === "rp",
+    onChange: () => setForm({
+      ...form,
+      uangMukaMode: "rp"
+    })
+  }), " Uang Muka Nominal (Rp)")), /*#__PURE__*/React.createElement(Input, {
+    label: form.uangMukaMode === "persen" ? "Uang Muka / Down Payment (%)" : "Uang Muka / Down Payment (Rp)",
     value: form.uangMuka,
     onChange: v => setForm({
       ...form,
@@ -23905,13 +24209,17 @@ function InvoiceModule({
     // slice of so.total), so PPN must be extracted from it rather than added again — see the bug
     // fix note in save() for the full explanation (UQ-024 → SO-055 double-PPN case).
     const previewHasTop = !!(selectedSO && (selectedSO.termOfPayment || []).length > 0);
-    const previewSubtotal = previewHasTop ? computeTerminAmount(selectedSO, form.terminLabel) : selectedSO?.total || 0;
+    const previewUseDp = !!selectedSO && !previewHasTop && (form.invoiceMode === "dp" || soHasAdhocDP(selectedSO));
+    const previewDpBase = previewUseDp ? soAdhocPreTaxBase(selectedSO) : 0;
+    const previewDpRemaining = previewUseDp ? soAdhocPreTaxRemaining(selectedSO) : 0;
+    const previewSubtotal = previewHasTop ? computeTerminAmount(selectedSO, form.terminLabel) : previewUseDp ? (form.dpMode === "sisa" ? previewDpRemaining : form.dpMode === "persen" ? previewDpBase * (parseFloat(form.dpValue) || 0) / 100 : parseFloat(form.dpValue) || 0) : selectedSO?.total || 0;
     const previewDiskonValue = parseFloat(form.diskonValue) || 0;
     const previewDiskon = form.diskonMode === "persen" ? previewSubtotal * previewDiskonValue / 100 : previewDiskonValue;
     const previewAfterDiskon = Math.max(0, previewSubtotal - previewDiskon);
     const previewSoPajakRatio = previewHasTop && selectedSO && selectedSO.total ? (selectedSO.pajak || 0) / selectedSO.total : 0;
-    const previewPajak = previewHasTop ? previewAfterDiskon * previewSoPajakRatio : previewAfterDiskon * 0.11;
-    const previewUangMuka = parseFloat(form.uangMuka) || 0;
+    const previewDpPajakRatio = previewUseDp && previewDpBase ? (selectedSO.pajak || 0) / previewDpBase : 0;
+    const previewPajak = previewHasTop ? previewAfterDiskon * previewSoPajakRatio : previewUseDp ? previewAfterDiskon * previewDpPajakRatio : previewAfterDiskon * 0.11;
+    const previewUangMuka = form.uangMukaMode === "persen" ? previewSubtotal * (parseFloat(form.uangMuka) || 0) / 100 : parseFloat(form.uangMuka) || 0;
     const previewTotal = previewHasTop ? Math.max(0, previewAfterDiskon - previewUangMuka) : Math.max(0, previewAfterDiskon + previewPajak - previewUangMuka);
     return `Subtotal ${fmt(previewSubtotal)} − Discount ${fmt(previewDiskon)} + PPN ${fmt(previewPajak)} − Uang Muka ${fmt(previewUangMuka)} = Total ${fmt(previewTotal)}`;
   })())), /*#__PURE__*/React.createElement(Input, {
