@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-05.5";
+const APP_BUILD = "2026-08-06.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -289,6 +289,61 @@ const terbilang = n => {
   };
   if (n === 0) return "Nol Rupiah";
   return (eja(n) + " Rupiah").replace(/\s+/g, " ").trim();
+};
+// Same number-to-words logic as terbilang() above, but without the "Rupiah" suffix — used for
+// non-currency counts like "3 (Tiga) Minggu" in Quotation's auto Delivery Time note.
+const terbilangAngka = n => {
+  n = Math.round(Math.abs(n || 0));
+  const satuan = ["", "Satu", "Dua", "Tiga", "Empat", "Lima", "Enam", "Tujuh", "Delapan", "Sembilan", "Sepuluh", "Sebelas"];
+  const eja = num => {
+    num = Math.floor(num);
+    if (num < 12) return satuan[num];
+    if (num < 20) return eja(num - 10) + " Belas";
+    if (num < 100) return eja(Math.floor(num / 10)) + " Puluh" + (num % 10 ? " " + eja(num % 10) : "");
+    if (num < 200) return "Seratus" + (num % 100 ? " " + eja(num % 100) : "");
+    if (num < 1000) return eja(Math.floor(num / 100)) + " Ratus" + (num % 100 ? " " + eja(num % 100) : "");
+    return String(num);
+  };
+  return n === 0 ? "Nol" : eja(n).replace(/\s+/g, " ").trim();
+};
+// Auto-generated Catatan lines for Quotation prints (Unit & Parts/Service) — standard notes that
+// used to be typed by hand every time: PPN inclusion, delivery/lead time, and the DP/Pelunasan
+// payment split (see "Catatan Quotation" reference screenshot). Computed fresh from the
+// quotation's own structured fields (pajakPct, deliveryQty/deliveryUnit, termOfPayment) so they
+// can never drift out of sync with the actual numbers. The free-text `catatan` field stays purely
+// for anything else Sales wants to add (shipping cost exclusions, warranty period, etc.) and is
+// appended below these automatically — see combinedQuotationCatatan.
+const buildQuotationAutoNotes = quot => {
+  if (!quot) return [];
+  const lines = [];
+  const pajakPct = parseFloat(quot.pajakPct);
+  if (pajakPct > 0) {
+    lines.push(`Harga Sudah Termasuk PPn ${pajakPct}%`);
+  }
+  const deliveryQty = parseFloat(quot.deliveryQty);
+  if (deliveryQty > 0) {
+    const unit = quot.deliveryUnit || "Minggu";
+    lines.push(`Waktu Pengerjaan ${deliveryQty} (${terbilangAngka(deliveryQty)}) ${unit} Setelah DP diterima.`);
+  }
+  const top = quot.termOfPayment || [];
+  const dp = top.find(t => /^DP/i.test(t.label || ""));
+  const dpPct = dp ? parseFloat(dp.percent) : 0;
+  if (dpPct > 0) {
+    const sisa = Math.max(0, 100 - dpPct);
+    // Prefer the Final Payment entry's note for when pelunasan is due; fall back to any other
+    // termin's note, then a sensible default so the sentence is never left dangling.
+    const finalTerm = top.find(t => /final/i.test(t.label || "")) || top.find(t => t !== dp);
+    const pelunasanNote = (finalTerm && finalTerm.note && finalTerm.note.trim()) || "Setelah Pekerjaan Selesai";
+    lines.push(`Pembayaran : DP (${dpPct}%) Setelah PO diterima & Pelunasan (${sisa}%) ${pelunasanNote}`);
+  }
+  return lines;
+};
+// Combines the auto-generated lines above with the user's own free-text Catatan for printing —
+// call this instead of reading `.catatan` directly wherever a Quotation is printed.
+const combinedQuotationCatatan = quot => {
+  const auto = buildQuotationAutoNotes(quot);
+  const manual = (quot?.catatan || "").trim();
+  return [...auto, manual].filter(Boolean).join("\n");
 };
 const today = () => new Date().toISOString().split("T")[0];
 // Unified date display format requested app-wide: DD-MMM-YY with English 3-letter month
@@ -11785,7 +11840,9 @@ function QuotationUnit({
     pajak: 11,
     clientDiskonMode: "persen",
     clientDiskonValue: "0",
-    termOfPayment: []
+    termOfPayment: [],
+    deliveryQty: "",
+    deliveryUnit: "Minggu"
   });
   const [itemForm, setItemForm] = useState({
     unitCode: "",
@@ -11834,7 +11891,9 @@ function QuotationUnit({
       pajak: 11,
       clientDiskonMode: "persen",
       clientDiskonValue: "0",
-      termOfPayment: []
+      termOfPayment: [],
+      deliveryQty: "",
+      deliveryUnit: "Minggu"
     });
     setSalesDiscount({
       aktif: false,
@@ -11863,7 +11922,9 @@ function QuotationUnit({
       clientDiskonValue: q.clientDiskonPersen != null ? String(q.clientDiskonPersen) : q.clientDiskon ? String(q.clientDiskon) : "0",
       termOfPayment: (q.termOfPayment || []).map(t => ({
         ...t
-      }))
+      })),
+      deliveryQty: q.deliveryQty || "",
+      deliveryUnit: q.deliveryUnit || "Minggu"
     });
     setSalesDiscount(q.salesDiscount || {
       aktif: true,
@@ -11894,7 +11955,9 @@ function QuotationUnit({
       clientDiskonValue: q.clientDiskonPersen != null ? String(q.clientDiskonPersen) : q.clientDiskon ? String(q.clientDiskon) : "0",
       termOfPayment: (q.termOfPayment || []).map(t => ({
         ...t
-      }))
+      })),
+      deliveryQty: q.deliveryQty || "",
+      deliveryUnit: q.deliveryUnit || "Minggu"
     });
     setSalesDiscount(q.salesDiscount || {
       aktif: false,
@@ -12609,7 +12672,7 @@ function QuotationUnit({
       pajakLabel: "PPN",
       total: detail.total,
       paymentTerms: detail.termOfPayment,
-      catatan: detail.catatan,
+      catatan: combinedQuotationCatatan(detail),
       dibuatOleh: {
         nama: detail.salesManagerNama,
         signature: getSignature(store, detail.salesManagerUsername)
@@ -12917,7 +12980,56 @@ function QuotationUnit({
       variant: "danger",
       onClick: () => removeTop(i)
     }, "×")])
-  })), revisionOf && /*#__PURE__*/React.createElement("div", {
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: `1px solid ${theme.border}`,
+      borderRadius: 10,
+      padding: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 10px",
+      color: theme.muted,
+      fontSize: 13,
+      fontWeight: 600
+    }
+  }, "DELIVERY TIME (opsional — untuk catatan cetak otomatis)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Jumlah",
+    value: form.deliveryQty,
+    onChange: v => setForm({
+      ...form,
+      deliveryQty: v
+    }),
+    type: "number",
+    min: "0",
+    placeholder: "mis: 3"
+  }), /*#__PURE__*/React.createElement(Select, {
+    label: "Satuan",
+    value: form.deliveryUnit,
+    onChange: v => setForm({
+      ...form,
+      deliveryUnit: v
+    }),
+    options: [{
+      value: "Minggu",
+      label: "Minggu"
+    }, {
+      value: "Bulan",
+      label: "Bulan"
+    }]
+  })), form.deliveryQty && parseFloat(form.deliveryQty) > 0 && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "10px 0 0",
+      fontSize: 12,
+      color: theme.accentLight
+    }
+  }, "Akan tercetak: “Waktu Pengerjaan ", form.deliveryQty, " (", terbilangAngka(parseFloat(form.deliveryQty) || 0), ") ", form.deliveryUnit, " Setelah DP diterima.”")), revisionOf && /*#__PURE__*/React.createElement("div", {
     style: {
       border: `1px solid ${theme.yellow}44`,
       background: theme.yellow + "0a",
@@ -13176,7 +13288,9 @@ function QuotationPS({
     clientDiskonMode: "persen",
     clientDiskonValue: "0",
     fromRecIds: [],
-    termOfPayment: []
+    termOfPayment: [],
+    deliveryQty: "",
+    deliveryUnit: "Minggu"
   });
   const [itemForm, setItemForm] = useState({
     partNumber: "",
@@ -13236,7 +13350,9 @@ function QuotationPS({
       clientDiskonMode: "persen",
       clientDiskonValue: "0",
       fromRecIds: [],
-      termOfPayment: []
+      termOfPayment: [],
+      deliveryQty: "",
+      deliveryUnit: "Minggu"
     });
     setSalesDiscount({
       aktif: false,
@@ -13266,7 +13382,9 @@ function QuotationPS({
       fromRecIds: [],
       termOfPayment: (q.termOfPayment || []).map(t => ({
         ...t
-      }))
+      })),
+      deliveryQty: q.deliveryQty || "",
+      deliveryUnit: q.deliveryUnit || "Minggu"
     });
     setSalesDiscount(q.salesDiscount || {
       aktif: true,
@@ -13300,7 +13418,9 @@ function QuotationPS({
       fromRecIds: q.fromRecIds || [],
       termOfPayment: (q.termOfPayment || []).map(t => ({
         ...t
-      }))
+      })),
+      deliveryQty: q.deliveryQty || "",
+      deliveryUnit: q.deliveryUnit || "Minggu"
     });
     setSalesDiscount(q.salesDiscount || {
       aktif: false,
@@ -14095,7 +14215,7 @@ function QuotationPS({
       pajak: detail.pajak,
       pajakLabel: "PPN",
       total: detail.total,
-      catatan: detail.catatan,
+      catatan: combinedQuotationCatatan(detail),
       dibuatOleh: {
         nama: detail.createdByNama,
         signature: getSignature(store, detail.createdByUsername)
@@ -14381,7 +14501,56 @@ function QuotationPS({
       variant: "danger",
       onClick: () => removeTop(i)
     }, "×")])
-  })), revisionOf && /*#__PURE__*/React.createElement("div", {
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: `1px solid ${theme.border}`,
+      borderRadius: 10,
+      padding: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 10px",
+      color: theme.muted,
+      fontSize: 13,
+      fontWeight: 600
+    }
+  }, "DELIVERY TIME (opsional — untuk catatan cetak otomatis)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Jumlah",
+    value: form.deliveryQty,
+    onChange: v => setForm({
+      ...form,
+      deliveryQty: v
+    }),
+    type: "number",
+    min: "0",
+    placeholder: "mis: 3"
+  }), /*#__PURE__*/React.createElement(Select, {
+    label: "Satuan",
+    value: form.deliveryUnit,
+    onChange: v => setForm({
+      ...form,
+      deliveryUnit: v
+    }),
+    options: [{
+      value: "Minggu",
+      label: "Minggu"
+    }, {
+      value: "Bulan",
+      label: "Bulan"
+    }]
+  })), form.deliveryQty && parseFloat(form.deliveryQty) > 0 && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "10px 0 0",
+      fontSize: 12,
+      color: theme.accentLight
+    }
+  }, "Akan tercetak: “Waktu Pengerjaan ", form.deliveryQty, " (", terbilangAngka(parseFloat(form.deliveryQty) || 0), ") ", form.deliveryUnit, " Setelah DP diterima.”")), revisionOf && /*#__PURE__*/React.createElement("div", {
     style: {
       border: `1px solid ${theme.yellow}44`,
       background: theme.yellow + "0a",
@@ -14630,8 +14799,38 @@ function SalesOrderModule({
     ekspedisi: "",
     pic: "",
     noTlp: "",
-    alamat: ""
+    alamat: "",
+    termOfPayment: []
   });
+  // Term of Payment entry at SO-creation time — normally Sales already locks this in at Quotation
+  // stage (createSO snapshots quot.termOfPayment onto the SO). This lets whoever builds the SO add
+  // it here instead when Sales forgot to set it up on the Quotation, so the SO (and every Invoice
+  // pulled from it) still gets proper DP1/DP2/Final termin billing instead of falling back to
+  // per-item or ad-hoc DP invoicing. Only relevant/shown when the source quotation has no ToP.
+  const [soTopForm, setSoTopForm] = useState({
+    label: "DP1",
+    percent: "",
+    note: ""
+  });
+  const addSoTop = () => {
+    if (!soTopForm.label || !soTopForm.percent) return alert("Isi termin dan persentase");
+    setShipForm(f => ({
+      ...f,
+      termOfPayment: [...(f.termOfPayment || []), {
+        ...soTopForm,
+        percent: parseFloat(soTopForm.percent) || 0
+      }]
+    }));
+    setSoTopForm({
+      label: "DP1",
+      percent: "",
+      note: ""
+    });
+  };
+  const removeSoTop = i => setShipForm(f => ({
+    ...f,
+    termOfPayment: f.termOfPayment.filter((_, j) => j !== i)
+  }));
   const [editSO, setEditSO] = useState(null); // SO being revised via the header-fields Edit modal
   const [editForm, setEditForm] = useState(null);
   const openEditSO = so => {
@@ -14646,9 +14845,46 @@ function SalesOrderModule({
       ekspedisi: so.shippingEkspedisi || "",
       pic: so.shippingPic || "",
       noTlp: so.shippingNoTlp || "",
-      alamat: so.shippingAlamat || ""
+      alamat: so.shippingAlamat || "",
+      termOfPayment: (so.termOfPayment || []).map(t => ({
+        ...t
+      }))
+    });
+    setEditTopForm({
+      label: "DP1",
+      percent: "",
+      note: ""
     });
   };
+  // Term of Payment editor for an EXISTING SO — same idea as soTopForm above, but for the case
+  // where the SO was already created (with or without ToP) and needs it added/fixed afterward via
+  // the "✎ Edit" (Revisi) modal, e.g. Sales forgot at Quotation stage AND whoever built the SO also
+  // missed it. Editable regardless of whether the SO already has invoices — existing invoices keep
+  // their own locked-in terminAmount, only future invoices from this SO see the update.
+  const [editTopForm, setEditTopForm] = useState({
+    label: "DP1",
+    percent: "",
+    note: ""
+  });
+  const addEditTop = () => {
+    if (!editTopForm.label || !editTopForm.percent) return alert("Isi termin dan persentase");
+    setEditForm(f => ({
+      ...f,
+      termOfPayment: [...(f.termOfPayment || []), {
+        ...editTopForm,
+        percent: parseFloat(editTopForm.percent) || 0
+      }]
+    }));
+    setEditTopForm({
+      label: "DP1",
+      percent: "",
+      note: ""
+    });
+  };
+  const removeEditTop = i => setEditForm(f => ({
+    ...f,
+    termOfPayment: f.termOfPayment.filter((_, j) => j !== i)
+  }));
   const saveEditSO = () => {
     if (!editSO || !editForm) return;
     setSalesOrders(salesOrders.map(so => so.nomor === editSO.nomor ? {
@@ -14662,13 +14898,16 @@ function SalesOrderModule({
       shippingEkspedisi: editForm.ekspedisi,
       shippingPic: editForm.pic,
       shippingNoTlp: editForm.noTlp,
-      shippingAlamat: editForm.alamat
+      shippingAlamat: editForm.alamat,
+      termOfPayment: (editForm.termOfPayment || []).map(t => ({
+        ...t
+      }))
     } : so));
     logAudit(store, session, {
       module: "Sales Order",
       docNomor: editSO.nomor,
       action: "Revisi",
-      detail: `Update data SO (tanggal SO: ${editForm.tanggal || "-"}, No. PO/tanggal PO/catatan/pengiriman)`
+      detail: `Update data SO (tanggal SO: ${editForm.tanggal || "-"}, No. PO/tanggal PO/catatan/pengiriman/Term of Payment)`
     });
     setEditSO(null);
     setEditForm(null);
@@ -14883,7 +15122,13 @@ function SalesOrderModule({
       ekspedisi: "",
       pic: "",
       noTlp: "",
-      alamat: ""
+      alamat: "",
+      termOfPayment: []
+    });
+    setSoTopForm({
+      label: "DP1",
+      percent: "",
+      note: ""
     });
   };
   // Cross-module handoff: Unit Quotation's "Buat SO" button sets App-level pendingSOQuot to the
@@ -14966,7 +15211,10 @@ function SalesOrderModule({
       // Term of Payment is locked from the source Quotation at the moment the SO is created.
       // Item selection may still change (see pickedItems above), but the DP/Final percentages
       // themselves never change afterward — Invoice creation reads this locked list.
-      termOfPayment: (quot.termOfPayment || []).map(t => ({
+      // Fallback: if Sales never set up a Term of Payment on the Quotation, whoever builds the SO
+      // can define it here instead (soTopForm/shipForm.termOfPayment above) — this still flows
+      // through to Invoice exactly the same way as a Quotation-sourced one.
+      termOfPayment: (quot.termOfPayment && quot.termOfPayment.length > 0 ? quot.termOfPayment : shipForm.termOfPayment || []).map(t => ({
         ...t
       }))
     };
@@ -15385,7 +15633,84 @@ function SalesOrderModule({
       ...shipForm,
       catatan: v
     })
-  }), /*#__PURE__*/React.createElement("div", {
+  }), (pickQuot.quot.termOfPayment || []).length > 0 ? /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.accentLight
+    }
+  }, "✓ Term of Payment sudah dikunci dari Quotation ", pickQuot.quot.nomor, " (", pickQuot.quot.termOfPayment.map(t => `${t.label} ${t.percent}%`).join(", "), ") — akan otomatis dipakai di SO ini.") : /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: `1px solid ${theme.yellow}44`,
+      background: theme.yellow + "0a",
+      borderRadius: 10,
+      padding: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.muted,
+      fontSize: 13,
+      fontWeight: 600
+    }
+  }, "TERM OF PAYMENT (opsional — Quotation ini belum punya)", (() => {
+    const s = (shipForm.termOfPayment || []).reduce((a, t) => a + (parseFloat(t.percent) || 0), 0);
+    return s > 0 && /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: s === 100 ? theme.green : theme.yellow,
+        fontWeight: 400,
+        marginLeft: 8
+      }
+    }, "(total ", s, "%)");
+  })()), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 10px",
+      fontSize: 11,
+      color: theme.muted
+    }
+  }, "Idealnya Term of Payment sudah diisi Sales sejak Quotation. Kalau terlewat, isi di sini — akan mengunci ke SO ini dan otomatis dipakai saat Invoice dibuat (DP1/DP2/.../Final Payment)."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr 2fr auto",
+      gap: 10,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: soTopForm.label,
+    onChange: v => setSoTopForm({
+      ...soTopForm,
+      label: v
+    }),
+    options: ["DP1", "DP2", "DP3", "Final Payment", "Termin Custom"].map(l => ({
+      value: l,
+      label: l
+    }))
+  }), /*#__PURE__*/React.createElement(Input, {
+    value: soTopForm.percent,
+    onChange: v => setSoTopForm({
+      ...soTopForm,
+      percent: v
+    }),
+    type: "number",
+    placeholder: "%"
+  }), /*#__PURE__*/React.createElement(Input, {
+    value: soTopForm.note,
+    onChange: v => setSoTopForm({
+      ...soTopForm,
+      note: v
+    }),
+    placeholder: "Catatan (mis: dibayar sebelum pengiriman)"
+  }), /*#__PURE__*/React.createElement(Btn, {
+    onClick: addSoTop,
+    size: "sm"
+  }, "+ Add")), (shipForm.termOfPayment || []).length > 0 && /*#__PURE__*/React.createElement(Table, {
+    headers: ["Termin", "%", "Catatan", ""],
+    rows: shipForm.termOfPayment.map((t, i) => [t.label, t.percent + "%", t.note || "-", /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "danger",
+      onClick: () => removeSoTop(i)
+    }, "×")])
+  })), /*#__PURE__*/React.createElement("div", {
     style: {
       border: `1px solid ${theme.border}`,
       borderRadius: 10,
@@ -15692,6 +16017,76 @@ function SalesOrderModule({
       catatan: v
     })
   }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: `1px solid ${theme.border}`,
+      borderRadius: 10,
+      padding: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.muted,
+      fontSize: 13,
+      fontWeight: 600
+    }
+  }, "TERM OF PAYMENT", (() => {
+    const s = (editForm.termOfPayment || []).reduce((a, t) => a + (parseFloat(t.percent) || 0), 0);
+    return s > 0 && /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: s === 100 ? theme.green : theme.yellow,
+        fontWeight: 400,
+        marginLeft: 8
+      }
+    }, "(total ", s, "%)");
+  })()), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 10px",
+      fontSize: 11,
+      color: theme.muted
+    }
+  }, "Menambah/mengubah di sini mengunci Term of Payment ke SO ini — Invoice berikutnya dari SO ini akan mengikuti daftar termin terbaru (invoice yang sudah dibuat sebelumnya tidak berubah)."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr 2fr auto",
+      gap: 10,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: editTopForm.label,
+    onChange: v => setEditTopForm({
+      ...editTopForm,
+      label: v
+    }),
+    options: ["DP1", "DP2", "DP3", "Final Payment", "Termin Custom"].map(l => ({
+      value: l,
+      label: l
+    }))
+  }), /*#__PURE__*/React.createElement(Input, {
+    value: editTopForm.percent,
+    onChange: v => setEditTopForm({
+      ...editTopForm,
+      percent: v
+    }),
+    type: "number",
+    placeholder: "%"
+  }), /*#__PURE__*/React.createElement(Input, {
+    value: editTopForm.note,
+    onChange: v => setEditTopForm({
+      ...editTopForm,
+      note: v
+    }),
+    placeholder: "Catatan (mis: dibayar sebelum pengiriman)"
+  }), /*#__PURE__*/React.createElement(Btn, {
+    onClick: addEditTop,
+    size: "sm"
+  }, "+ Add")), (editForm.termOfPayment || []).length > 0 && /*#__PURE__*/React.createElement(Table, {
+    headers: ["Termin", "%", "Catatan", ""],
+    rows: editForm.termOfPayment.map((t, i) => [t.label, t.percent + "%", t.note || "-", /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "danger",
+      onClick: () => removeEditTop(i)
+    }, "×")])
+  })), /*#__PURE__*/React.createElement("div", {
     style: {
       border: `1px solid ${theme.border}`,
       borderRadius: 10,
@@ -22363,6 +22758,45 @@ function InvoiceModule({
   const [filter, setFilter] = useState("Semua");
   const [fakturModal, setFakturModal] = useState(null);
   const [fakturInput, setFakturInput] = useState("");
+  // Term of Payment entry directly from Invoice creation — for the case where Sales forgot at
+  // Quotation stage AND whoever built the SO also missed it. Writes straight onto the SO record
+  // (same field SalesOrderModule's own ToP editors write to), so once saved this SO behaves exactly
+  // like any other termin-based SO from then on — the normal Termin dropdown above takes over.
+  const [invTopForm, setInvTopForm] = useState({
+    label: "DP1",
+    percent: "",
+    note: ""
+  });
+  const [invTopDraft, setInvTopDraft] = useState([]);
+  const addInvTop = () => {
+    if (!invTopForm.label || !invTopForm.percent) return alert("Isi termin dan persentase");
+    setInvTopDraft(d => [...d, {
+      ...invTopForm,
+      percent: parseFloat(invTopForm.percent) || 0
+    }]);
+    setInvTopForm({
+      label: "DP1",
+      percent: "",
+      note: ""
+    });
+  };
+  const removeInvTop = i => setInvTopDraft(d => d.filter((_, j) => j !== i));
+  const saveInvTopToSO = so => {
+    if (invTopDraft.length === 0) return alert("Tambahkan minimal 1 termin dulu.");
+    setSalesOrders(prev => (prev || []).map(s => s.nomor === so.nomor ? {
+      ...s,
+      termOfPayment: invTopDraft.map(t => ({
+        ...t
+      }))
+    } : s));
+    logAudit(store, session, {
+      module: "Sales Order",
+      docNomor: so.nomor,
+      action: "Revisi",
+      detail: `Term of Payment ditambahkan dari layar Buat Invoice (${invTopDraft.map(t => `${t.label} ${t.percent}%`).join(", ")})`
+    });
+    setInvTopDraft([]);
+  };
   // Term of Payment is locked on the SO at creation time (see SalesOrderModule.createSO). An SO
   // can now receive MULTIPLE invoices — one per un-invoiced termin (DP1, DP2, Final, ...) — instead
   // of exactly one invoice for the full amount. SOs with no ToP defined fall back to the legacy
@@ -23763,7 +24197,7 @@ function InvoiceModule({
     open: modal,
     title: "Buat Invoice dari Sales Order",
     onClose: () => setModal(false),
-    width: 600
+    width: 900
   }, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -23842,12 +24276,79 @@ function InvoiceModule({
       ...f,
       invoiceMode: "dp"
     }))
-  }, "DP / Pembayaran Sebagian"), soHasAdhocDP(selectedSO) && /*#__PURE__*/React.createElement("span", {
+  }, "DP / Pembayaran Sebagian"), !soHasAdhocDP(selectedSO) && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: form.invoiceMode === "top" ? "primary" : "ghost",
+    onClick: () => setForm(f => ({
+      ...f,
+      invoiceMode: "top"
+    }))
+  }, "+ Term of Payment"), soHasAdhocDP(selectedSO) && /*#__PURE__*/React.createElement("span", {
     style: {
       fontSize: 11,
       color: theme.yellow
     }
-  }, "SO ini sudah pernah ditagih via DP — mode Per Item dikunci; lanjutkan dengan DP/Pelunasan berikutnya.")), form.invoiceMode !== "dp" && !soHasAdhocDP(selectedSO) && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
+  }, "SO ini sudah pernah ditagih via DP — mode Per Item dikunci; lanjutkan dengan DP/Pelunasan berikutnya.")), form.invoiceMode === "top" && !soHasAdhocDP(selectedSO) && /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: `1px solid ${theme.border}`,
+      borderRadius: 10,
+      padding: 14,
+      display: "flex",
+      flexDirection: "column",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "SO ini belum punya Term of Payment. Isi di sini — akan langsung mengunci ke SO ", selectedSO.nomor, " dan invoice ini bisa lanjut memilih Termin di atas seperti biasa."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr 2fr auto",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: invTopForm.label,
+    onChange: v => setInvTopForm({
+      ...invTopForm,
+      label: v
+    }),
+    options: ["DP1", "DP2", "DP3", "Final Payment", "Termin Custom"].map(l => ({
+      value: l,
+      label: l
+    }))
+  }), /*#__PURE__*/React.createElement(Input, {
+    value: invTopForm.percent,
+    onChange: v => setInvTopForm({
+      ...invTopForm,
+      percent: v
+    }),
+    type: "number",
+    placeholder: "%"
+  }), /*#__PURE__*/React.createElement(Input, {
+    value: invTopForm.note,
+    onChange: v => setInvTopForm({
+      ...invTopForm,
+      note: v
+    }),
+    placeholder: "Catatan (mis: dibayar sebelum pengiriman)"
+  }), /*#__PURE__*/React.createElement(Btn, {
+    onClick: addInvTop,
+    size: "sm"
+  }, "+ Add")), invTopDraft.length > 0 && /*#__PURE__*/React.createElement(Table, {
+    headers: ["Termin", "%", "Catatan", ""],
+    rows: invTopDraft.map((t, i) => [t.label, t.percent + "%", t.note || "-", /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "danger",
+      onClick: () => removeInvTop(i)
+    }, "×")])
+  }), invTopDraft.length > 0 && /*#__PURE__*/React.createElement(Btn, {
+    onClick: () => saveInvTopToSO(selectedSO),
+    size: "sm",
+    variant: "success"
+  }, "💾 Simpan Term of Payment ke SO Ini")), form.invoiceMode !== "dp" && form.invoiceMode !== "top" && !soHasAdhocDP(selectedSO) && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
     style: {
       margin: 0,
       fontSize: 12,
