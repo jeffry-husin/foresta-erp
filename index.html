@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-06.6";
+const APP_BUILD = "2026-08-06.7";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -12071,6 +12071,13 @@ function QuotationUnit({
   const save = (asDraft = false) => {
     if (!form.customerId) return alert("Pilih client");
     if (form.items.length === 0) return alert("Tambahkan minimal 1 unit/part");
+    // Term of Payment either stays completely empty (legacy no-termin mode) or must add up to
+    // exactly 100% — a "nanggung" list (e.g. only DP1 30% with no Final Payment) used to save fine
+    // and silently leave the remaining balance impossible to invoice later. Drafts are exempt since
+    // they're still being worked on.
+    if (!asDraft && (form.termOfPayment || []).length > 0 && topPercentSum !== 100) {
+      return alert(`Total persentase Term of Payment harus 100% (saat ini ${topPercentSum}%). Tambahkan/perbaiki termin sebelum menyimpan.`);
+    }
     const cust = customers.find(c => c.id === form.customerId);
     if (!isOwnerLike && cust && !customerAccessibleBy(cust, session)) {
       return alert("Anda belum memiliki akses ke client ini. Ajukan Request Akses di Database Client terlebih dahulu.");
@@ -13575,6 +13582,11 @@ function QuotationPS({
   const save = (asDraft = false) => {
     if (!form.customerId) return alert("Pilih client");
     if (form.items.length === 0) return alert("Tambahkan minimal 1 item");
+    // Term of Payment either stays completely empty (legacy no-termin mode) or must add up to
+    // exactly 100% — see the matching note in QuotationUnit's save().
+    if (!asDraft && (form.termOfPayment || []).length > 0 && topPercentSum !== 100) {
+      return alert(`Total persentase Term of Payment harus 100% (saat ini ${topPercentSum}%). Tambahkan/perbaiki termin sebelum menyimpan.`);
+    }
     const cust = customers.find(c => c.id === form.customerId);
     if (editingQ) {
       // In-place edit: same nomor, no new revision row. A Draft stays Draft unless explicitly
@@ -14923,6 +14935,12 @@ function SalesOrderModule({
   }));
   const saveEditSO = () => {
     if (!editSO || !editForm) return;
+    if ((editForm.termOfPayment || []).length > 0) {
+      const editTopSum = (editForm.termOfPayment || []).reduce((s, t) => s + (parseFloat(t.percent) || 0), 0);
+      if (editTopSum !== 100) {
+        return alert(`Total persentase Term of Payment harus 100% (saat ini ${editTopSum}%). Tambahkan/perbaiki termin sebelum menyimpan.`);
+      }
+    }
     setSalesOrders(salesOrders.map(so => so.nomor === editSO.nomor ? {
       ...so,
       tanggal: editForm.tanggal || so.tanggal,
@@ -15213,6 +15231,14 @@ function SalesOrderModule({
     } = pickQuot;
     const items = quot.items.filter((_, i) => pickedItems.includes(i));
     if (items.length === 0) return alert("Pilih minimal 1 item untuk dijadikan SO");
+    // If the source Quotation never had a Term of Payment, whoever builds the SO can define one
+    // here (shipForm.termOfPayment) instead — same 100% rule as Quotation's own save().
+    if (!(quot.termOfPayment && quot.termOfPayment.length > 0) && (shipForm.termOfPayment || []).length > 0) {
+      const shipTopSum = (shipForm.termOfPayment || []).reduce((s, t) => s + (parseFloat(t.percent) || 0), 0);
+      if (shipTopSum !== 100) {
+        return alert(`Total persentase Term of Payment harus 100% (saat ini ${shipTopSum}%). Tambahkan/perbaiki termin sebelum membuat SO.`);
+      }
+    }
     const subtotal = items.reduce((s, i) => s + i.subtotal, 0);
     const pajakPct = quot.subtotal ? quot.pajak / quot.subtotal * 100 : 0;
     const pajak = subtotal * pajakPct / 100;
@@ -22886,6 +22912,10 @@ function InvoiceModule({
   const removeInvTop = i => setInvTopDraft(d => d.filter((_, j) => j !== i));
   const saveInvTopToSO = so => {
     if (invTopDraft.length === 0) return alert("Tambahkan minimal 1 termin dulu.");
+    const invTopSum = invTopDraft.reduce((s, t) => s + (parseFloat(t.percent) || 0), 0);
+    if (invTopSum !== 100) {
+      return alert(`Total persentase Term of Payment harus 100% (saat ini ${invTopSum}%). Tambahkan/perbaiki termin sebelum menyimpan.`);
+    }
     setSalesOrders(prev => (prev || []).map(s => s.nomor === so.nomor ? {
       ...s,
       termOfPayment: invTopDraft.map(t => ({
@@ -24342,7 +24372,7 @@ function InvoiceModule({
       noPoClient: v
     }),
     placeholder: "Nomor PO yang diberikan oleh client"
-  }), selectedSO && selectedSORemainingTermin && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Select, {
+  }), selectedSO && selectedSORemainingTermin && selectedSORemainingTermin.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Select, {
     label: "Termin (Term of Payment terkunci dari Quotation)",
     value: form.terminLabel,
     onChange: v => setForm({
@@ -24360,7 +24390,7 @@ function InvoiceModule({
       fontSize: 12,
       color: theme.accentLight
     }
-  }, "Jumlah invoice untuk termin ini: ", /*#__PURE__*/React.createElement("strong", null, fmt(computeTerminAmount(selectedSO, form.terminLabel))), " · Sudah tertagih sebelumnya: ", fmt(soTerbayarSoFar(selectedSO.nomor)), " dari total SO ", fmt(selectedSO.total))), selectedSO && selectedSORemainingTermin === null && /*#__PURE__*/React.createElement(React.Fragment, null, soHasAdhocDP(selectedSO) && /*#__PURE__*/React.createElement("p", {
+  }, "Jumlah invoice untuk termin ini: ", /*#__PURE__*/React.createElement("strong", null, fmt(computeTerminAmount(selectedSO, form.terminLabel))), " · Sudah tertagih sebelumnya: ", fmt(soTerbayarSoFar(selectedSO.nomor)), " dari total SO ", fmt(selectedSO.total))), selectedSO && (!selectedSORemainingTermin || selectedSORemainingTermin.length === 0) && /*#__PURE__*/React.createElement(React.Fragment, null, soHasAdhocDP(selectedSO) && /*#__PURE__*/React.createElement("p", {
     style: {
       margin: 0,
       fontSize: 11,
@@ -24381,7 +24411,7 @@ function InvoiceModule({
       fontSize: 12,
       color: theme.muted
     }
-  }, "SO ini belum punya Term of Payment. Isi di sini — akan langsung mengunci ke SO ", selectedSO.nomor, " dan invoice ini bisa lanjut memilih Termin di atas seperti biasa."), /*#__PURE__*/React.createElement("div", {
+  }, selectedSORemainingTermin === null ? "SO ini belum punya Term of Payment. Isi di sini — akan langsung mengunci ke SO " : "Semua termin yang sudah didefinisikan di SO ini sudah terinvoice, tapi jumlahnya belum genap 100% dari SO. Tambahkan termin susulan (mis. Final Payment) di sini — akan langsung mengunci ke SO ", selectedSO.nomor, " dan invoice ini bisa lanjut memilih Termin di atas seperti biasa."), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
       gridTemplateColumns: "1fr 1fr 2fr auto",
