@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-06.4";
+const APP_BUILD = "2026-08-06.6";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -14978,6 +14978,19 @@ function SalesOrderModule({
     // to be fully paid ("Lunas"), which left SO-003/SO-004-style SOs sitting in ON GOING for as
     // long as the customer hadn't paid yet, even though the SO's own job (produce the Invoice) was
     // already done. Payment collection is Invoice's job to track from here, not Sales Order's.
+    //
+    // BUG FIX (SO-062 case): for an SO with Term of Payment, "an Invoice exists" used to be enough
+    // to mark the whole SO complete even after just the FIRST termin (e.g. DP1 30%) was invoiced —
+    // dropping the SO straight into the completed bucket, which has no "✎ Edit" button, so nobody
+    // could add the missing Final Payment termin or fix a mistaken entry ever again, and the SO
+    // could never be invoiced for its remaining balance. An SO with Term of Payment now only counts
+    // as complete once EVERY termin on its list has actually been invoiced.
+    const top = so.termOfPayment || [];
+    if (top.length > 0) {
+      const usedLabels = (invoices || []).filter(i => i.soNomor === so.nomor).map(i => i.terminLabel);
+      const allTerminInvoiced = top.every(t => usedLabels.includes(t.label));
+      return soFullyShipped(so) || allTerminInvoiced || !!so.selesaiManual;
+    }
     const hasInvoice = (invoices || []).some(i => i.soNomor === so.nomor);
     return soFullyShipped(so) || hasInvoice || !!so.selesaiManual;
   };
@@ -22941,6 +22954,11 @@ function InvoiceModule({
   // hargaSebelumDiskonSO/subtotalSebelumDiskonSO snapshot applySoDiskon leaves on each item, so it
   // can be shown as its own line in the preview/print instead of being invisible.
   const invoiceSoDiskonAmount = inv => (inv?.items || []).reduce((s, it) => s + Math.max(0, (it.subtotalSebelumDiskonSO ?? it.subtotal ?? 0) - (it.subtotal ?? 0)), 0);
+  // For termin (DP) invoices, `items` now lists the SO's real items at their full, unscaled harga
+  // pokok (see save()'s terminItems) — this sums them back up for the "Subtotal" line shown in the
+  // detail panel/print, which is a DIFFERENT number from `inv.subtotal` (that field holds the DP
+  // pre-tax slice actually being billed, e.g. 300.000 of a 1.000.000 Subtotal at DP 30%).
+  const invoiceItemsSubtotal = inv => (inv?.items || []).reduce((s, it) => s + (it.subtotal ?? (it.qty || 0) * (it.harga || 0)), 0);
   // Ad-hoc DP / partial-payment invoices for legacy SOs (no Term of Payment defined).
   // Unlike termin invoices (which bill a pre-defined % against a named DP1/DP2/Final label),
   // ad-hoc DP invoices let the user type any % or Rp amount at invoice-creation time (e.g. "DP 30%"
@@ -23026,16 +23044,26 @@ function InvoiceModule({
     ...f,
     selectedItemKeys: f.selectedItemKeys.includes(key) ? f.selectedItemKeys.filter(k => k !== key) : [...f.selectedItemKeys, key]
   }));
+  // Termin (DP/Pelunasan) amounts are computed PRE-TAX, off the SO's own Subtotal (post SO-level
+  // discount, before PPN) — never off so.total (which already has PPN baked in) and never by
+  // shaving the DP percentage into each item's unit price. Item "harga pokok" always stays exactly
+  // as it is on the SO; only the DP/PPN/Total figures below the item list change per termin. This
+  // matches soAdhocPreTaxBase's existing pre-tax basis so termin and ad-hoc DP invoices now share
+  // the exact same tax treatment (confirmed spec: Subtotal 1.000.000 → DP 30% = 300.000 → PPN 11%
+  // of the DP = 33.000 → Total 333.000).
   const computeTerminAmount = (so, label) => {
     const top = so.termOfPayment || [];
     const t = top.find(x => x.label === label);
-    if (!t) return so.total;
-    const usedLabels = soInvoices(so.nomor).map(i => i.terminLabel);
+    const preTaxBase = soAdhocPreTaxBase(so);
+    if (!t) return preTaxBase;
     const isLastRemaining = remainingTermin(so).filter(x => x.label !== label).length === 0;
-    // The last remaining termin always bills the true remainder (total - sum already invoiced)
-    // rather than its nominal percent, so rounding drift never leaves a stray balance.
-    if (isLastRemaining) return Math.max(0, so.total - soTerbayarSoFar(so.nomor));
-    return so.total * (parseFloat(t.percent) || 0) / 100;
+    // The last remaining termin always bills the true pre-tax remainder (base − sum of DP already
+    // billed via earlier termin invoices on this SO) rather than its nominal percent, so rounding
+    // drift never leaves a stray balance. "Billed so far" reads each earlier termin invoice's own
+    // `subtotal` field, which stores exactly this same pre-tax DP slice (see save() below).
+    const billedSoFar = soInvoices(so.nomor).filter(i => i.terminLabel).reduce((s, i) => s + (i.subtotal || 0), 0);
+    if (isLastRemaining) return Math.max(0, preTaxBase - billedSoFar);
+    return preTaxBase * (parseFloat(t.percent) || 0) / 100;
   };
   // Invoice numbering now follows the unified app-wide format: INV-000-FRT-ROMAN-YEAR.
   const newNomor = (arr = invoices) => genDocNumber(arr, "INV");
@@ -23090,36 +23118,21 @@ function InvoiceModule({
     const diskonInputValue = parseFloat(form.diskonValue) || 0;
     const diskonNominal = form.diskonMode === "persen" ? baseSubtotal * diskonInputValue / 100 : diskonInputValue;
     const afterDiskon = Math.max(0, baseSubtotal - diskonNominal);
-    // Bug fix (UQ-024 → SO-055 case): for termin-based invoices (DP/Pelunasan), `terminAmount` is a
-    // proportional slice of `so.total` — and `so.total` ALREADY includes PPN (Quotation and SO both
-    // compute total = subtotal − diskon + PPN). Blindly adding another 11% here double-taxed every
-    // termin invoice, inflating the total. Non-termin (per-item) invoices don't have this problem:
-    // `so.items[].harga` are pre-tax unit prices (PPN is never baked into individual items), so
-    // applying 11% on `chosenItems`' subtotal is the correct — and only — point of taxation.
-    // Ad-hoc DP invoices are ALSO pre-tax (dpNominalPreTax is a slice of preTaxBase, not of
-    // so.total), so they need PPN added like per-item invoices do — but at the SO's own effective
-    // rate (so.pajak / preTaxBase) rather than a flat 11%, so a discounted/negotiated SO still bills
-    // DP invoices proportionally consistent with the SO's real tax ratio.
-    const soPajakRatio = hasTop && so && so.total ? (so.pajak || 0) / so.total : 0;
+    // Termin (DP/Pelunasan) invoices are now pre-tax just like per-item invoices — PPN 11% is
+    // applied on top of the (post-discount) DP amount, not extracted from an already tax-inclusive
+    // slice of so.total. Ad-hoc DP (legacy SOs with no Term of Payment) keeps billing at the SO's
+    // own effective tax ratio (so.pajak / preTaxBase) rather than a flat 11%, so a discounted/
+    // negotiated SO still bills DP invoices proportionally consistent with the SO's real tax ratio.
     const dpPajakRatio = useDpMode && preTaxBase ? (so.pajak || 0) / preTaxBase : 0;
-    const pajakNominal = hasTop ? afterDiskon * soPajakRatio : useDpMode ? afterDiskon * dpPajakRatio : afterDiskon * 0.11;
-    // For termin invoices `afterDiskon` is already tax-inclusive (terminAmount is a slice of
-    // so.total, which already includes PPN), so the PPN portion must not be added again here.
-    const invoiceTotal = hasTop ? Math.max(0, afterDiskon) : Math.max(0, afterDiskon + pajakNominal);
+    const pajakNominal = useDpMode ? afterDiskon * dpPajakRatio : afterDiskon * 0.11;
+    const invoiceTotal = Math.max(0, afterDiskon + pajakNominal);
     const dpLabel = form.dpMode === "sisa" ? "Pelunasan / Sisa Pembayaran" : `Uang Muka (DP) ${form.dpMode === "persen" ? `${parseFloat(form.dpValue) || 0}%` : fmt(dpNominalPreTax)}`;
-    // For termin invoices, print should show the REAL SO items this invoice covers (not one opaque
-    // "Termin DP1 (30%)" line) — each SO item scaled by the same effective rate the termin bills at.
-    // Using terminAmount/so.total (rather than the raw termin.percent) keeps this exactly consistent
-    // with the "last remaining termin bills the true remainder" rounding rule in computeTerminAmount.
-    const terminEffectiveRate = hasTop && so && so.total ? terminAmount / so.total : 0;
-    const terminItems = hasTop ? (so.items || []).map(it => {
-      const rawSubtotal = it.subtotal ?? (it.qty || 0) * (it.harga || 0);
-      return {
-        ...it,
-        harga: (it.harga || 0) * terminEffectiveRate,
-        subtotal: rawSubtotal * terminEffectiveRate
-      };
-    }) : [];
+    // For termin invoices, print/detail should show the REAL SO items this invoice covers, each at
+    // its full, unmodified "harga pokok" — the DP percentage is applied ONLY to the Subtotal total,
+    // never baked into individual item prices (confirmed spec, see computeTerminAmount above).
+    const terminItems = hasTop ? (so.items || []).map(it => ({
+      ...it
+    })) : [];
     setInvoices(prev => [...prev, {
       nomor: newNomor(prev),
       tanggal: today(),
@@ -24169,7 +24182,14 @@ function InvoiceModule({
       color: theme.muted,
       fontSize: 13
     }
-  }, /*#__PURE__*/React.createElement("span", null, "Subtotal"), /*#__PURE__*/React.createElement("span", null, fmt(detail.subtotal))), invoiceSoDiskonAmount(detail) > 0 && /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("span", null, "Subtotal"), /*#__PURE__*/React.createElement("span", null, fmt(detail.terminLabel ? invoiceItemsSubtotal(detail) : detail.subtotal))), detail.terminLabel && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, /*#__PURE__*/React.createElement("span", null, "Termin ", detail.terminLabel, detail.terminPercent != null ? ` (${detail.terminPercent}%)` : ""), /*#__PURE__*/React.createElement("span", null, fmt(detail.subtotal))), invoiceSoDiskonAmount(detail) > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
@@ -24256,7 +24276,8 @@ function InvoiceModule({
       partyExtra: customers.find(c => c.nama === detail.customerNama)?.alamat || "",
       itemHeaders: ["PN", "Nama Barang/Jasa", "Qty", "Harga", "Subtotal"],
       items: detail.items.map(it => [it.partNumber || it.unitCode || "-", it.unitName || it.partName, fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)]),
-      subtotal: detail.subtotal,
+      subtotal: detail.terminLabel ? invoiceItemsSubtotal(detail) : detail.subtotal,
+      extraTotalRows: detail.terminLabel ? [[`Termin ${detail.terminLabel}${detail.terminPercent != null ? ` (${detail.terminPercent}%)` : ""}`, detail.subtotal]] : [],
       diskon: detail.diskon,
       diskonLabel: detail.diskonPersen ? `Discount (${detail.diskonPersen}%)` : "Discount",
       pajak: detail.pajak,
@@ -24264,7 +24285,7 @@ function InvoiceModule({
       uangMuka: detail.uangMuka,
       total: detail.total,
       catatan: detail.catatan,
-      extraInfoRows: [["No. Purchase Order (dari Client)", detail.noPoClient || "-"], ["No. Sales Order", detail.soNomor || "-"], ...(invoiceSoDiskonAmount(detail) > 0 ? [["Diskon dari SO (sudah termasuk di harga item)", fmt(invoiceSoDiskonAmount(detail))]] : []), ...(detail.terminLabel ? [["Termin", `${detail.terminLabel} (${detail.terminPercent}%) dari total SO ${fmt(detail.soTotal)}`]] : []), ["Term of Payment", detail.tipePembayaran], ...(detail.tipePembayaran === "TEMPO" ? [...(detail.jumlahHariTempo ? [["Jumlah Hari", `${detail.jumlahHariTempo} hari`]] : []), ["Jatuh Tempo", detail.tanggalJatuhTempo]] : [])],
+      extraInfoRows: [["No. Purchase Order (dari Client)", detail.noPoClient || "-"], ["No. Sales Order", detail.soNomor || "-"], ...(invoiceSoDiskonAmount(detail) > 0 ? [["Diskon dari SO (sudah termasuk di harga item)", fmt(invoiceSoDiskonAmount(detail))]] : []), ["Term of Payment", detail.tipePembayaran], ...(detail.tipePembayaran === "TEMPO" ? [...(detail.jumlahHariTempo ? [["Jumlah Hari", `${detail.jumlahHariTempo} hari`]] : []), ["Jatuh Tempo", detail.tanggalJatuhTempo]] : [])],
       terbilangText: terbilang(detail.total),
       bankInfoText: "BCA KCP Sunter Bisma<br/>A/N PT. FORESTA TRANSTEK<br/>A/C 5820822678",
       hideCreatedBy: true,
@@ -24729,9 +24750,9 @@ function InvoiceModule({
       padding: "8px 10px"
     }
   }, (() => {
-    // Mirrors save()'s hasTop branch: for termin invoices the base is already tax-inclusive (a
-    // slice of so.total), so PPN must be extracted from it rather than added again — see the bug
-    // fix note in save() for the full explanation (UQ-024 → SO-055 double-PPN case).
+    // Mirrors save(): termin (DP) invoices are now pre-tax off the SO's own Subtotal, same as
+    // ad-hoc DP — PPN 11% is added on top of the (post-discount) DP amount, never extracted from
+    // an already tax-inclusive figure. Item "harga pokok" is never touched by DP/Discount.
     const previewHasTop = !!(selectedSO && (selectedSO.termOfPayment || []).length > 0);
     const previewUseDp = !!selectedSO && !previewHasTop && (form.invoiceMode === "dp" || soHasAdhocDP(selectedSO));
     const previewDpBase = previewUseDp ? soAdhocPreTaxBase(selectedSO) : 0;
@@ -24740,11 +24761,10 @@ function InvoiceModule({
     const previewDiskonValue = parseFloat(form.diskonValue) || 0;
     const previewDiskon = form.diskonMode === "persen" ? previewSubtotal * previewDiskonValue / 100 : previewDiskonValue;
     const previewAfterDiskon = Math.max(0, previewSubtotal - previewDiskon);
-    const previewSoPajakRatio = previewHasTop && selectedSO && selectedSO.total ? (selectedSO.pajak || 0) / selectedSO.total : 0;
     const previewDpPajakRatio = previewUseDp && previewDpBase ? (selectedSO.pajak || 0) / previewDpBase : 0;
-    const previewPajak = previewHasTop ? previewAfterDiskon * previewSoPajakRatio : previewUseDp ? previewAfterDiskon * previewDpPajakRatio : previewAfterDiskon * 0.11;
-    const previewTotal = previewHasTop ? Math.max(0, previewAfterDiskon) : Math.max(0, previewAfterDiskon + previewPajak);
-    return `Subtotal ${fmt(previewSubtotal)} − Discount ${fmt(previewDiskon)} + PPN ${fmt(previewPajak)} = Total ${fmt(previewTotal)}`;
+    const previewPajak = previewUseDp ? previewAfterDiskon * previewDpPajakRatio : previewAfterDiskon * 0.11;
+    const previewTotal = Math.max(0, previewAfterDiskon + previewPajak);
+    return previewHasTop ? `Subtotal SO ${fmt(soAdhocPreTaxBase(selectedSO))} → DP ${fmt(previewSubtotal)} − Discount ${fmt(previewDiskon)} + PPN ${fmt(previewPajak)} = Total ${fmt(previewTotal)}` : `Subtotal ${fmt(previewSubtotal)} − Discount ${fmt(previewDiskon)} + PPN ${fmt(previewPajak)} = Total ${fmt(previewTotal)}`;
   })())), /*#__PURE__*/React.createElement(Input, {
     label: "No. Faktur Pajak (Opsional)",
     value: form.noFakturPajak,
@@ -27554,6 +27574,7 @@ function printDocument({
   items,
   itemHeaders,
   subtotal,
+  extraTotalRows,
   diskon,
   diskonLabel = "Diskon",
   pajak,
@@ -27649,6 +27670,7 @@ function printDocument({
       ${showPrice ? `
       <div class="totals">
         <div class="row"><span>Subtotal</span><span>${fmtMoney(subtotal, currency)}</span></div>
+        ${(extraTotalRows || []).map(([k, v]) => `<div class="row"><span>${k}</span><span>${fmtMoney(v, currency)}</span></div>`).join("")}
         ${diskon ? `<div class="row"><span>${diskonLabel}</span><span>-${fmtMoney(diskon, currency)}</span></div>` : ""}
         ${pajak ? `<div class="row"><span>${pajakLabel}</span><span>${fmtMoney(pajak, currency)}</span></div>` : ""}
         ${uangMuka ? `<div class="row"><span>${uangMukaLabel}</span><span>-${fmtMoney(uangMuka, currency)}</span></div>` : ""}
