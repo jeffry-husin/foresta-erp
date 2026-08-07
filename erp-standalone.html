@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-07.1";
+const APP_BUILD = "2026-08-07.2";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -2109,7 +2109,7 @@ function getPreloadedErpData() {
 // the winner's current data) before this was wired into any UI code path.
 // Intentionally scoped to two low-traffic keys for now. Do NOT add Invoices/Sales Orders/Payroll/
 // etc. here until this pilot has run cleanly in production for a while — see task #191.
-const CAS_PILOT_KEYS = new Set(["erp_mills", "erp_client_groups"]);
+const CAS_PILOT_KEYS = new Set(["erp_mills", "erp_client_groups", "erp_customers", "erp_sales_orders"]);
 function usePersisted(key, defaultVal) {
   const cacheKey = "erp_cache_" + key;
   const [val, setValRaw] = useState(() => {
@@ -2677,7 +2677,21 @@ function logAudit(store, session, {
   // writer's entry entirely. Root-caused after a leave request ("Ajukan Cuti") audit trail for one
   // user was found completely missing (not even a stale copy) while another user's concurrent
   // Form Cuti actions logged fine — re-fetching immediately before appending closes that window.
-  store.setAuditLog(prev => [...prev, entry]);
+  // AUTO-PRUNE: audit log was manually cleaned up twice before (tasks #166, #192) after it kept
+  // growing large enough to slow page load. Instead of relying on another manual cleanup, drop
+  // entries older than AUDIT_LOG_RETENTION_MONTHS on every write — the filter is cheap (single
+  // pass, timestamps are ISO strings so Date parsing is reliable) and keeps the log self-bounding
+  // going forward with no admin action needed.
+  const AUDIT_LOG_RETENTION_MONTHS = 6;
+  store.setAuditLog(prev => {
+    const cutoff = new Date();
+    cutoff.setMonth(cutoff.getMonth() - AUDIT_LOG_RETENTION_MONTHS);
+    const pruned = (prev || []).filter(e => {
+      const t = new Date(e.timestamp);
+      return isNaN(t.getTime()) || t >= cutoff; // keep malformed timestamps rather than risk losing data
+    });
+    return [...pruned, entry];
+  });
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -4512,7 +4526,11 @@ function MasterPart({
     partName: "partName",
     description: "description"
   };
-  const filtered = parts.filter(p => {
+  // PERF: Master Part can hold 2900+ rows. Without memoization this filter+sort re-ran on every
+  // render (including renders triggered by unrelated state like modal open/close), which is
+  // wasted work on a list this size. useMemo skips the recompute unless parts/search/subKatFilter/
+  // sortBy actually changed.
+  const filtered = React.useMemo(() => parts.filter(p => {
     const q = search.toLowerCase();
     return (p.partNumber.toLowerCase().includes(q) || p.partName.toLowerCase().includes(q) || (p.description || "").toLowerCase().includes(q)) && (subKatFilter === "Semua" || p.subKategori === subKatFilter);
   }).slice().sort((a, b) => {
@@ -4521,7 +4539,7 @@ function MasterPart({
       numeric: true,
       sensitivity: "base"
     });
-  });
+  }), [parts, search, subKatFilter, sortBy]);
   const wipeAllParts = () => {
     setParts([]);
     setWipeConfirm(false);
@@ -6297,7 +6315,9 @@ function CustomerDB({
   // company name happens to contain that text. This was the actual complaint behind "SUHANDI
   // hanya lihat sebagian client": the Database Client list itself already shows all clients, but
   // there was no way to search/filter by sales manager to quickly find "his" clients among 932.
-  const filtered = visible.filter(c => {
+  // PERF: Database Client can hold 900+ rows. Memoize so this filter only re-runs when the
+  // underlying data or search text actually changes, not on every unrelated re-render.
+  const filtered = React.useMemo(() => visible.filter(c => {
     const q = search.trim().toLowerCase();
     if (!q) return true;
     if (c.nama.toLowerCase().includes(q)) return true;
@@ -6306,7 +6326,7 @@ function CustomerDB({
     if (assignedNamas.includes(q)) return true;
     if (groupNamaFor(c).toLowerCase().includes(q)) return true;
     return false;
-  });
+  }), [visible, search, clientGroups, salesManagerUsers]);
   const CUSTOMER_TEMPLATE_HEADERS = ["id", "salesManager", "nama", "category", "currency", "picNama", "picJabatan", "picNoHp", "alamat", "telepon", "email", "shippingAddress", "billingAddress", "npwp", "taxPayer", "nitku", "taxAddress"];
   // Master Group CRUD — Owner/GM only. Kept intentionally simple (name only, no separate
   // module) since Group exists purely to tag which Database Client companies belong under the
@@ -15057,7 +15077,7 @@ function SalesOrderModule({
         return alert(`Total persentase Term of Payment harus 100% (saat ini ${editTopSum}%). Tambahkan/perbaiki termin sebelum menyimpan.`);
       }
     }
-    setSalesOrders(salesOrders.map(so => so.nomor === editSO.nomor ? {
+    setSalesOrders(prev => prev.map(so => so.nomor === editSO.nomor ? {
       ...so,
       tanggal: editForm.tanggal || so.tanggal,
       noPoClient: editForm.noPoClient,
@@ -15149,7 +15169,7 @@ function SalesOrderModule({
   };
   const saveSelesai = () => {
     if (!selesaiForm.refNomor.trim()) return alert("Pilih atau input No. Delivery Order / Invoice sebagai referensi.");
-    setSalesOrders(salesOrders.map(so => so.nomor === selesaiModal.nomor ? {
+    setSalesOrders(prev => prev.map(so => so.nomor === selesaiModal.nomor ? {
       ...so,
       selesaiManual: {
         via: selesaiForm.via,
@@ -15178,7 +15198,7 @@ function SalesOrderModule({
       if (!confirm(warnMsg)) return;
     }
     if (!confirm(`Hapus Sales Order ${so.nomor}?`)) return;
-    setSalesOrders(salesOrders.filter(x => x !== so));
+    setSalesOrders(prev => prev.filter(x => x !== so));
     // Revert the source Quotation back to "Disetujui GM" so it reappears in the Buat SO list and
     // a new Sales Order can be created from it again — otherwise it stays permanently stuck at
     // "Sudah jadi SO" even though the SO that made it so no longer exists.
@@ -16031,7 +16051,7 @@ function SalesOrderModule({
     size: "sm",
     variant: "ghost",
     onClick: () => {
-      setSalesOrders(salesOrders.map(s => s.nomor === detail.nomor ? {
+      setSalesOrders(prev => prev.map(s => s.nomor === detail.nomor ? {
         ...s,
         cascadeAlert: null
       } : s));
