@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-06.7";
+const APP_BUILD = "2026-08-07.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -2066,6 +2066,50 @@ function writeCache(cacheKey, data) {
     // optimization, so silently skip it rather than let it break the app.
   }
 }
+// PERF: instead of every usePersisted() call independently round-tripping to Supabase for its
+// own key (this app has ~46 of them, all mounted at once via useStore() — that used to mean ~46
+// separate network requests just to open the app), we fetch every row of erp_data in ONE query
+// and hand each hook its slice from that shared result. This promise is created lazily on first
+// use and shared by every usePersisted call for the lifetime of the page (mirrors authReadyPromise,
+// which is likewise only ever resolved once per page load — this app doesn't reset it on logout,
+// logout does a full reload instead). If the batched fetch fails, or a particular key isn't in it
+// yet (e.g. a brand-new key that's never been seeded), the caller falls back to the exact original
+// per-key fetch/seed logic below — so this can never behave worse than before, only faster.
+let _preloadedErpDataPromise = null;
+// Parallel map of key -> updated_at, populated alongside the main preload. Only consumed by the
+// CAS (compare-and-swap) write path piloted below — kept separate from the main `map` so the
+// already-verified batched-read behavior above is untouched regardless of what this is used for.
+let _preloadedUpdatedAtMap = {};
+function getPreloadedErpData() {
+  if (!_preloadedErpDataPromise) {
+    _preloadedErpDataPromise = authReadyPromise.then(async () => {
+      try {
+        const { data, error } = await sb.from("erp_data").select("key, data, updated_at");
+        if (error || !data) return null;
+        const map = {};
+        data.forEach(row => {
+          map[row.key] = row.data;
+          _preloadedUpdatedAtMap[row.key] = row.updated_at;
+        });
+        return map;
+      } catch (e) {
+        return null;
+      }
+    });
+  }
+  return _preloadedErpDataPromise;
+}
+// PILOT — see the risk-reduction plan discussed before starting this work: setVal()'s current
+// fetch-then-upsert pattern moves the ENTIRE collection over the network twice on every save
+// (once to re-fetch, once to write back), which gets expensive for large/high-traffic keys. The
+// fix is a compare-and-swap write (via the erp_data_cas Postgres function) that only needs ONE
+// round trip in the common case, while still closing the same concurrent-write race the old
+// fetch-then-upsert was guarding against — verified directly against production with a real
+// two-writer conflict test (second writer's stale write was correctly rejected and handed back
+// the winner's current data) before this was wired into any UI code path.
+// Intentionally scoped to two low-traffic keys for now. Do NOT add Invoices/Sales Orders/Payroll/
+// etc. here until this pilot has run cleanly in production for a while — see task #191.
+const CAS_PILOT_KEYS = new Set(["erp_mills", "erp_client_groups"]);
 function usePersisted(key, defaultVal) {
   const cacheKey = "erp_cache_" + key;
   const [val, setValRaw] = useState(() => {
@@ -2073,19 +2117,34 @@ function usePersisted(key, defaultVal) {
     return cached.hit ? cached.value : defaultVal;
   });
   const [loaded, setLoaded] = useState(false);
+  // Only populated/consumed for CAS_PILOT_KEYS — tracks the last-known server updated_at so
+  // setVal() can do a compare-and-swap write instead of the old re-fetch-then-upsert. Harmless
+  // (stays unused) for every other key.
+  const updatedAtRef = React.useRef(null);
   useEffect(() => {
     let cancelled = false;
-    authReadyPromise.then(async () => {
+    (async () => {
+      const preloaded = await getPreloadedErpData();
       if (cancelled) return;
+      if (preloaded && Object.prototype.hasOwnProperty.call(preloaded, key)) {
+        setValRaw(preloaded[key]);
+        writeCache(cacheKey, preloaded[key]);
+        updatedAtRef.current = _preloadedUpdatedAtMap[key] || null;
+        setLoaded(true);
+        return;
+      }
+      // Fallback: batched preload failed entirely, or this key wasn't in it (brand-new key never
+      // seeded yet) — behave exactly as the original per-key implementation did.
       try {
         const {
           data,
           error
-        } = await sb.from("erp_data").select("data").eq("key", key).maybeSingle();
+        } = await sb.from("erp_data").select("data, updated_at").eq("key", key).maybeSingle();
         if (cancelled) return;
         if (!error && data) {
           setValRaw(data.data);
           writeCache(cacheKey, data.data);
+          updatedAtRef.current = data.updated_at || null;
         } else {
           // First time this key has ever been used — seed it with the default. BUG FIX: this used
           // to unconditionally call setValRaw(defaultVal) after the seed upsert, which could wipe
@@ -2110,17 +2169,18 @@ function usePersisted(key, defaultVal) {
           const {
             data: reData,
             error: reError
-          } = await sb.from("erp_data").select("data").eq("key", key).maybeSingle();
+          } = await sb.from("erp_data").select("data, updated_at").eq("key", key).maybeSingle();
           if (!cancelled) {
             const finalVal = !reError && reData ? reData.data : defaultVal;
             setValRaw(finalVal);
             writeCache(cacheKey, finalVal);
+            updatedAtRef.current = !reError && reData ? reData.updated_at || null : null;
           }
         }
       } finally {
         if (!cancelled) setLoaded(true);
       }
-    });
+    })();
     return () => {
       cancelled = true;
     };
@@ -2134,7 +2194,62 @@ function usePersisted(key, defaultVal) {
   // current server data immediately before applying it and writing back, instead of trusting the
   // (possibly stale) local React state. Callers that still pass a plain value skip this and behave
   // as before — so every "create a new record" call site should use the function form.
-  const setVal = v => {
+  // PILOT path (CAS_PILOT_KEYS only): compare-and-swap via erp_data_cas — one round trip in the
+  // common (no-conflict) case instead of always doing a re-fetch + upsert. On an actual conflict
+  // (someone else wrote in between), it retries against the server's real current data, same as
+  // the original fetch-then-upsert would eventually converge to, just without paying the extra
+  // round trip when there's no conflict at all (the overwhelmingly common case).
+  const setValCas = v => {
+    setValRaw(prev => typeof v === "function" ? v(prev) : v);
+    (async () => {
+      let attempts = 0;
+      let base = val;
+      let baseUpdatedAt = updatedAtRef.current;
+      while (attempts < 5) {
+        attempts++;
+        const next = typeof v === "function" ? v(base) : v;
+        try {
+          const {
+            data,
+            error
+          } = await sb.rpc("erp_data_cas", {
+            p_key: key,
+            p_expected_updated_at: baseUpdatedAt,
+            p_new_data: next
+          });
+          if (error) {
+            console.error("Gagal menyimpan " + key + ":", error);
+            return;
+          }
+          const row = Array.isArray(data) ? data[0] : data;
+          if (row && row.success) {
+            updatedAtRef.current = row.current_updated_at;
+            setValRaw(next);
+            writeCache(cacheKey, next);
+            return;
+          }
+          // Conflict — someone else wrote first. Re-base on the real current data and retry (only
+          // meaningful when v is an updater function; a plain value just overwrites on retry too).
+          base = row ? row.current_data : base;
+          baseUpdatedAt = row ? row.current_updated_at : baseUpdatedAt;
+        } catch (e) {
+          console.error("Gagal menyimpan " + key + ":", e);
+          return;
+        }
+      }
+      console.error("Gagal menyimpan " + key + ": terlalu banyak konflik penulisan bersamaan, coba lagi.");
+    })();
+  };
+  // IMPORTANT — concurrent-write safety: when multiple users edit the same collection at the same
+  // time (e.g. two people creating an Item Requisition within seconds of each other), each browser
+  // only knows about its own last-loaded copy of the array. If we just merged against that local
+  // copy and blindly upserted, whoever writes second silently wipes out whoever wrote first (their
+  // whole document vanishes — this is exactly the "previous IR got rewritten" bug). To close that
+  // window, whenever the caller passes an updater FUNCTION (the `prev => ...` form) we re-fetch the
+  // current server data immediately before applying it and writing back, instead of trusting the
+  // (possibly stale) local React state. Callers that still pass a plain value skip this and behave
+  // as before — so every "create a new record" call site should use the function form.
+  const setValLegacy = v => {
     // Optimistic local update so the UI feels instant; this may be superseded a moment later once
     // the fresh-fetch reconciliation below finishes.
     setValRaw(prev => typeof v === "function" ? v(prev) : v);
@@ -2169,6 +2284,7 @@ function usePersisted(key, defaultVal) {
       }
     })();
   };
+  const setVal = CAS_PILOT_KEYS.has(key) ? setValCas : setValLegacy;
   return [val, setVal, loaded];
 }
 function useStore() {
