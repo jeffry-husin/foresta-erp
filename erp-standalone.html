@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-08.3";
+const APP_BUILD = "2026-08-08.4";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -3247,7 +3247,8 @@ function Btn({
   size = "md",
   style = {},
   disabled,
-  type
+  type,
+  title
 }) {
   const base = {
     cursor: disabled ? "not-allowed" : "pointer",
@@ -3295,6 +3296,7 @@ function Btn({
     type: type,
     onClick: onClick,
     disabled: disabled,
+    title: title,
     style: {
       ...base,
       ...variants[variant],
@@ -5009,8 +5011,9 @@ function MasterPart({
   }, /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Detail/Edit",
     onClick: () => openReviewReq(req)
-  }, "👁 Detail/Edit"), /*#__PURE__*/React.createElement(Btn, {
+  }, "👁"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "success",
     onClick: () => approveEditRequest(req, req.payload)
@@ -5904,8 +5907,9 @@ function MasterUnit({
   }), /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
     size: "sm",
+    title: "Duplicate",
     onClick: () => duplicateUnit(detail)
-  }, "⧉ Duplicate"), /*#__PURE__*/React.createElement(PrintBtn, {
+  }, "⧉"), /*#__PURE__*/React.createElement(PrintBtn, {
     onClick: () => printDocument({
       company: store.companySettings,
       docTitle: "BILL OF MATERIALS",
@@ -6811,8 +6815,9 @@ function CustomerDB({
   }, /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Detail/Edit",
     onClick: () => openReviewReq(req)
-  }, "👁 Detail/Edit"), /*#__PURE__*/React.createElement(Btn, {
+  }, "👁"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "success",
     onClick: () => {
@@ -10488,8 +10493,9 @@ function MekanikReport({
   }, /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Lihat Detail",
     onClick: () => setViewDar(d)
-  }, "👁 Lihat Detail"), /*#__PURE__*/React.createElement(Btn, {
+  }, "👁"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
     onClick: () => openForm(visits.find(v => v.id === d.visitId) || {
@@ -10524,8 +10530,9 @@ function MekanikReport({
   }, /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Lihat Detail",
     onClick: () => setViewRec(r)
-  }, "👁 Lihat Detail"), /*#__PURE__*/React.createElement(Btn, {
+  }, "👁"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
     onClick: () => openForm(visits.find(v => v.id === r.visitId) || {
@@ -11701,8 +11708,9 @@ function PartRequestModule({
   }, /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Detail/Edit",
     onClick: () => openReviewPR(r)
-  }, "👁 Detail/Edit"), /*#__PURE__*/React.createElement(Btn, {
+  }, "👁"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "success",
     onClick: () => asilForward(i)
@@ -11755,8 +11763,9 @@ function PartRequestModule({
   }, /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Detail/Edit",
     onClick: () => openReviewPR(r)
-  }, "👁 Detail/Edit"), /*#__PURE__*/React.createElement(Btn, {
+  }, "👁"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "success",
     onClick: () => gmApprove(i)
@@ -12707,8 +12716,9 @@ function QuotationUnit({
   }, /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Detail",
     onClick: () => setDetail(q)
-  }, "👁 Detail"), /*#__PURE__*/React.createElement(Btn, {
+  }, "👁"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
     onClick: () => openEdit(q)
@@ -14219,8 +14229,9 @@ function QuotationPS({
   }, /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Detail",
     onClick: () => setDetail(q)
-  }, "👁 Detail"), /*#__PURE__*/React.createElement(Btn, {
+  }, "👁"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
     onClick: () => openEdit(q)
@@ -17210,8 +17221,9 @@ function ItemRequisitionModule({
   }, React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Lihat Detail",
     onClick: () => setSoDetailModal(so.nomor)
-  }, "🔍 Lihat Detail"), React.createElement(Btn, {
+  }, "🔍"), React.createElement(Btn, {
     size: "sm",
     onClick: () => loadFromSO(so.nomor)
   }, "Buat IR"))))))), React.createElement(Modal, {
@@ -18559,8 +18571,9 @@ function PurchaseOrderModule({
   }, /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Detail",
     onClick: () => setIrDetail(ir)
-  }, "👁 Detail"), /*#__PURE__*/React.createElement(Btn, {
+  }, "👁"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     onClick: () => startPOFromIR(ir.nomor)
   }, "Buat PO"))))))), isOwnerLike && /*#__PURE__*/React.createElement(CollapsibleSection, {
@@ -18604,16 +18617,18 @@ function PurchaseOrderModule({
   }, /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Detail",
     onClick: () => setDetail(p)
-  }, "👁 Detail"), /*#__PURE__*/React.createElement(Btn, {
+  }, "👁"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
     onClick: () => openRevise(p)
   }, "✏️"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Catatan",
     onClick: () => openEditCatatanPO(p)
-  }, "📝 Catatan"), /*#__PURE__*/React.createElement(Btn, {
+  }, "📝"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "success",
     onClick: () => gmApprove(p)
@@ -18690,20 +18705,23 @@ function PurchaseOrderModule({
       }, "✏️"), (isHandler || isMaria || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
         size: "sm",
         variant: "ghost",
+        title: "Edit Tanggal",
         onClick: () => openEditTanggalPO(p)
-      }, "📅 Tanggal"), /*#__PURE__*/React.createElement(Btn, {
+      }, "📅"), /*#__PURE__*/React.createElement(Btn, {
         size: "sm",
         variant: "ghost",
+        title: "Catatan",
         onClick: () => openEditCatatanPO(p)
-      }, "📝 Catatan"), p.statusBayar !== "Sudah Dibayar" && canMarkPaid && /*#__PURE__*/React.createElement(Btn, {
+      }, "📝"), p.statusBayar !== "Sudah Dibayar" && canMarkPaid && /*#__PURE__*/React.createElement(Btn, {
         size: "sm",
         variant: "success",
         onClick: () => openPayMethod(p)
       }, p.statusBayar === "Dibayar Sebagian" ? "+ Tambah Pembayaran" : "✓ Tandai Dibayar"), canMarkPaid && /*#__PURE__*/React.createElement(Btn, {
         size: "sm",
         variant: "ghost",
+        title: "Edit Pembayaran",
         onClick: () => openEditPayment(p)
-      }, "✏️ Edit Pembayaran"), p.noInvoiceSupplier && canMarkPaid && /*#__PURE__*/React.createElement(Btn, {
+      }, "✏️"), p.noInvoiceSupplier && canMarkPaid && /*#__PURE__*/React.createElement(Btn, {
         size: "sm",
         variant: "ghost",
         onClick: () => openSupplierDoc(p)
@@ -18778,12 +18796,14 @@ function PurchaseOrderModule({
     }, canMarkPaid && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "ghost",
+      title: "Edit Pembayaran",
       onClick: () => openEditPayment(p)
-    }, "✏️ Edit Pembayaran"), /*#__PURE__*/React.createElement(Btn, {
+    }, "✏️"), /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "ghost",
+      title: "Catatan",
       onClick: () => openEditCatatanPO(p)
-    }, "📝 Catatan"))]),
+    }, "📝"))]),
     onDelete: isOwnerLike ? i => {
       const target = poFiltered.filter(p => isPoClosed(p))[i];
       if (!confirm(`Hapus PO ${target.nomor}?`)) return;
@@ -20758,8 +20778,9 @@ function GoodsReceiptModule({
   }, /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Detail/Edit",
     onClick: () => openReviewGR(r)
-  }, "👁 Detail/Edit"), /*#__PURE__*/React.createElement(Btn, {
+  }, "👁"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "danger",
     onClick: () => rejectGREdit(r)
@@ -23786,8 +23807,9 @@ function InvoiceModule({
   }, /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Detail/Edit",
     onClick: () => openReviewNewInv(inv)
-  }, "👁 Detail/Edit"), /*#__PURE__*/React.createElement(Btn, {
+  }, "👁"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "success",
     onClick: () => gmApprove(inv)
@@ -23902,8 +23924,9 @@ function InvoiceModule({
   }, /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Detail/Edit",
     onClick: () => openReviewInvEdit(r)
-  }, "👁 Detail/Edit"), /*#__PURE__*/React.createElement(Btn, {
+  }, "👁"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "danger",
     onClick: () => rejectInvEdit(r)
@@ -27926,9 +27949,88 @@ function PrintBtn({
   return /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Print / PDF",
     onClick: onClick
-  }, "🖨️ Print / PDF");
+  }, "🖨️");
 }
+
+// Small brand-colored icon badges for bank selectors (BCA / MANDIRI / CASH) — used
+// wherever a payment/settlement method must be picked without spelling out the bank name.
+function BcaIcon() {
+  return /*#__PURE__*/React.createElement("svg", {
+    width: 26,
+    height: 18,
+    viewBox: "0 0 26 18"
+  }, /*#__PURE__*/React.createElement("rect", {
+    width: 26,
+    height: 18,
+    rx: 3,
+    fill: "#0056A8"
+  }), /*#__PURE__*/React.createElement("text", {
+    x: 13,
+    y: 13,
+    textAnchor: "middle",
+    fontSize: 9,
+    fontWeight: 800,
+    fontFamily: "Arial, sans-serif",
+    fill: "#fff"
+  }, "BCA"));
+}
+function MandiriIcon() {
+  return /*#__PURE__*/React.createElement("svg", {
+    width: 26,
+    height: 18,
+    viewBox: "0 0 26 18"
+  }, /*#__PURE__*/React.createElement("rect", {
+    width: 26,
+    height: 18,
+    rx: 3,
+    fill: "#003A70"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M4 13 L8 5 L11 11 L14 5 L17 13",
+    stroke: "#FFC20E",
+    strokeWidth: 2,
+    fill: "none",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }));
+}
+function CashIcon() {
+  return /*#__PURE__*/React.createElement("svg", {
+    width: 26,
+    height: 18,
+    viewBox: "0 0 26 18"
+  }, /*#__PURE__*/React.createElement("rect", {
+    x: 1,
+    y: 1,
+    width: 24,
+    height: 16,
+    rx: 3,
+    fill: "#1E7A34",
+    stroke: "#8FD19E",
+    strokeWidth: 1
+  }), /*#__PURE__*/React.createElement("circle", {
+    cx: 13,
+    cy: 9,
+    r: 4,
+    fill: "none",
+    stroke: "#8FD19E",
+    strokeWidth: 1
+  }), /*#__PURE__*/React.createElement("text", {
+    x: 13,
+    y: 12,
+    textAnchor: "middle",
+    fontSize: 7,
+    fontWeight: 800,
+    fontFamily: "Arial, sans-serif",
+    fill: "#fff"
+  }, "$"));
+}
+const BANK_ICON = {
+  BCA: BcaIcon,
+  MANDIRI: MandiriIcon,
+  CASH: CashIcon
+};
 
 // ════════════════════════════════════════════════════════════════════════════
 // RIWAYAT PER CLIENT — all transactions for 1 client in one view
@@ -32475,8 +32577,9 @@ function FormCutiModule({
   }, /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Detail/Edit",
     onClick: () => openDetail(r)
-  }, "👁 Detail/Edit"), /*#__PURE__*/React.createElement(Btn, {
+  }, "👁"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "success",
     onClick: () => {
@@ -34179,8 +34282,12 @@ function JurnalModule({
       key: m,
       size: "sm",
       variant: "success",
+      title: `Tandai Lunas via ${m}`,
+      style: {
+        padding: "4px 8px"
+      },
       onClick: () => openLunas(j, m)
-    }, "✓ ", m)), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+    }, /*#__PURE__*/React.createElement(BANK_ICON[m], null))), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "ghost",
       onClick: () => openEditEntry(j)
@@ -34786,8 +34893,9 @@ function WorkshopOpsModule({
     }, periodPaidStatus(p.items) === "paid" ? "Sudah Dibayar" : periodPaidStatus(p.items) === "partial" ? "Sebagian Dibayar" : "Belum Dibayar"), /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "ghost",
+      title: "Lihat Detail",
       onClick: () => setDetailPeriod(p.key)
-    }, "🔍 Lihat Detail")]),
+    }, "🔍")]),
     emptyMsg: "Belum ada pengeluaran tercatat"
   })) : /*#__PURE__*/React.createElement("div", {
     style: {
