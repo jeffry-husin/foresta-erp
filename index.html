@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-07.1";
+const APP_BUILD = "2026-08-08.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -36330,10 +36330,18 @@ function App() {
           }
         } = await sb.auth.getSession();
         if (sbSession?.user) {
+          // Perf: a valid Supabase session already authorizes erp_data/profiles queries under
+          // RLS — don't make the batched preload and refreshAuthUsers wait for buildAppSession's
+          // own profile lookup to finish first (that was serializing 2 queries that can safely
+          // run in parallel). Mark the gate ready here so both run alongside buildAppSession
+          // instead of after it. If the profile turns out inactive/missing, buildAppSession signs
+          // the user out below and setSession never fires, so the app still falls back to the
+          // login screen exactly as before — this can only make the authorized case faster, never
+          // the unauthorized case worse.
+          markAuthReady();
           const restored = await buildAppSession(sbSession.user);
           if (restored) {
             setSession(restored);
-            markAuthReady();
           }
         }
       } finally {
