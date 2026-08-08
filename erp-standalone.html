@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-08.5";
+const APP_BUILD = "2026-08-08.6";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -412,6 +412,25 @@ const combinedQuotationCatatan = quot => {
   const auto = buildQuotationAutoNotes(quot);
   const manual = (quot?.catatan || "").trim();
   return [...auto, manual].filter(Boolean).join("\n");
+};
+// Task #184: legacy termin invoices created before the pre-tax DP fix (#182/#183) stored `pajak`/
+// `total` using the OLD tax-inclusive-extraction formula (pajak = subtotal * 11/111, total =
+// subtotal unchanged, tax baked in). Recomputing on the fly here (display/print only — this never
+// rewrites the stored record) using the CURRENT formula (pajak = afterDiskon * 11%, total =
+// afterDiskon + pajak) is idempotent for invoices already computed correctly post-fix, so it's safe
+// to apply universally to every non-ad-hoc termin invoice without first detecting old vs new. Global
+// (not module-local) so every list/dashboard view showing an invoice total can use it too.
+const invoiceDisplayFinancials = inv => {
+  if (!inv?.terminLabel || inv.isAdhocDP) return {
+    pajak: inv?.pajak || 0,
+    total: inv?.total || 0
+  };
+  const afterDiskon = Math.max(0, (inv.subtotal || 0) - (inv.diskon || 0));
+  const pajak = afterDiskon * 0.11;
+  return {
+    pajak,
+    total: afterDiskon + pajak
+  };
 };
 const today = () => new Date().toISOString().split("T")[0];
 // Unified date display format requested app-wide: DD-MMM-YY with English 3-letter month
@@ -14348,8 +14367,9 @@ function QuotationPS({
   }, (q.status === "Menunggu Approval GM" || q.status === "Draft") && (isAsil || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Edit",
     onClick: () => openEdit(q)
-  }, "✎ Edit"), q.status === "Draft" && (isAsil || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+  }, "✎"), q.status === "Draft" && (isAsil || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "success",
     onClick: () => submitDraft(q)
@@ -24063,7 +24083,7 @@ function InvoiceModule({
     style: {
       color: theme.green
     }
-  }, fmt(inv.total)), " ", /*#__PURE__*/React.createElement("span", {
+  }, fmt(invoiceDisplayFinancials(inv).total)), " ", /*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.muted,
       fontSize: 12
@@ -24317,7 +24337,7 @@ function InvoiceModule({
         size: "sm",
         variant: "ghost",
         onClick: () => openFaktur(inv)
-      }, "+ Input"), fmt(inv.total), fmt(inv.terbayar || 0), /*#__PURE__*/React.createElement(Badge, {
+      }, "+ Input"), fmt(invoiceDisplayFinancials(inv).total), fmt(inv.terbayar || 0), /*#__PURE__*/React.createElement(Badge, {
         color: approvalColor[inv.statusApproval]
       }, inv.statusApproval), /*#__PURE__*/React.createElement(Badge, {
         color: inv.statusBayar === "Lunas" ? theme.green : inv.statusBayar === "Sebagian" ? theme.yellow : theme.red
@@ -24735,7 +24755,7 @@ function InvoiceModule({
       color: theme.muted,
       fontSize: 13
     }
-  }, /*#__PURE__*/React.createElement("span", null, "PPN (11%)"), /*#__PURE__*/React.createElement("span", null, fmt(detail.pajak))), detail.uangMuka > 0 && /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("span", null, "PPN (11%)"), /*#__PURE__*/React.createElement("span", null, fmt(invoiceDisplayFinancials(detail).pajak))), detail.uangMuka > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
@@ -24761,7 +24781,7 @@ function InvoiceModule({
     style: {
       color: theme.green
     }
-  }, fmt(detail.total)))), detail.riwayatPembayaran?.length > 0 && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+  }, fmt(invoiceDisplayFinancials(detail).total)))), detail.riwayatPembayaran?.length > 0 && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
     style: {
       margin: "0 0 6px",
       fontSize: 13,
@@ -24797,10 +24817,10 @@ function InvoiceModule({
       extraTotalRows: detail.terminLabel ? [[`Termin ${detail.terminLabel}${detail.terminPercent != null ? ` (${detail.terminPercent}%)` : ""}`, detail.subtotal]] : [],
       diskon: detail.diskon,
       diskonLabel: detail.diskonPersen ? `Discount (${detail.diskonPersen}%)` : "Discount",
-      pajak: detail.pajak,
+      pajak: invoiceDisplayFinancials(detail).pajak,
       pajakLabel: "PPN (11%)",
       uangMuka: detail.uangMuka,
-      total: detail.total,
+      total: invoiceDisplayFinancials(detail).total,
       catatan: detail.catatan,
       extraInfoRows: [["No. Purchase Order (dari Client)", detail.noPoClient || "-"], ["No. Sales Order", detail.soNomor || "-"], ...(invoiceSoDiskonAmount(detail) > 0 ? [["Diskon dari SO (sudah termasuk di harga item)", fmt(invoiceSoDiskonAmount(detail))]] : []), ["Term of Payment", detail.tipePembayaran], ...(detail.tipePembayaran === "TEMPO" ? [...(detail.jumlahHariTempo ? [["Jumlah Hari", `${detail.jumlahHariTempo} hari`]] : []), ["Jatuh Tempo", detail.tanggalJatuhTempo]] : [])],
       terbilangText: terbilang(detail.total),
@@ -28130,6 +28150,10 @@ function printDocument({
   const rows = items.map(r => `<tr>${r.map(c => `<td style="padding:8px 10px;border-bottom:1px solid #ddd;font-size:13px;white-space:pre-wrap;word-break:break-word;">${c}</td>`).join("")}</tr>`).join("");
   const headerCols = itemHeaders.map(h => `<th style="padding:8px 10px;text-align:left;font-size:12px;color:#555;border-bottom:2px solid #333;">${h}</th>`).join("");
   const extraRowsHtml = (extraInfoRows || []).map(([k, v]) => `<div style="display:flex;justify-content:space-between;font-size:13px;padding:2px 0;"><span style="color:#666;">${k}</span><span style="font-weight:600;">${v}</span></div>`).join("");
+  // Task #176: the on-screen Term of Payment forms (Quotation/SO) always show each termin's Rupiah
+  // nominal alongside its %, but the printed document only ever showed the % — so a client reading
+  // the printed Quotation/SO had to do the math themselves. Add a Nominal column here, computed the
+  // same way the on-screen forms compute it (document total × termin %), so print matches screen.
   const paymentTermsHtml = (paymentTerms || []).length ? `
       <div style="margin-top:16px;">
         <div style="font-size:12px;font-weight:700;color:#555;margin-bottom:6px;">TERM OF PAYMENT</div>
@@ -28137,9 +28161,10 @@ function printDocument({
           <thead><tr>
             <th style="padding:6px 10px;text-align:left;font-size:12px;color:#555;border-bottom:2px solid #333;">Termin</th>
             <th style="padding:6px 10px;text-align:left;font-size:12px;color:#555;border-bottom:2px solid #333;">%</th>
+            <th style="padding:6px 10px;text-align:left;font-size:12px;color:#555;border-bottom:2px solid #333;">Nominal</th>
             <th style="padding:6px 10px;text-align:left;font-size:12px;color:#555;border-bottom:2px solid #333;">Keterangan</th>
           </tr></thead>
-          <tbody>${paymentTerms.map(t => `<tr><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:13px;">${t.label}</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:13px;">${t.percent}%</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:13px;">${t.note || "-"}</td></tr>`).join("")}</tbody>
+          <tbody>${paymentTerms.map(t => `<tr><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:13px;">${t.label}</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:13px;">${t.percent}%</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:13px;">${fmtMoney((total || 0) * (parseFloat(t.percent) || 0) / 100, currency)}</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:13px;">${t.note || "-"}</td></tr>`).join("")}</tbody>
         </table>
       </div>` : "";
   // skipTopSpace: when the caller already reserves vertical space above the signature line
@@ -28482,7 +28507,7 @@ function ClientHistoryModule({
     }
   }, "💰 Invoice"), /*#__PURE__*/React.createElement(Table, {
     headers: ["No.", "Tanggal", "Total", "Terbayar", "Status"],
-    rows: myInv.map(i => [i.nomor, i.tanggal, fmt(i.total), fmt(i.terbayar || 0), /*#__PURE__*/React.createElement(Badge, {
+    rows: myInv.map(i => [i.nomor, i.tanggal, fmt(invoiceDisplayFinancials(i).total), fmt(i.terbayar || 0), /*#__PURE__*/React.createElement(Badge, {
       color: i.statusBayar === "Lunas" ? theme.green : theme.yellow
     }, i.statusBayar)]),
     emptyMsg: "Tidak ada"
@@ -28682,7 +28707,7 @@ function FinancialDashboardModule({
     }
   }, "⚠️ Invoice Terlambat (Overdue)"), /*#__PURE__*/React.createElement(Table, {
     headers: ["No. Invoice", "Client", "Total", "Sisa", "Jatuh Tempo"],
-    rows: overdueInvoices.map(i => [i.nomor, i.customerNama, fmt(i.total), fmt(i.total - (i.terbayar || 0)), i.tanggalJatuhTempo])
+    rows: overdueInvoices.map(i => [i.nomor, i.customerNama, fmt(invoiceDisplayFinancials(i).total), fmt(invoiceDisplayFinancials(i).total - (i.terbayar || 0)), i.tanggalJatuhTempo])
   })), overduePOs.length > 0 && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
     style: {
       margin: "0 0 12px",
