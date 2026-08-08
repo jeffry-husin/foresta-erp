@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-08.4";
+const APP_BUILD = "2026-08-08.5";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -4082,6 +4082,275 @@ function Modal({
     }
   }, "×")), children));
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// DIALOG SYSTEM — replaces window.confirm()/window.prompt() app-wide with
+// non-blocking, in-theme modals. _dialogHost is a module-scope bridge filled in
+// once <DialogHost/> mounts (once, near the render root — see bottom of file),
+// so any handler anywhere in the app can `await askConfirm(...)` etc. without
+// needing the dialog state threaded through props. If somehow called before
+// DialogHost has mounted, askConfirm/askPrompt fall back to the native dialogs
+// so nothing can silently no-op.
+let _dialogHost = null;
+function askConfirm(message, opts = {}) {
+  if (!_dialogHost) return Promise.resolve(window.confirm(message));
+  return _dialogHost.open("confirm", message, opts);
+}
+function askPrompt(message) {
+  if (!_dialogHost) return Promise.resolve(window.prompt(message));
+  return _dialogHost.open("prompt", message);
+}
+function askCutiType(message) {
+  if (!_dialogHost) return Promise.resolve(null);
+  return _dialogHost.open("cutiType", message);
+}
+function askBiayaLain() {
+  if (!_dialogHost) return Promise.resolve(null);
+  return _dialogHost.open("biayaLain", null);
+}
+function DialogHost() {
+  const [state, setState] = useState(null);
+  useEffect(() => {
+    _dialogHost = {
+      open: (type, message, opts) => new Promise(resolve => {
+        setState({
+          type,
+          message,
+          opts: opts || {},
+          resolve
+        });
+      })
+    };
+    return () => {
+      _dialogHost = null;
+    };
+  }, []);
+  if (!state) return null;
+  const close = value => {
+    state.resolve(value);
+    setState(null);
+  };
+  const backdropStyle = {
+    position: "fixed",
+    inset: 0,
+    background: "#00000088",
+    zIndex: 2000,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 20
+  };
+  const boxStyle = {
+    background: theme.card,
+    border: `1px solid ${theme.border}`,
+    borderRadius: 16,
+    padding: 24,
+    width: 440,
+    maxWidth: "95vw"
+  };
+  if (state.type === "confirm") {
+    return /*#__PURE__*/React.createElement("div", {
+      style: backdropStyle,
+      onClick: e => {
+        if (e.target === e.currentTarget) close(false);
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: boxStyle
+    }, /*#__PURE__*/React.createElement("p", {
+      style: {
+        margin: "0 0 20px",
+        color: theme.text,
+        fontSize: 14,
+        lineHeight: 1.5,
+        whiteSpace: "pre-wrap"
+      }
+    }, state.message), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        justifyContent: "flex-end",
+        gap: 8
+      }
+    }, /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => close(false)
+    }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: state.opts.danger ? "danger" : "primary",
+      onClick: () => close(true)
+    }, state.opts.confirmLabel || "OK"))));
+  }
+  if (state.type === "prompt") {
+    return /*#__PURE__*/React.createElement(PromptModalBody, {
+      message: state.message,
+      onSubmit: val => close(val),
+      onCancel: () => close(null),
+      backdropStyle,
+      boxStyle
+    });
+  }
+  if (state.type === "cutiType") {
+    return /*#__PURE__*/React.createElement("div", {
+      style: backdropStyle,
+      onClick: e => {
+        if (e.target === e.currentTarget) close(null);
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: boxStyle
+    }, /*#__PURE__*/React.createElement("p", {
+      style: {
+        margin: "0 0 20px",
+        color: theme.text,
+        fontSize: 14,
+        lineHeight: 1.5,
+        whiteSpace: "pre-wrap"
+      }
+    }, state.message), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 8
+      }
+    }, /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "primary",
+      onClick: () => close("khusus")
+    }, "Cuti Khusus (di luar kuota)"), /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "success",
+      onClick: () => close("biasa")
+    }, "Cuti Biasa (potong kuota 12 hari/tahun)"), /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => close(null)
+    }, "Batal"))));
+  }
+  if (state.type === "biayaLain") {
+    return /*#__PURE__*/React.createElement(BiayaLainModalBody, {
+      onSubmit: val => close(val),
+      onCancel: () => close(null),
+      backdropStyle,
+      boxStyle
+    });
+  }
+  return null;
+}
+function PromptModalBody({
+  message,
+  onSubmit,
+  onCancel,
+  backdropStyle,
+  boxStyle
+}) {
+  const [val, setVal] = useState("");
+  const trimmed = val.trim();
+  return /*#__PURE__*/React.createElement("div", {
+    style: backdropStyle,
+    onClick: e => {
+      if (e.target === e.currentTarget) onCancel();
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: boxStyle
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.text,
+      fontSize: 14,
+      lineHeight: 1.5,
+      whiteSpace: "pre-wrap"
+    }
+  }, message), /*#__PURE__*/React.createElement("textarea", {
+    autoFocus: true,
+    value: val,
+    onChange: e => setVal(e.target.value),
+    onKeyDown: e => {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && trimmed) onSubmit(trimmed);
+      if (e.key === "Escape") onCancel();
+    },
+    rows: 3,
+    style: {
+      width: "100%",
+      boxSizing: "border-box",
+      background: theme.bg,
+      color: theme.text,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8,
+      padding: 10,
+      fontFamily: "inherit",
+      fontSize: 14,
+      marginBottom: 16,
+      resize: "vertical"
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: onCancel
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "primary",
+    disabled: !trimmed,
+    onClick: () => onSubmit(trimmed)
+  }, "Kirim"))));
+}
+function BiayaLainModalBody({
+  onSubmit,
+  onCancel,
+  backdropStyle,
+  boxStyle
+}) {
+  const [ket, setKet] = useState("");
+  const [jumlah, setJumlah] = useState("");
+  const ketTrimmed = ket.trim();
+  return /*#__PURE__*/React.createElement("div", {
+    style: backdropStyle,
+    onClick: e => {
+      if (e.target === e.currentTarget) onCancel();
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: boxStyle
+  }, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 16px",
+      color: theme.text,
+      fontSize: 16
+    }
+  }, "Tambah Biaya Lain"), /*#__PURE__*/React.createElement(Input, {
+    label: "Keterangan biaya",
+    value: ket,
+    onChange: setKet
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Jumlah (Rp)",
+    value: jumlah,
+    onChange: setJumlah,
+    type: "number"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      gap: 8,
+      marginTop: 16
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: onCancel
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "primary",
+    disabled: !ketTrimmed,
+    onClick: () => onSubmit({
+      keterangan: ketTrimmed,
+      jumlah: Number(jumlah) || 0
+    })
+  }, "Tambah"))));
+}
+
 function AccessDenied({
   label
 }) {
@@ -4681,14 +4950,14 @@ function MasterPart({
     setEditIdx(parts.indexOf(filtered[i]));
     setModal(true);
   };
-  const onDelete = i => {
+  const onDelete = async i => {
     const target = filtered[i];
     if (isOwnerLike) {
-      if (confirm("Hapus part ini?")) {
+      if (await askConfirm("Hapus part ini?")) {
         setParts(prev => prev.filter(p => p.partNumber !== target.partNumber));
       }
     } else {
-      if (confirm(`Ajukan penghapusan part "${target.partName}" ke GM untuk approval?`)) {
+      if (await askConfirm(`Ajukan penghapusan part "${target.partName}" ke GM untuk approval?`)) {
         submitEditRequest(store, session, {
           module: "Master Part",
           action: "Hapus",
@@ -5569,10 +5838,10 @@ function MasterUnit({
     setEditIdx(realIdx);
     setModal(true);
   };
-  const onDelete = i => {
+  const onDelete = async i => {
     const target = filtered[i];
     if (!target) return;
-    if (confirm("Hapus unit ini?")) {
+    if (await askConfirm("Hapus unit ini?")) {
       setUnits(prev => prev.filter(u => u.unitCode !== target.unitCode));
       logAudit(store, session, {
         module: "Master Unit (BOM)",
@@ -6416,9 +6685,9 @@ function CustomerDB({
       nama: nama.trim()
     } : x));
   };
-  const deleteGroup = g => {
+  const deleteGroup = async g => {
     const inUse = customers.filter(c => c.groupId === g.id).length;
-    if (inUse > 0 && !confirm(`Group "${g.nama}" masih dipakai oleh ${inUse} client. Hapus tetap? Client yang memakainya akan kehilangan Group.`)) return;
+    if (inUse > 0 && !await askConfirm(`Group "${g.nama}" masih dipakai oleh ${inUse} client. Hapus tetap? Client yang memakainya akan kehilangan Group.`)) return;
     setClientGroups(prev => (prev || []).filter(x => x.id !== g.id));
     if (inUse > 0) setCustomers(prev => prev.map(c => c.groupId === g.id ? {
       ...c,
@@ -6519,12 +6788,12 @@ function CustomerDB({
     setEditIdx(i);
     setModal(true);
   };
-  const onDelete = i => {
+  const onDelete = async i => {
     if (!isOwnerLike) {
       alert("Hanya Owner/GM yang dapat menghapus data client.");
       return;
     }
-    if (confirm("Hapus client?")) {
+    if (await askConfirm("Hapus client?")) {
       const targetId = filtered[i].id;
       setCustomers(prev => prev.filter(c => c.id !== targetId));
     }
@@ -7649,8 +7918,8 @@ function SupplierDB({
     setEditIdx(i);
     setModal(true);
   };
-  const onDelete = i => {
-    if (confirm("Hapus supplier?")) {
+  const onDelete = async i => {
+    if (await askConfirm("Hapus supplier?")) {
       const realIdx = list.indexOf(filtered[i]);
       const a = [...list];
       a.splice(realIdx, 1);
@@ -7658,9 +7927,9 @@ function SupplierDB({
     }
   };
   // Move a supplier record between the Lokal and Overseas databases (keeps all its data, just switches list + "jenis").
-  const moveSupplier = i => {
+  const moveSupplier = async i => {
     const targetLabel = tab === "local" ? "Overseas" : "Lokal";
-    if (!confirm(`Pindahkan supplier ini ke daftar ${targetLabel}?`)) return;
+    if (!await askConfirm(`Pindahkan supplier ini ke daftar ${targetLabel}?`)) return;
     const item = filtered[i];
     const fromList = tab === "local" ? suppliersLocal : suppliersOverseas;
     const toList = tab === "local" ? suppliersOverseas : suppliersLocal;
@@ -8841,8 +9110,8 @@ function MekanikReport({
   const visitInspections = id => inspectionReports.filter(r => r.visitId === id);
   const visitSuratTugas = id => suratTugas.filter(s => s.visitId === id);
   // Delete a whole visit and cascade-delete every DAR/Part Rec/Status/BAPP/Inspection/Surat Tugas tied to it.
-  const deleteVisit = v => {
-    if (!confirm(`Hapus kunjungan ${v.id} beserta seluruh DAR, Part Recommendation, Status Report, BAPP, Inspection Report, dan Surat Tugas di dalamnya? Tindakan ini tidak bisa dibatalkan.`)) return;
+  const deleteVisit = async v => {
+    if (!await askConfirm(`Hapus kunjungan ${v.id} beserta seluruh DAR, Part Recommendation, Status Report, BAPP, Inspection Report, dan Surat Tugas di dalamnya? Tindakan ini tidak bisa dibatalkan.`)) return;
     setVisits(visits.filter(x => x.id !== v.id));
     setDars(dars.filter(x => x.visitId !== v.id));
     setPartRecs(partRecs.filter(x => x.visitId !== v.id));
@@ -8863,8 +9132,8 @@ function MekanikReport({
   //     the fingerprint-machine import no longer wrongly marks them Alpha while they were on-site;
   // (2) Uang Dinas gets/updates a per-mekanik record (jumlahHari x rate from Payroll), which stays
   //     editable afterward (jumlahHari, uang saku) even once a finance report has been built from it.
-  const markVisitSelesai = v => {
-    const tanggalSelesai = prompt(`Tandai Kunjungan ${v.id} selesai.\n\nTanggal mulai: ${v.tanggal}\nMasukkan tanggal selesai (YYYY-MM-DD):`, v.tanggalSelesai || today());
+  const markVisitSelesai = async v => {
+    const tanggalSelesai = await askPrompt(`Tandai Kunjungan ${v.id} selesai.\n\nTanggal mulai: ${v.tanggal}\nMasukkan tanggal selesai (YYYY-MM-DD):`, v.tanggalSelesai || today());
     if (!tanggalSelesai) return;
     if (tanggalSelesai < v.tanggal) return alert("Tanggal selesai tidak boleh sebelum tanggal mulai.");
     setVisits(prev => prev.map(x => x.id === v.id ? {
@@ -8931,8 +9200,8 @@ function MekanikReport({
       detail: `${v.tanggal} s/d ${tanggalSelesai} (${jumlahHari} hari) — ${usernames.length} mekanik`
     });
   };
-  const deleteDar = d => {
-    if (!confirm("Hapus DAR ini?")) return;
+  const deleteDar = async d => {
+    if (!await askConfirm("Hapus DAR ini?")) return;
     setDars(dars.filter(x => x.id !== d.id));
     logAudit(store, session, {
       module: "DAR",
@@ -8941,8 +9210,8 @@ function MekanikReport({
       detail: `${d.mekanikNama}: ${d.pekerjaan}`
     });
   };
-  const deleteBast = b => {
-    if (!confirm("Hapus BAPP ini?")) return;
+  const deleteBast = async b => {
+    if (!await askConfirm("Hapus BAPP ini?")) return;
     setBasts(basts.filter(x => x.id !== b.id));
     logAudit(store, session, {
       module: "BAPP",
@@ -8951,8 +9220,8 @@ function MekanikReport({
       detail: b.soNomor || ""
     });
   };
-  const deleteInspection = r => {
-    if (!confirm("Hapus Inspection Report ini?")) return;
+  const deleteInspection = async r => {
+    if (!await askConfirm("Hapus Inspection Report ini?")) return;
     setInspectionReports(inspectionReports.filter(x => x.id !== r.id));
     logAudit(store, session, {
       module: "Inspection Report",
@@ -8961,8 +9230,8 @@ function MekanikReport({
       detail: r.mekanikNama || ""
     });
   };
-  const deletePartRec = rec => {
-    if (!confirm("Hapus Part Recommendation ini?")) return;
+  const deletePartRec = async rec => {
+    if (!await askConfirm("Hapus Part Recommendation ini?")) return;
     setPartRecs(partRecs.filter(x => x.id !== rec.id));
     logAudit(store, session, {
       module: "Part Recommendation",
@@ -9075,9 +9344,9 @@ function MekanikReport({
     setSTForm(emptySTForm);
     setSTAssigneeCart([]);
   };
-  const deleteST = s => {
+  const deleteST = async s => {
     if (!isOwnerLike) return alert("Hanya Owner/GM/Finance Director yang dapat menghapus Surat Tugas.");
-    if (!confirm("Hapus Surat Tugas ini?")) return;
+    if (!await askConfirm("Hapus Surat Tugas ini?")) return;
     setSuratTugas(suratTugas.filter(x => x.id !== s.id));
     logAudit(store, session, {
       module: "Surat Tugas",
@@ -9129,8 +9398,8 @@ function MekanikReport({
       detail: `${dar.mekanikNama}: ${dar.pekerjaan}`
     });
   };
-  const rejectDar = dar => {
-    const reason = prompt("Alasan penolakan DAR:");
+  const rejectDar = async dar => {
+    const reason = await askPrompt("Alasan penolakan DAR:");
     if (!reason) return;
     const arr = [...dars];
     arr[dars.indexOf(dar)] = {
@@ -9160,8 +9429,8 @@ function MekanikReport({
       detail: `${rec.items.length} item oleh ${rec.mekanikNama}`
     });
   }; // becomes visible to Asil after Septi approval
-  const rejectRec = rec => {
-    const reason = prompt("Alasan penolakan rekomendasi part:");
+  const rejectRec = async rec => {
+    const reason = await askPrompt("Alasan penolakan rekomendasi part:");
     if (!reason) return;
     const arr = [...partRecs];
     arr[partRecs.indexOf(rec)] = {
@@ -11483,8 +11752,8 @@ function PartRequestModule({
     }
     setReviewPR(null);
   };
-  const reviewPRReject = () => {
-    const reason = prompt("Alasan penolakan:");
+  const reviewPRReject = async () => {
+    const reason = await askPrompt("Alasan penolakan:");
     if (!reason) return;
     const idx = partRequests.indexOf(reviewPR);
     if (idx < 0) return;
@@ -11548,8 +11817,8 @@ function PartRequestModule({
       detail: arr[i].partName
     });
   };
-  const asilReject = i => {
-    const reason = prompt("Alasan penolakan:");
+  const asilReject = async i => {
+    const reason = await askPrompt("Alasan penolakan:");
     if (!reason) return;
     const arr = [...partRequests];
     arr[i] = {
@@ -11594,8 +11863,8 @@ function PartRequestModule({
       detail: `${req.partName} → ${partNumber}`
     });
   };
-  const gmReject = i => {
-    const reason = prompt("Alasan penolakan GM:");
+  const gmReject = async i => {
+    const reason = await askPrompt("Alasan penolakan GM:");
     if (!reason) return;
     const arr = [...partRequests];
     arr[i] = {
@@ -12414,8 +12683,8 @@ function QuotationUnit({
       detail: `${q.customerNama} — ${fmt(q.total)}`
     });
   };
-  const gmReject = q => {
-    const reason = prompt("Alasan penolakan:");
+  const gmReject = async q => {
+    const reason = await askPrompt("Alasan penolakan:");
     if (!reason) return;
     const arr = [...quotationsUnit];
     arr[quotationsUnit.indexOf(q)] = {
@@ -12451,8 +12720,8 @@ function QuotationUnit({
       detail: `${q.customerNama} — follow-up diperpanjang 14 hari (perpanjangan ke-${newCount})`
     });
   };
-  const closeQuotation = q => {
-    const reason = prompt("Alasan quotation ditutup (Closed):");
+  const closeQuotation = async q => {
+    const reason = await askPrompt("Alasan quotation ditutup (Closed):");
     if (!reason) return;
     const arr = [...quotationsUnit];
     arr[quotationsUnit.indexOf(q)] = {
@@ -12469,9 +12738,9 @@ function QuotationUnit({
       detail: reason
     });
   };
-  const deleteQuotation = q => {
+  const deleteQuotation = async q => {
     if (!isOwnerLike) return alert("Hanya Owner/GM/Finance Director yang dapat menghapus quotation.");
-    if (!confirm(`Hapus quotation ${q.nomor}?`)) return;
+    if (!await askConfirm(`Hapus quotation ${q.nomor}?`)) return;
     setQuotationsUnit(quotationsUnit.filter(x => x !== q));
     logAudit(store, session, {
       module: "Unit Quotation",
@@ -13752,8 +14021,8 @@ function QuotationPS({
   // The automatic "Ditarik ke Quotation" marking (in save()/submitDraft above) only fires when a
   // Quotation is actually created THROUGH this picker, so it can't cover that case — this button
   // lets Asil/Owner/GM manually clear a stale rec instead.
-  const dismissRec = rec => {
-    if (!window.confirm(`Tandai Part Recommendation dari ${rec.customerNama} (${rec.tanggal}) sebagai sudah ditangani dan hilangkan dari daftar ini?`)) return;
+  const dismissRec = async rec => {
+    if (!await askConfirm(`Tandai Part Recommendation dari ${rec.customerNama} (${rec.tanggal}) sebagai sudah ditangani dan hilangkan dari daftar ini?`)) return;
     setPartRecs(prev => prev.map(r => r.id === rec.id ? {
       ...r,
       status: "Ditandai Selesai (Manual)"
@@ -13939,8 +14208,8 @@ function QuotationPS({
       detail: `${q.customerNama} — ${fmt(q.total)}`
     });
   };
-  const gmReject = q => {
-    const reason = prompt("Alasan penolakan:");
+  const gmReject = async q => {
+    const reason = await askPrompt("Alasan penolakan:");
     if (!reason) return;
     const arr = [...quotationsPS];
     arr[quotationsPS.indexOf(q)] = {
@@ -13956,9 +14225,9 @@ function QuotationPS({
       detail: reason
     });
   };
-  const deleteQuotationPS = q => {
+  const deleteQuotationPS = async q => {
     if (!isOwnerLike) return alert("Hanya Owner/GM/Finance Director yang dapat menghapus quotation.");
-    if (!confirm(`Hapus quotation ${q.nomor}?`)) return;
+    if (!await askConfirm(`Hapus quotation ${q.nomor}?`)) return;
     setQuotationsPS(quotationsPS.filter(x => x !== q));
     logAudit(store, session, {
       module: "Parts & Service Quotation",
@@ -13984,8 +14253,8 @@ function QuotationPS({
       detail: `${q.customerNama} — follow-up diperpanjang 14 hari (perpanjangan ke-${newCount})`
     });
   };
-  const closeQuotationPS = q => {
-    const reason = prompt("Alasan quotation ditutup (Closed):");
+  const closeQuotationPS = async q => {
+    const reason = await askPrompt("Alasan quotation ditutup (Closed):");
     if (!reason) return;
     const arr = [...quotationsPS];
     arr[quotationsPS.indexOf(q)] = {
@@ -15250,7 +15519,7 @@ function SalesOrderModule({
     });
     setSelesaiModal(null);
   };
-  const deleteSO = so => {
+  const deleteSO = async so => {
     if (!isOwnerLike) return alert("Hanya Owner/GM/Finance Director yang dapat menghapus Sales Order.");
     // Warn before deleting an SO that already has an Item Requisition (and possibly a Purchase
     // Order) built from it — deleting it here does NOT touch those downstream documents, so
@@ -15259,9 +15528,9 @@ function SalesOrderModule({
     if (linkedIRs.length > 0) {
       const linkedPOs = [...(poLocal || []), ...(poOverseas || [])].filter(p => (p.irNomors || []).some(n => linkedIRs.some(r => r.nomor === n)));
       const warnMsg = linkedPOs.length > 0 ? `Sales Order ${so.nomor} sudah punya Item Requisition (${linkedIRs.map(r => r.nomor).join(", ")}) DAN sudah lanjut jadi Purchase Order (${linkedPOs.map(p => p.nomor).join(", ")}) ke supplier. Menghapus SO ini TIDAK akan menghapus/mengubah IR/PO tersebut — mereka akan tertinggal menunjuk ke SO yang sudah tidak ada. Lanjutkan hapus?` : `Sales Order ${so.nomor} sudah punya Item Requisition (${linkedIRs.map(r => r.nomor).join(", ")}). Menghapus SO ini TIDAK akan menghapus/mengubah IR tersebut — IR akan tertinggal menunjuk ke SO yang sudah tidak ada. Lanjutkan hapus?`;
-      if (!confirm(warnMsg)) return;
+      if (!await askConfirm(warnMsg)) return;
     }
-    if (!confirm(`Hapus Sales Order ${so.nomor}?`)) return;
+    if (!await askConfirm(`Hapus Sales Order ${so.nomor}?`)) return;
     setSalesOrders(salesOrders.filter(x => x !== so));
     // Revert the source Quotation back to "Disetujui GM" so it reappears in the Buat SO list and
     // a new Sales Order can be created from it again — otherwise it stays permanently stuck at
@@ -15318,8 +15587,8 @@ function SalesOrderModule({
     if (typeof q === "string") return true; // fallback: no item detail available, keep old (any-SO) behavior
     return quotUninvoicedItems(q).length === 0;
   };
-  const dismissQuotFromSOList = (q, type) => {
-    if (!confirm(`Tandai ${q.nomor} selesai secara manual dan sembunyikan dari SQ ON GOING? Ini berarti IR/MR sudah dibuat untuk sebagian item, dan sisanya tidak jadi diorder oleh client. Bisa dikembalikan kapan saja dari daftar "Ditandai Selesai (Manual)".`)) return;
+  const dismissQuotFromSOList = async (q, type) => {
+    if (!await askConfirm(`Tandai ${q.nomor} selesai secara manual dan sembunyikan dari SQ ON GOING? Ini berarti IR/MR sudah dibuat untuk sebagian item, dan sisanya tidak jadi diorder oleh client. Bisa dikembalikan kapan saja dari daftar "Ditandai Selesai (Manual)".`)) return;
     const setter = type === "Unit" ? setQuotationsUnit : setQuotationsPS;
     setter(prev => (prev || []).map(x => x.nomor === q.nomor ? { ...x, dismissedFromSOList: true } : x));
     logAudit(store, session, { module: "Sales Order", docNomor: q.nomor, action: "Tandai Selesai (Manual)", detail: "Disembunyikan dari SQ ON GOING secara manual" });
@@ -15531,11 +15800,11 @@ function SalesOrderModule({
     BOTH: "IR"
   };
   const fulfillmentLabel = ft => ft === "BOTH" ? "IR + MR" : ft || "IR";
-  const changeFulfillmentType = so => {
+  const changeFulfillmentType = async so => {
     const current = so.fulfillmentType || "IR";
     const next = fulfillmentCycle[current] || "IR";
     const nextDesc = next === "IR" ? "SO akan muncul di picker Item Requisition (Purchasing) saja." : next === "MR" ? "SO akan hilang dari Item Requisition dan muncul di MR On Going (Mekanik Report) saja." : "SO akan muncul DI KEDUANYA — picker Item Requisition (Purchasing) DAN MR On Going (Mekanik Report).";
-    if (!confirm(`Ubah rute SO ${so.nomor} dari ${fulfillmentLabel(current)} menjadi ${fulfillmentLabel(next)}?\n\n${nextDesc}`)) return;
+    if (!await askConfirm(`Ubah rute SO ${so.nomor} dari ${fulfillmentLabel(current)} menjadi ${fulfillmentLabel(next)}?\n\n${nextDesc}`)) return;
     setSalesOrders(prev => prev.map(s => s.nomor === so.nomor ? {
       ...s,
       fulfillmentType: next
@@ -16665,10 +16934,10 @@ function ItemRequisitionModule({
     closeManualModal();
   };
   const newNomor = (arr = itemRequisitions) => genDocNumber(arr, "IR");
-  const deleteIR = r => {
+  const deleteIR = async r => {
     if (!canManage) return alert("Hanya Purchasing/Workshop Manager/Owner/GM/Finance Director yang dapat menghapus Item Requisition.");
-    if (r.status === "Sudah di-PO" && !confirm(`Item Requisition ${r.nomor} sudah menjadi Purchase Order. Purchase Order terkait TIDAK akan otomatis terhapus/berubah — perlu dicek manual bila perlu. Lanjutkan hapus?`)) return;
-    if (!confirm(`Hapus Item Requisition ${r.nomor}?`)) return;
+    if (r.status === "Sudah di-PO" && !await askConfirm(`Item Requisition ${r.nomor} sudah menjadi Purchase Order. Purchase Order terkait TIDAK akan otomatis terhapus/berubah — perlu dicek manual bila perlu. Lanjutkan hapus?`)) return;
+    if (!await askConfirm(`Hapus Item Requisition ${r.nomor}?`)) return;
     setItemRequisitions(prev => prev.filter(x => x.nomor !== r.nomor));
     logAudit(store, session, {
       module: "Item Requisition",
@@ -16874,8 +17143,8 @@ function ItemRequisitionModule({
       items
     });
   };
-  const onEditIR = r => {
-    if (r.status === "Sudah di-PO" && !confirm(`Item Requisition ${r.nomor} sudah menjadi Purchase Order. Purchase Order terkait TIDAK akan otomatis mengikuti perubahan ini — perlu dicek/disesuaikan manual bila perlu. Lanjutkan revisi?`)) return;
+  const onEditIR = async r => {
+    if (r.status === "Sudah di-PO" && !await askConfirm(`Item Requisition ${r.nomor} sudah menjadi Purchase Order. Purchase Order terkait TIDAK akan otomatis mengikuti perubahan ini — perlu dicek/disesuaikan manual bila perlu. Lanjutkan revisi?`)) return;
     setEditingNomor(r.nomor);
     if (r.bomCandidate) {
       setManualForm({
@@ -18194,8 +18463,8 @@ function PurchaseOrderModule({
       detail: `${p.supplierNama} — ${fmt(p.total)}`
     });
   };
-  const gmReject = p => {
-    const reason = prompt("Alasan penolakan:");
+  const gmReject = async p => {
+    const reason = await askPrompt("Alasan penolakan:");
     if (!reason) return;
     const arr = [...po];
     arr[po.indexOf(p)] = {
@@ -18727,12 +18996,12 @@ function PurchaseOrderModule({
         onClick: () => openSupplierDoc(p)
       }, "Edit Dok."))];
     }),
-    onDelete: isOwnerLike || isHandler || isMaria ? i => {
+    onDelete: isOwnerLike || isHandler || isMaria ? async i => {
       const target = poFiltered.filter(p => !isPoClosed(p))[i];
       if (!isOwnerLike && target.status !== "Menunggu Approval GM") {
         return alert("PO yang sudah diproses (disetujui/ditolak GM) hanya dapat dihapus oleh Owner/GM/Finance Director.");
       }
-      if (!confirm(`Hapus PO ${target.nomor}?`)) return;
+      if (!await askConfirm(`Hapus PO ${target.nomor}?`)) return;
       setPo(po.filter(x => x !== target));
       // Release any IR items this PO had consumed so they become pickable again in a future PO.
       if (target.irNomors && target.irNomors.length) {
@@ -18804,9 +19073,9 @@ function PurchaseOrderModule({
       title: "Catatan",
       onClick: () => openEditCatatanPO(p)
     }, "📝"))]),
-    onDelete: isOwnerLike ? i => {
+    onDelete: isOwnerLike ? async i => {
       const target = poFiltered.filter(p => isPoClosed(p))[i];
-      if (!confirm(`Hapus PO ${target.nomor}?`)) return;
+      if (!await askConfirm(`Hapus PO ${target.nomor}?`)) return;
       setPo(po.filter(x => x !== target));
       logAudit(store, session, {
         module: isLocal ? "Purchase Order Lokal" : "Purchase Order Overseas",
@@ -20348,8 +20617,8 @@ function GoodsReceiptModule({
     });
     setReviewGR(null);
   };
-  const rejectGREdit = req => {
-    const reason = prompt("Alasan penolakan edit:");
+  const rejectGREdit = async req => {
+    const reason = await askPrompt("Alasan penolakan edit:");
     if (!reason) return;
     setEditRequests(editRequests.map(r => r.id === req.id ? {
       ...r,
@@ -20649,10 +20918,10 @@ function GoodsReceiptModule({
   // pattern used by the Goods Receipt row delete above: if the DO was already confirmed at Workshop
   // (stock already incremented), deleting the record does NOT automatically reverse that stock
   // change, so the confirming message says so explicitly rather than silently going out of sync.
-  const deleteInternalDO = d => {
+  const deleteInternalDO = async d => {
     const isConfirmed = d.statusKonfirmasi === "Diterima Workshop";
     const msg = isConfirmed ? `Hapus Internal DO ${d.nomor}? Catatan: stock yang sudah ditambahkan saat konfirmasi Workshop TIDAK otomatis dikurangi — sesuaikan stock secara manual di Master Part bila perlu.` : `Hapus Internal DO ${d.nomor}?`;
-    if (!confirm(msg)) return;
+    if (!await askConfirm(msg)) return;
     setInternalDOs(internalDOs.filter(x => x !== d));
     logAudit(store, session, {
       module: "Internal Delivery Order",
@@ -20812,9 +21081,9 @@ function GoodsReceiptModule({
       }, g.statusFinal)];
     }),
     onEdit: isJhon || isOwnerLike ? i => openEditGR(goodsReceiptsFiltered[i]) : undefined,
-    onDelete: isOwnerLike ? i => {
+    onDelete: isOwnerLike ? async i => {
       const g = goodsReceiptsFiltered[i];
-      if (!confirm(`Hapus data penerimaan ${g.nomor}? Catatan: stock yang sudah masuk dari penerimaan ini TIDAK otomatis dikurangi — sesuaikan stock secara manual di Master Part bila perlu.`)) return;
+      if (!await askConfirm(`Hapus data penerimaan ${g.nomor}? Catatan: stock yang sudah masuk dari penerimaan ini TIDAK otomatis dikurangi — sesuaikan stock secara manual di Master Part bila perlu.`)) return;
       const remainingGRs = goodsReceipts.filter(x => x !== g);
       setGoodsReceipts(remainingGRs);
       // Recompute the linked PO's receivedMap/status from the remaining receipts (rather than just
@@ -22062,9 +22331,9 @@ function PartsUseModule({
     }, pu.items.length, " part"), /*#__PURE__*/React.createElement(Badge, {
       color: statusColor[pu.status]
     }, pu.status)]),
-    onDelete: isOwnerLike ? i => {
+    onDelete: isOwnerLike ? async i => {
       const pu = partsUseOngoing[i];
-      if (!confirm(`Hapus data Parts Use ${pu.nomor}? Catatan: stock yang sudah terpakai TIDAK otomatis dikembalikan — sesuaikan stock secara manual bila perlu.`)) return;
+      if (!await askConfirm(`Hapus data Parts Use ${pu.nomor}? Catatan: stock yang sudah terpakai TIDAK otomatis dikembalikan — sesuaikan stock secara manual bila perlu.`)) return;
       setPartsUse(prev => prev.filter(x => x.nomor !== pu.nomor));
       logAudit(store, session, {
         module: "Parts Use",
@@ -22093,9 +22362,9 @@ function PartsUseModule({
     }, pu.items.length, " part"), /*#__PURE__*/React.createElement(Badge, {
       color: statusColor[pu.status]
     }, pu.status)]),
-    onDelete: isOwnerLike ? i => {
+    onDelete: isOwnerLike ? async i => {
       const pu = partsUseDone[i];
-      if (!confirm(`Hapus data Parts Use ${pu.nomor}? Catatan: stock yang sudah terpakai TIDAK otomatis dikembalikan — sesuaikan stock secara manual bila perlu.`)) return;
+      if (!await askConfirm(`Hapus data Parts Use ${pu.nomor}? Catatan: stock yang sudah terpakai TIDAK otomatis dikembalikan — sesuaikan stock secara manual bila perlu.`)) return;
       setPartsUse(prev => prev.filter(x => x.nomor !== pu.nomor));
       logAudit(store, session, {
         module: "Parts Use",
@@ -22597,9 +22866,9 @@ function DeliveryOrderModule({
       color: theme.green
     }, d.status)]),
     onEdit: i => canEditDO(deliveryOrdersFiltered[i]) ? openEditDO(deliveryOrdersFiltered[i]) : alert("Hanya pembuat Delivery Order ini (atau Logistic/Sales Admin/HO) yang bisa mengedit."),
-    onDelete: isOwnerLike ? i => {
+    onDelete: isOwnerLike ? async i => {
       const d = deliveryOrdersFiltered[i];
-      if (!confirm(`Hapus Delivery Order ${d.nomor}?`)) return;
+      if (!await askConfirm(`Hapus Delivery Order ${d.nomor}?`)) return;
       setDeliveryOrders(deliveryOrders.filter(x => x !== d));
       logAudit(store, session, {
         module: "Delivery Order",
@@ -23065,8 +23334,8 @@ function InvoiceModule({
     });
     setReviewInvEdit(null);
   };
-  const rejectInvEdit = req => {
-    const reason = prompt("Alasan penolakan edit:");
+  const rejectInvEdit = async req => {
+    const reason = await askPrompt("Alasan penolakan edit:");
     if (!reason) return;
     setEditRequests(editRequests.map(r => r.id === req.id ? {
       ...r,
@@ -23237,8 +23506,8 @@ function InvoiceModule({
   // Recommendation in Parts & Service Quotation (dismissRec) — reversible via the collapsed
   // "SO Ditandai Selesai (Manual)" list below, doesn't touch the SO's real status/items.
   const dismissedSO = salesOrders.filter(so => so.dismissedFromInvoiceList);
-  const dismissSOFromInvoiceList = so => {
-    if (!confirm(`Tandai ${so.nomor} selesai secara manual dan sembunyikan dari SO ONGOING? Ini tidak mengubah data SO/Invoice — bisa dikembalikan kapan saja dari daftar "Ditandai Selesai (Manual)".`)) return;
+  const dismissSOFromInvoiceList = async so => {
+    if (!await askConfirm(`Tandai ${so.nomor} selesai secara manual dan sembunyikan dari SO ONGOING? Ini tidak mengubah data SO/Invoice — bisa dikembalikan kapan saja dari daftar "Ditandai Selesai (Manual)".`)) return;
     setSalesOrders(prev => (prev || []).map(s => s.nomor === so.nomor ? {
       ...s,
       dismissedFromInvoiceList: true
@@ -23445,8 +23714,8 @@ function InvoiceModule({
       detail: `${inv.customerNama} — ${fmt(inv.total)}`
     });
   };
-  const gmReject = inv => {
-    const reason = prompt("Alasan penolakan:");
+  const gmReject = async inv => {
+    const reason = await askPrompt("Alasan penolakan:");
     if (!reason) return;
     const arr = [...invoices];
     arr[invoices.indexOf(inv)] = {
@@ -23504,8 +23773,8 @@ function InvoiceModule({
     });
     setReviewNewInv(null);
   };
-  const reviewNewInvReject = () => {
-    const reason = prompt("Alasan penolakan:");
+  const reviewNewInvReject = async () => {
+    const reason = await askPrompt("Alasan penolakan:");
     if (!reason) return;
     const idx = invoices.indexOf(reviewNewInv);
     if (idx < 0) return;
@@ -24055,9 +24324,9 @@ function InvoiceModule({
       }, inv.statusBayar)];
     }),
     onEdit: isFinance || isOwnerLike ? i => openEditInv(filtered[i]) : undefined,
-    onDelete: isOwnerLike ? i => {
+    onDelete: isOwnerLike ? async i => {
       const inv = filtered[i];
-      if (!confirm(`Hapus Invoice ${inv.nomor}?`)) return;
+      if (!await askConfirm(`Hapus Invoice ${inv.nomor}?`)) return;
       setInvoices(invoices.filter(x => x !== inv));
       logAudit(store, session, {
         module: "Invoice",
@@ -26635,10 +26904,10 @@ function UangDinasModule({
       detail: `${r.nama} · ${fmt(uangDinasSisaTransfer(r))}`
     });
   };
-  const addBiayaLain = proj => {
-    const ket = prompt("Keterangan biaya:");
-    if (!ket) return;
-    const jumlah = Number(prompt("Jumlah (Rp):", "0")) || 0;
+  const addBiayaLain = async proj => {
+    const result = await askBiayaLain();
+    if (!result) return;
+    const { keterangan: ket, jumlah } = result;
     setDinasCatatan(prev => (prev || []).map(p => p.id === proj.id ? {
       ...p,
       biayaLain: [...(p.biayaLain || []), {
@@ -27381,8 +27650,8 @@ function TicketingModule({
     setEditIdx(i);
     setModal(true);
   };
-  const onDelete = i => {
-    if (confirm("Hapus tiket ini?")) {
+  const onDelete = async i => {
+    if (await askConfirm("Hapus tiket ini?")) {
       const arr = [...tickets];
       arr.splice(i, 1);
       setTickets(arr);
@@ -29210,8 +29479,8 @@ function MasterCOAModule({
     setEditIdx(i);
     setModal(true);
   };
-  const onDelete = i => {
-    if (confirm("Hapus akun COA ini?")) {
+  const onDelete = async i => {
+    if (await askConfirm("Hapus akun COA ini?")) {
       const a = [...coa];
       a.splice(i, 1);
       setCoa(a);
@@ -30531,9 +30800,9 @@ function AttendanceModule({
     }
     closeAttModal();
   };
-  const deleteAttendance = a => {
+  const deleteAttendance = async a => {
     if (!isOwnerLike) return alert("Hanya Owner/GM/HRD Payroll yang dapat menghapus data absensi.");
-    if (!confirm(`Hapus data absensi ${a.tanggal} (${(employees.find(e => e.username === a.username) || {}).nama || a.username})?`)) return;
+    if (!await askConfirm(`Hapus data absensi ${a.tanggal} (${(employees.find(e => e.username === a.username) || {}).nama || a.username})?`)) return;
     setAttendance(attendance.filter(x => x.id !== a.id));
     logAudit(store, session, {
       module: "Absensi",
@@ -31519,8 +31788,8 @@ function RekapMesinPanel({
       disetujuiLabel: "Mengetahui HRD"
     });
   };
-  const deletePeriode = (mulai, selesai) => {
-    if (!confirm(`Hapus semua rekap tersimpan untuk periode ${mulai} s/d ${selesai}?`)) return;
+  const deletePeriode = async (mulai, selesai) => {
+    if (!await askConfirm(`Hapus semua rekap tersimpan untuk periode ${mulai} s/d ${selesai}?`)) return;
     setRekapAbsensi(prev => (prev || []).filter(r => !(r.periodeMulai === mulai && r.periodeSelesai === selesai)));
     logAudit(store, session, {
       module: "Absensi - Rekap Mesin",
@@ -31532,14 +31801,14 @@ function RekapMesinPanel({
   // Full reset — wipes every saved Rekap Mesin period so HRD can re-upload/re-input cleanly
   // from scratch. Double-confirmed since this cascades into Payroll (Uang Makan/Lembur) and
   // the Absensi Dashboard, both of which read directly from rekapAbsensi.
-  const hapusSemuaRekap = () => {
+  const hapusSemuaRekap = async () => {
     const total = (rekapAbsensi || []).length;
     if (total === 0) {
       alert("Belum ada data Rekap Absensi tersimpan.");
       return;
     }
-    if (!confirm(`Hapus SEMUA data Rekap Absensi tersimpan (${total} baris, seluruh periode)? Tindakan ini tidak bisa dibatalkan. Payroll & Dashboard Absensi akan kosong sampai data baru diinput ulang.`)) return;
-    if (!confirm("Konfirmasi sekali lagi: benar-benar hapus SEMUA data Rekap Absensi?")) return;
+    if (!await askConfirm(`Hapus SEMUA data Rekap Absensi tersimpan (${total} baris, seluruh periode)? Tindakan ini tidak bisa dibatalkan. Payroll & Dashboard Absensi akan kosong sampai data baru diinput ulang.`)) return;
+    if (!await askConfirm("Konfirmasi sekali lagi: benar-benar hapus SEMUA data Rekap Absensi?")) return;
     setRekapAbsensi([]);
     logAudit(store, session, {
       module: "Absensi - Rekap Mesin",
@@ -32161,8 +32430,8 @@ function FormCutiModule({
       detail: `${req.nama} mengonfirmasi cuti yang diajukan oleh ${req.createdByNama}`
     });
   };
-  const staffDispute = req => {
-    const reason = prompt("Alasan tidak sesuai / bantahan:");
+  const staffDispute = async req => {
+    const reason = await askPrompt("Alasan tidak sesuai / bantahan:");
     if (!reason) return;
     // Functional-update form — re-fetches the current leaveRequests from the server right before
     // writing, instead of trusting this browser's possibly-stale local copy. A plain-array write
@@ -32342,8 +32611,8 @@ function FormCutiModule({
       ...patch
     });
   };
-  const reject = req => {
-    const reason = prompt("Alasan penolakan cuti:");
+  const reject = async req => {
+    const reason = await askPrompt("Alasan penolakan cuti:");
     if (!reason) return;
     // Functional-update form — see staffDispute's note above.
     setLeaveRequests(prev => {
@@ -32367,8 +32636,8 @@ function FormCutiModule({
     });
     setDetail(null);
   };
-  const cancelRequest = req => {
-    if (!confirm("Batalkan pengajuan cuti ini?")) return;
+  const cancelRequest = async req => {
+    if (!await askConfirm("Batalkan pengajuan cuti ini?")) return;
     // Functional-update form — see staffDispute's note above.
     setLeaveRequests(prev => prev.filter(r => r.id !== req.id));
   };
@@ -32582,13 +32851,14 @@ function FormCutiModule({
   }, "👁"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "success",
-    onClick: () => {
-      // Quick-approve shortcut (skips the Detail modal) — confirm() only supports 2 choices, so
-      // this covers the 2 most common cases (Cuti Biasa/Khusus); for "Ijin" use Detail/Edit →
-      // Approve where the Select has all 3 options.
-      const isKhusus = confirm(`Approve cuti ${r.nama} (${r.jumlahHari} hari)?\n\nOK = Cuti Khusus (di luar kuota)\nCancel = Cuti Biasa (potong kuota 12 hari/tahun)\n\nUntuk approve sebagai Ijin, gunakan "Detail/Edit" lalu pilih Ijin.`);
+    onClick: async () => {
+      // Quick-approve shortcut (skips the Detail modal) — three explicit choices now that we're
+      // not constrained by confirm()'s OK/Cancel; for "Ijin" use Detail/Edit → Approve where the
+      // Select has all 3 options.
+      const choice = await askCutiType(`Approve cuti ${r.nama} (${r.jumlahHari} hari)?\n\nUntuk approve sebagai Ijin, gunakan "Detail/Edit" lalu pilih Ijin.`);
+      if (!choice) return;
       approve(r, {
-        jenisCuti: isKhusus ? "Cuti Khusus" : "Cuti"
+        jenisCuti: choice === "khusus" ? "Cuti Khusus" : "Cuti"
       });
     }
   }, "✓ Approve"), /*#__PURE__*/React.createElement(Btn, {
@@ -33205,8 +33475,8 @@ function KPISalesModule({
     }));
     setAddRosterName("");
   };
-  const removeFromKpiRoster = nama => {
-    if (!confirm(`Hapus ${nama} dari daftar KPI Sales? (Role/akses login tidak berubah.)`)) return;
+  const removeFromKpiRoster = async nama => {
+    if (!await askConfirm(`Hapus ${nama} dari daftar KPI Sales? (Role/akses login tidak berubah.)`)) return;
     setKpiSalesRoster(prev => ({
       extra: (prev?.extra || []).filter(n => n !== nama),
       excluded: baseRoster.includes(nama) ? [...new Set([...(prev?.excluded || []), nama])] : prev?.excluded || []
@@ -33676,9 +33946,9 @@ function BankReconModule({
     setModal(false);
     setEditingId(null);
   };
-  const deleteEntry = e => {
+  const deleteEntry = async e => {
     const warn = e.sourceId ? ` Entry ini tersinkron otomatis dari Jurnal (${e.sourceId}) — jika status Lunas di Jurnal diedit lagi, entry ini bisa muncul kembali secara terpisah.` : "";
-    if (!confirm("Hapus entry Rekonsiliasi Bank ini?" + warn)) return;
+    if (!await askConfirm("Hapus entry Rekonsiliasi Bank ini?" + warn)) return;
     setBankRecon(bankRecon.filter(x => x.id !== e.id));
     logAudit(store, session, {
       module: "Rekonsiliasi Bank",
@@ -34133,9 +34403,9 @@ function JurnalModule({
     });
     setPayModal(null);
   };
-  const deleteJurnal = j => {
+  const deleteJurnal = async j => {
     const warn = j.sourceId ? " Entry ini tersinkron otomatis dari " + j.sourceModule + " — jika dokumen sumbernya masih ada, entry ini bisa muncul kembali." : "";
-    if (!confirm("Hapus entry jurnal ini?" + warn)) return;
+    if (!await askConfirm("Hapus entry jurnal ini?" + warn)) return;
     setJurnal(jurnal.filter(x => x.id !== j.id));
     setBankRecon(bankRecon.filter(b => !(b.sourceModule === "Jurnal" && b.sourceId === j.id)));
     logAudit(store, session, {
@@ -34739,10 +35009,10 @@ function WorkshopOpsModule({
     setEditingExpenseId(e.id);
     setModal(true);
   };
-  const onDeleteExpense = i => {
+  const onDeleteExpense = async i => {
     const e = periodItems[i];
     if (!canEditEntry(e)) return alert("Anda hanya dapat menghapus pengeluaran yang Anda input sendiri.");
-    if (confirm("Hapus pengeluaran ini?")) {
+    if (await askConfirm("Hapus pengeluaran ini?")) {
       setWorkshopOpsExpenses(workshopOpsExpenses.filter(x => x.id !== e.id));
     }
   };
@@ -35116,9 +35386,9 @@ function CompanySettingsModule({
     });
     setMigrationResult(null);
   };
-  const runMigration = () => {
+  const runMigration = async () => {
     if (!migrationPreview || migrationPreview.plan.length === 0) return;
-    if (!window.confirm(`Migrasi ${migrationPreview.plan.length} nomor dokumen lama ke format baru?\n\nNomor Invoice yang sudah terbit TIDAK akan diubah. Semua referensi silang (SO, IR, PO, GR, DO, dll) akan ikut diperbarui otomatis.\n\nLanjutkan?`)) return;
+    if (!await askConfirm(`Migrasi ${migrationPreview.plan.length} nomor dokumen lama ke format baru?\n\nNomor Invoice yang sudah terbit TIDAK akan diubah. Semua referensi silang (SO, IR, PO, GR, DO, dll) akan ikut diperbarui otomatis.\n\nLanjutkan?`)) return;
     const count = applyDocNumberMigrationPlan(store, session, migrationPreview);
     setMigrationResult(count);
     setMigrationPreview(null);
@@ -35473,8 +35743,8 @@ function MasterMillModule({
     setEditIdx(mills.indexOf(filtered[i]));
     setModal(true);
   };
-  const onDelete = i => {
-    if (!confirm("Hapus lokasi mill ini?")) return;
+  const onDelete = async i => {
+    if (!await askConfirm("Hapus lokasi mill ini?")) return;
     const a = [...mills];
     a.splice(mills.indexOf(filtered[i]), 1);
     setMills(a);
@@ -35908,7 +36178,7 @@ function UserManagement({
     // delete would permanently wipe that history. Deactivating removes the user from login,
     // module access, and every "pick a mekanik/employee" dropdown app-wide (they're filtered
     // by aktif !== false), while keeping their payroll/family records intact for HRD/audit.
-    if (!confirm(`Nonaktifkan user ${u.nama} (${u.username})? Akun ini tidak bisa lagi login atau muncul di pilihan mekanik/karyawan, tapi data gaji/keluarga/riwayat tetap tersimpan. (Login Supabase Auth-nya tetap aktif kecuali dihapus terpisah oleh admin teknis via Supabase Dashboard.)`)) return;
+    if (!await askConfirm(`Nonaktifkan user ${u.nama} (${u.username})? Akun ini tidak bisa lagi login atau muncul di pilihan mekanik/karyawan, tapi data gaji/keluarga/riwayat tetap tersimpan. (Login Supabase Auth-nya tetap aktif kecuali dihapus terpisah oleh admin teknis via Supabase Dashboard.)`)) return;
     const {
       error
     } = await sb.from("profiles").update({
@@ -37198,7 +37468,7 @@ function App() {
   }));
 }
 const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(React.createElement(App));
+root.render(React.createElement(React.Fragment, null, React.createElement(App), React.createElement(DialogHost)));
 </script>
 </body>
 </html>
