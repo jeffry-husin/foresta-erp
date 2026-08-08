@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-08.2";
+const APP_BUILD = "2026-08-08.3";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -320,6 +320,17 @@ const stockAllocationForAllParts = store => {
 const reservedQtyForAll = (allocationByPart, partNumber) => {
   const alloc = allocationByPart[partNumber] || {};
   return Object.values(alloc).reduce((s, a) => s + a.allocated, 0);
+};
+// O(1) lookup matching reservedQtyFor(store, partNumber, excludeSoNomor)'s exact output (allocation
+// minus the given SO's own share), built from a pre-computed stockAllocationForAllParts() map —
+// used by call sites (Item Requisition) that check one part against "everyone else's" claim
+// repeatedly across many SOs, where recomputing the full allocation from scratch each time is the
+// same per-part-rescans-everything pattern that made Master Part slow to open.
+const reservedQtyForAllExcluding = (allocationByPart, partNumber, excludeSoNomor) => {
+  const alloc = allocationByPart[partNumber] || {};
+  const total = Object.values(alloc).reduce((s, a) => s + a.allocated, 0);
+  const mine = alloc[excludeSoNomor]?.allocated || 0;
+  return Math.max(0, total - mine);
 };
 // Render free-text notes with real line breaks preserved (textarea input already allows multiple
 // lines; without this, browsers collapse \n in plain text nodes onto a single visual line).
@@ -16513,6 +16524,12 @@ function ItemRequisitionModule({
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   const canManage = isPipin || isOwnerLike || isSepti;
   const activeSO = salesOrders.filter(so => so.status === "Aktif");
+  // "SO ON GOING" (soPickerEligible below) checks every active SO's stock shortfall, and each check
+  // nets out what every OTHER active SO has already claimed — same shape of computation as Master
+  // Part's Teralokasi column, just scoped to SOs instead of all 2900+ parts. Computed once here via
+  // the same bulk allocation map (verified byte-identical against the original per-call computation
+  // before use) instead of recomputing the full allocation from scratch for every SO/item pair.
+  const allocationByPart = React.useMemo(() => stockAllocationForAllParts(store), [store.parts, store.salesOrders, store.partsUse]);
   // Consolidated into ONE module-wide search bar per Jef's request — previously "SO ON GOING"
   // and the IR list sections below each had their own separate search box.
   const [search, setSearch] = useState("");
@@ -16721,7 +16738,7 @@ function ItemRequisitionModule({
       const stokRaw = part?.stok ?? 0;
       // Net out stock already earmarked by OTHER SOs' outstanding IRs for this same part before
       // comparing against this SO's own need — see reservedQtyFor above.
-      const reservedByOthers = reservedQtyFor(store, m.partNumber, soNomor);
+      const reservedByOthers = reservedQtyForAllExcluding(allocationByPart, m.partNumber, soNomor);
       const stok = Math.max(0, stokRaw - reservedByOthers);
       const sudahDiminta = irRequestedQtyFor(soNomor, m.partNumber);
       const kurang = Math.max(0, m.qty - stok - sudahDiminta);
@@ -16753,7 +16770,7 @@ function ItemRequisitionModule({
     const p = parts.find(x => x.partNumber === it.partNumber);
     const stokRaw = p ? (p.stok ?? 0) : (it.stokTersedia || 0);
     // Net out stock already reserved by other SOs' outstanding IRs — same fix as checkStockForSO.
-    const reservedByOthers = reservedQtyFor(store, it.partNumber, soNomor);
+    const reservedByOthers = reservedQtyForAllExcluding(allocationByPart, it.partNumber, soNomor);
     const stokTersedia = Math.max(0, stokRaw - reservedByOthers);
     const qtyKurang = Math.max(0, (it.qtyButuh || 0) - stokTersedia);
     return {
@@ -17020,7 +17037,7 @@ function ItemRequisitionModule({
       const p = parts.find(x => x.partNumber === it.partNumber);
       const currentStokRaw = p?.stok ?? 0;
       // Net out stock already reserved by OTHER SOs' outstanding IRs — same fix as checkStockForSO.
-      const currentStok = Math.max(0, currentStokRaw - reservedQtyFor(store, it.partNumber, ir.soNomor));
+      const currentStok = Math.max(0, currentStokRaw - reservedQtyForAllExcluding(allocationByPart, it.partNumber, ir.soNomor));
       const oldStok = it.stokTersedia || 0;
       const qtyButuh = it.qtyButuh || 0;
       const newQtyKurang = Math.max(0, qtyButuh - currentStok);
