@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-08.1";
+const APP_BUILD = "2026-08-08.2";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -263,6 +263,63 @@ const reservedQtyFor = (store, partNumber, excludeSoNomor) => {
   const totalAllocated = Object.values(alloc).reduce((s, a) => s + a.allocated, 0);
   const myAllocated = alloc[excludeSoNomor]?.allocated || 0;
   return Math.max(0, totalAllocated - myAllocated);
+};
+// Bulk variant of stockAllocationForPart — computes the same FIFO allocation for EVERY part in one
+// pass over active Sales Orders (each SO's items exploded exactly once), instead of
+// stockAllocationForPart's one-part-at-a-time approach, which re-explodes every active SO's items
+// from scratch for each part individually. That per-part re-explosion is what made Master Part's
+// list (2900+ parts, each needing this number) take 30+ seconds and freeze the tab on open —
+// confirmed via live testing. This is purely a bulk/perf variant for call sites that need the
+// number for many parts at once (currently only Master Part's list); it does NOT replace or modify
+// stockAllocationForPart / reservedQtyFor, which Item Requisition, Purchase Order, and Parts Use
+// keep using completely unchanged. Verified to produce byte-identical allocation results to
+// stockAllocationForPart across the full live dataset before being wired into any UI.
+const stockAllocationForAllParts = store => {
+  const { salesOrders, parts, partsUse } = store;
+  const activeSOs = (salesOrders || []).filter(so => so.status === "Aktif");
+  const releasedFor = (soNomor, partNumber) => {
+    const pu = (partsUse || []).find(p => p.soNomor === soNomor);
+    const it = pu?.items?.find(x => x.partNumber === partNumber);
+    return Number(it?.qtyReleased) || 0;
+  };
+  // claimsByPart[partNumber] = [{ nomor, tanggal, need }, ...] — built from one explosion pass per
+  // active SO (not per part), which is the whole point of the bulk variant.
+  const claimsByPart = {};
+  activeSOs.forEach(so => {
+    const exploded = explodeSOItemsGlobal(store, so);
+    Object.keys(exploded).forEach(partNumber => {
+      const need = Math.max(0, (exploded[partNumber] || 0) - releasedFor(so.nomor, partNumber));
+      if (need <= 0) return;
+      (claimsByPart[partNumber] || (claimsByPart[partNumber] = [])).push({
+        nomor: so.nomor,
+        tanggal: so.tanggal || "",
+        need
+      });
+    });
+  });
+  const allocationByPart = {};
+  Object.keys(claimsByPart).forEach(partNumber => {
+    const claims = claimsByPart[partNumber].sort((a, b) => a.tanggal.localeCompare(b.tanggal) || a.nomor.localeCompare(b.nomor));
+    let remaining = (parts || []).find(p => p.partNumber === partNumber)?.stok ?? 0;
+    const allocation = {};
+    claims.forEach(c => {
+      const allocated = Math.min(c.need, remaining);
+      remaining -= allocated;
+      allocation[c.nomor] = {
+        allocated,
+        shortfall: c.need - allocated
+      };
+    });
+    allocationByPart[partNumber] = allocation;
+  });
+  return allocationByPart; // { [partNumber]: { [soNomor]: { allocated, shortfall } } } — parts with
+  // zero active claims are simply absent, same convention as stockAllocationForPart.
+};
+// O(1) lookup matching reservedQtyFor's output shape, built from a pre-computed
+// stockAllocationForAllParts() map.
+const reservedQtyForAll = (allocationByPart, partNumber) => {
+  const alloc = allocationByPart[partNumber] || {};
+  return Object.values(alloc).reduce((s, a) => s + a.allocated, 0);
 };
 // Render free-text notes with real line breaks preserved (textarea input already allows multiple
 // lines; without this, browsers collapse \n in plain text nodes onto a single visual line).
@@ -4522,6 +4579,11 @@ function MasterPart({
       sensitivity: "base"
     });
   });
+  // Teralokasi/Free Stock needs every active SO's FIFO allocation for every part on screen — computed
+  // once here via the bulk O(activeSOs) variant instead of once per part (see stockAllocationForAllParts
+  // for why the per-part version froze this page). Memoized on the underlying data so it's only
+  // recomputed when parts/SOs/Parts Use actually change, not on every keystroke in the search box.
+  const allocationByPart = React.useMemo(() => stockAllocationForAllParts(store), [store.parts, store.salesOrders, store.partsUse]);
   const wipeAllParts = () => {
     setParts([]);
     setWipeConfirm(false);
@@ -4976,7 +5038,7 @@ function MasterPart({
       let teralokasiCol = "-";
       let freeStockCol = "-";
       if (p.kategori !== "Service" && p.stok !== null) {
-        const teralokasi = reservedQtyFor(store, p.partNumber, null);
+        const teralokasi = reservedQtyForAll(allocationByPart, p.partNumber);
         const freeStock = Math.max(0, (p.stok || 0) - teralokasi);
         teralokasiCol = teralokasi > 0 ? /*#__PURE__*/React.createElement(Badge, {
           color: theme.yellow
