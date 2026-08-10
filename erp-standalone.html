@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-10.2";
+const APP_BUILD = "2026-08-10.5";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -50,6 +50,12 @@ const APP_BUILD = "2026-08-10.2";
   }
   async function checkForUpdate() {
     try {
+      // GitHub Pages fronts this file with a CDN (Fastly) that ignores our cache-busting query
+      // string and can keep serving a stale copy for up to ~10 minutes after a deploy (confirmed
+      // via response headers: cache-control max-age=600, x-cache: HIT even with a fresh ?_v=
+      // param) — so a mismatch may take a couple of these checks to surface after a fresh deploy.
+      // That's an infra limit we can't bypass from the client; checking every 3 min (down from 5)
+      // just tightens the window instead of relying on a single lucky check.
       const res = await fetch(location.pathname + "?_v=" + Date.now(), {
         cache: "no-store"
       });
@@ -58,9 +64,16 @@ const APP_BUILD = "2026-08-10.2";
       if (m && m[1] && m[1] !== APP_BUILD) showUpdateBanner();
     } catch (e) {/* offline or blocked — ignore, will retry next interval */}
   }
-  setInterval(checkForUpdate, 5 * 60 * 1000);
+  function tick() {
+    checkForUpdate();
+    // See revalidateStore() further down (defined once usePersisted/sb exist — safe to reference
+    // here since this only ever fires on the interval/visibility callbacks below, well after the
+    // rest of the top-level script has finished running).
+    if (typeof revalidateStore === "function") revalidateStore();
+  }
+  setInterval(tick, 3 * 60 * 1000);
   document.addEventListener("visibilitychange", function () {
-    if (document.visibilityState === "visible") checkForUpdate();
+    if (document.visibilityState === "visible") tick();
   });
 })();
 
@@ -1131,6 +1144,16 @@ const ROLE_DEFS = {
     label: "Freelance",
     color: "#94a3b8",
     modules: ["dashboard", "mekanik_report", "part_request", "parts_use", "master_mill", "kpi_mekanik", "attendance", "uang_dinas"]
+  },
+  // Driver — new role, requested with module access intentionally left unconfigured for now
+  // ("biarkan kosong, nanti saya akan lakukan sendiri"). Left as an empty modules array on
+  // purpose: getAllowedModules() always force-includes cuti/uang_makan/master_part regardless
+  // of role, so a Driver can already log in and see those without this list being populated —
+  // add module ids here (e.g. "delivery_order", "dashboard") whenever access is decided.
+  driver: {
+    label: "Driver",
+    color: "#f59e0b",
+    modules: []
   }
 };
 
@@ -1185,10 +1208,21 @@ const computeKomisiForSO = (store, so, override) => {
   const hasRateOverride = override && (override.rateOverride === KOMISI_RATE_NEW || override.rateOverride === KOMISI_RATE_RETURNING);
   const rate = hasRateOverride ? override.rateOverride : recommendedRate;
   const nilaiKomisi = basis * rate / 100;
+  // Komisi tidak selalu dibayar sekaligus — riwayatPembayaran menyimpan tiap pembayaran parsial
+  // {tanggal, jumlah, oleh}. Legacy override records only have a boolean dibayar/dibayarTanggal/
+  // dibayarOleh (no riwayatPembayaran) — treated as a single implicit full-payment entry so old
+  // data keeps working without a migration script.
+  const riwayatPembayaran = (override && Array.isArray(override.riwayatPembayaran) && override.riwayatPembayaran.length > 0)
+    ? override.riwayatPembayaran
+    : (override && override.dibayar ? [{ tanggal: override.dibayarTanggal || null, jumlah: nilaiKomisi, oleh: override.dibayarOleh || null }] : []);
+  const sudahDibayar = riwayatPembayaran.reduce((s, p) => s + (Number(p.jumlah) || 0), 0);
+  const sisaDibayar = Math.max(0, nilaiKomisi - sudahDibayar);
+  const statusBayar = sudahDibayar <= 0 ? "Belum Dibayar" : sisaDibayar <= 0.5 ? "Lunas" : "Sebagian";
   return {
     so, quot, salesDiscount, salesDiscountIsOverridden: hasSalesDiscountOverride, nilaiSO, basis,
     customerType, recommendedRate, rate, rateIsOverridden: hasRateOverride, nilaiKomisi,
-    dibayar: !!(override && override.dibayar), dibayarTanggal: override?.dibayarTanggal || null, dibayarOleh: override?.dibayarOleh || null
+    riwayatPembayaran, sudahDibayar, sisaDibayar, statusBayar,
+    dibayar: statusBayar === "Lunas", dibayarTanggal: override?.dibayarTanggal || null, dibayarOleh: override?.dibayarOleh || null
   };
 };
 
@@ -1540,7 +1574,10 @@ function hasAdminModule(session, moduleId) {
 // the same component that owns the switch statement.
 function computeBadgeCount(store, session, moduleId) {
   const role = session.role;
-  const isOwnerLike = role === "owner" || role === "gm";
+  // Matches the isOwnerLike convention used throughout the rest of the app (finance_director is a
+  // superuser too, e.g. sees the Invoice/Jurnal approval queues) — this function previously omitted
+  // it, so a finance_director session never saw a badge on Invoice even with a pending approval.
+  const isOwnerLike = role === "owner" || role === "gm" || role === "finance_director";
   switch (moduleId) {
     case "mekanik_report":
       if (role === "workshop_manager" || isOwnerLike) return store.dars.filter(d => d.status === "Menunggu Approval Septi").length + store.partRecs.filter(r => r.status === "Menunggu Approval Septi").length;
@@ -2205,6 +2242,41 @@ let _preloadedErpDataPromise = null;
 // CAS (compare-and-swap) write path piloted below — kept separate from the main `map` so the
 // already-verified batched-read behavior above is untouched regardless of what this is used for.
 let _preloadedUpdatedAtMap = {};
+// LIVE DATA REFRESH — root cause of "approval badges / pending counts stopped showing": every
+// usePersisted() hook only ever fetches its key ONCE per tab (at mount, via getPreloadedErpData()
+// above). If a colleague approves/creates something in a DIFFERENT browser afterward, a tab that's
+// been open since before that change has no way to find out — it just keeps computing badge counts
+// against the same snapshot it loaded at open time. Confirmed directly: a pending Invoice approval
+// existed in Supabase but was missing from this tab's localStorage cache and in-memory state,
+// because the tab loaded before that invoice existed and never re-fetched. Fix: every mounted
+// usePersisted hook registers itself here, and revalidateStore() (called on the same
+// interval/visibility-change timer as the update-banner check, see the IIFE above) re-runs the
+// batched erp_data query and pushes fresh values into every registered key — self-healing the same
+// class of staleness the update-banner already handles for CODE, but for DATA.
+const _revalidateSubscribers = new Set();
+let _revalidateInFlight = false;
+async function revalidateStore() {
+  if (_revalidateInFlight) return;
+  _revalidateInFlight = true;
+  try {
+    const { data, error } = await sb.from("erp_data").select("key, data, updated_at");
+    if (error || !data) return;
+    const map = {};
+    data.forEach(row => {
+      map[row.key] = row.data;
+      _preloadedUpdatedAtMap[row.key] = row.updated_at;
+    });
+    _revalidateSubscribers.forEach(fn => {
+      try {
+        fn(map);
+      } catch (e) {}
+    });
+  } catch (e) {
+    // offline or blocked — ignore, will retry next interval
+  } finally {
+    _revalidateInFlight = false;
+  }
+}
 function getPreloadedErpData() {
   if (!_preloadedErpDataPromise) {
     _preloadedErpDataPromise = authReadyPromise.then(async () => {
@@ -2309,6 +2381,21 @@ function usePersisted(key, defaultVal) {
     return () => {
       cancelled = true;
     };
+  }, [key]);
+  // Register with revalidateStore() (see its definition above) so this hook's state/cache gets
+  // silently refreshed on the periodic/visibility-change timer, not just once at mount. Skipped for
+  // CAS_PILOT_KEYS — those already reconcile against the server on every write via updatedAtRef, so
+  // a background overwrite here could race with an in-flight CAS retry for no benefit.
+  useEffect(() => {
+    if (CAS_PILOT_KEYS.has(key)) return;
+    const onRevalidate = map => {
+      if (Object.prototype.hasOwnProperty.call(map, key)) {
+        setValRaw(map[key]);
+        writeCache(cacheKey, map[key]);
+      }
+    };
+    _revalidateSubscribers.add(onRevalidate);
+    return () => _revalidateSubscribers.delete(onRevalidate);
   }, [key]);
   // IMPORTANT — concurrent-write safety: when multiple users edit the same collection at the same
   // time (e.g. two people creating an Item Requisition within seconds of each other), each browser
@@ -23284,12 +23371,28 @@ function InvoiceModule({
     employees,
     customers,
     editRequests,
-    setEditRequests
+    setEditRequests,
+    itemRequisitions,
+    poLocal,
+    poOverseas
   } = store;
   const isFinance = session.role === "finance" || session.role === "finance_director";
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   // Consolidated into ONE module-wide search bar per Jef's request.
   const [search, setSearch] = useState("");
+  // "Detail PO" popup — clicking the No. PO Client reference shows the client's PO number
+  // alongside the SO item breakdown AND every internal Purchase Order (to our supplier) that
+  // fulfilled this SO, traced the same way Item Requisition/Penerimaan Barang already trace
+  // IR -> PO (poLocal/poOverseas.irNomors). Widened to 900px per request, since the item table
+  // needs the room.
+  const [detailPO, setDetailPO] = useState(null);
+  const poDetailFor = inv => {
+    const so = salesOrders.find(s => s.nomor === inv.soNomor);
+    const relatedIRs = itemRequisitions.filter(ir => ir.soNomor === inv.soNomor);
+    const irNomors = relatedIRs.map(ir => ir.nomor);
+    const linkedPOs = [...(poLocal || []).map(p => ({ ...p, _tipe: "Lokal" })), ...(poOverseas || []).map(p => ({ ...p, _tipe: "Overseas" }))].filter(po => (po.irNomors || []).some(n => irNomors.includes(n)));
+    return { so, linkedPOs };
+  };
   const invSearch = search;
   const pendingInvEdits = editRequests.filter(r => r.module === "Invoice" && r.action === "Edit" && r.status === "Menunggu Approval GM");
   const [editInv, setEditInv] = useState(null);
@@ -23580,17 +23683,65 @@ function InvoiceModule({
   // Recommendation in Parts & Service Quotation (dismissRec) — reversible via the collapsed
   // "SO Ditandai Selesai (Manual)" list below, doesn't touch the SO's real status/items.
   const dismissedSO = salesOrders.filter(so => so.dismissedFromInvoiceList);
+  // "Selesai (Manual)" now requires GM approval before it actually hides the SO — per explicit
+  // request, mirroring the same editRequests-based approval-queue pattern already used for
+  // Invoice edits (submitEditInv/approveInvEdit) rather than applying instantly. Clicking the
+  // button only FILES a request; the SO stays visible in ON GOING until a GM approves it below.
+  const pendingSelesaiManual = editRequests.filter(r => r.module === "Sales Order" && r.action === "Selesai Manual" && r.status === "Menunggu Approval GM");
   const dismissSOFromInvoiceList = async so => {
-    if (!await askConfirm(`Tandai ${so.nomor} selesai secara manual dan sembunyikan dari SO ONGOING? Ini tidak mengubah data SO/Invoice — bisa dikembalikan kapan saja dari daftar "Ditandai Selesai (Manual)".`)) return;
-    setSalesOrders(prev => (prev || []).map(s => s.nomor === so.nomor ? {
-      ...s,
-      dismissedFromInvoiceList: true
-    } : s));
+    if (pendingSelesaiManual.some(r => r.targetId === so.nomor)) return alert(`${so.nomor} sudah punya pengajuan Selesai (Manual) yang masih menunggu approval GM.`);
+    if (!await askConfirm(`Ajukan ${so.nomor} sebagai Selesai (Manual)? Perlu disetujui GM dulu sebelum SO ini disembunyikan dari SO ONGOING.`)) return;
+    setEditRequests([...editRequests, {
+      id: "REQ-" + uid(),
+      module: "Sales Order",
+      action: "Selesai Manual",
+      targetId: so.nomor,
+      targetLabel: `${so.nomor} — ${so.customerNama}`,
+      payload: {
+        dismissedFromInvoiceList: true
+      },
+      requestedBy: session.nama,
+      tanggal: today(),
+      status: "Menunggu Approval GM"
+    }]);
     logAudit(store, session, {
       module: "Invoice",
       docNomor: so.nomor,
-      action: "Tandai Selesai (Manual)",
-      detail: "Disembunyikan dari SO ONGOING secara manual"
+      action: "Ajukan Selesai (Manual)",
+      detail: `Menunggu approval GM — ${so.customerNama}`
+    });
+  };
+  const approveSelesaiManual = async req => {
+    if (!await askConfirm(`Setujui ${req.targetLabel} sebagai Selesai (Manual)? SO ini akan disembunyikan dari SO ONGOING.`)) return;
+    setSalesOrders(prev => (prev || []).map(s => s.nomor === req.targetId ? {
+      ...s,
+      dismissedFromInvoiceList: true
+    } : s));
+    setEditRequests(editRequests.map(r => r.id === req.id ? {
+      ...r,
+      status: "Disetujui GM",
+      approvedBy: session.nama
+    } : r));
+    logAudit(store, session, {
+      module: "Invoice",
+      docNomor: req.targetId,
+      action: "Approve Selesai (Manual)",
+      detail: req.targetLabel
+    });
+  };
+  const rejectSelesaiManual = async req => {
+    const reason = await askPrompt("Alasan penolakan:");
+    if (!reason) return;
+    setEditRequests(editRequests.map(r => r.id === req.id ? {
+      ...r,
+      status: "Ditolak GM",
+      rejectReason: reason
+    } : r));
+    logAudit(store, session, {
+      module: "Invoice",
+      docNomor: req.targetId,
+      action: "Reject Selesai (Manual)",
+      detail: reason
     });
   };
   const restoreSOToInvoiceList = so => {
@@ -23965,72 +24116,7 @@ function InvoiceModule({
     "Disetujui GM": theme.green,
     "Ditolak GM": theme.red
   };
-  return /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      flexDirection: "column",
-      gap: 20
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "center",
-      flexWrap: "wrap",
-      gap: 12
-    }
-  }, /*#__PURE__*/React.createElement("h2", {
-    style: {
-      margin: 0,
-      color: theme.text
-    }
-  }, "Invoice"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 10
-    }
-  }, /*#__PURE__*/React.createElement(Select, {
-    value: filter,
-    onChange: setFilter,
-    options: ["Semua", "Belum Lunas", "Sebagian", "Lunas"].map(v => ({
-      value: v,
-      label: v
-    })),
-    style: {
-      width: 150
-    }
-  }), /*#__PURE__*/React.createElement(ExportExcelBtn, {
-    onClick: () => exportToExcel(filtered.map(i => ({
-      nomor: i.nomor,
-      tanggal: i.tanggal,
-      noSO: i.soNomor,
-      noPOClient: i.noPoClient || "-",
-      client: i.customerNama,
-      tipePembayaran: i.tipePembayaran,
-      jatuhTempo: i.tanggalJatuhTempo || "-",
-      noFakturPajak: i.noFakturPajak || "-",
-      total: i.total,
-      terbayar: i.terbayar || 0,
-      statusBayar: i.statusBayar,
-      statusApproval: i.statusApproval
-    })), "Invoice.xlsx", "Invoice")
-  }), (isFinance || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
-    variant: "ghost",
-    onClick: () => setModal(true)
-  }, "+ Buat Invoice Manual"))), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12,
-      color: theme.muted,
-      background: theme.surface,
-      padding: "8px 14px",
-      borderRadius: 8,
-      border: `1px dashed ${theme.border}`
-    }
-  }, "🔒 Description part bersifat internal — tidak ditampilkan di Invoice yang diterima client. Invoice baru wajib disetujui GM sebelum dikirim ke client."), /*#__PURE__*/React.createElement(Input, {
-    placeholder: "Cari no. invoice / no. SO / client...",
-    value: search,
-    onChange: setSearch
-  }), (isFinance || isOwnerLike) && /*#__PURE__*/React.createElement(CollapsibleSection, {
+  const sectionOngoing = (isFinance || isOwnerLike) && /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "SO ONGOING (Bisa Dibuat Invoice — DP1/DP2/Final)",
     count: invSoOngoingList.length,
     badgeColor: theme.cyan,
@@ -24074,13 +24160,15 @@ function InvoiceModule({
     }, /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       onClick: () => startInvoiceFromSO(so)
-    }, "+ Buat Invoice"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+    }, "+ Buat Invoice"), (isFinance || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "ghost",
-      title: "Tandai selesai secara manual bila SO ini sudah tidak perlu di-invoice lagi tapi masih muncul di sini",
+      title: pendingSelesaiManual.some(r => r.targetId === so.nomor) ? "Sudah diajukan, menunggu approval GM" : "Ajukan selesai secara manual (butuh approval GM) bila SO ini sudah tidak perlu di-invoice lagi tapi masih muncul di sini",
+      disabled: pendingSelesaiManual.some(r => r.targetId === so.nomor),
       onClick: () => dismissSOFromInvoiceList(so)
-    }, "✓ Selesai (Manual)")));
-  })), (isFinance || isOwnerLike) && dismissedSO.length > 0 && /*#__PURE__*/React.createElement(CollapsibleSection, {
+    }, pendingSelesaiManual.some(r => r.targetId === so.nomor) ? "⏳ Menunggu Approval GM" : "✓ Selesai (Manual)")));
+  }));
+  const sectionDismissed = (isFinance || isOwnerLike) && dismissedSO.length > 0 && /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "SO Ditandai Selesai (Manual)",
     count: dismissedSO.length,
     badgeColor: theme.muted,
@@ -24109,7 +24197,8 @@ function InvoiceModule({
     size: "sm",
     variant: "ghost",
     onClick: () => restoreSOToInvoiceList(so)
-  }, "↩ Kembalikan ke SO ONGOING")))), isOwnerLike && /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, "↩ Kembalikan ke SO ONGOING"))));
+  const sectionApprovalGM = isOwnerLike && /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "Approval GM — Menunggu Keputusan",
     count: invoices.filter(i => i.statusApproval === "Menunggu Approval GM").length,
     badgeColor: theme.yellow,
@@ -24160,83 +24249,8 @@ function InvoiceModule({
     size: "sm",
     variant: "danger",
     onClick: () => gmReject(inv)
-  }, "✗ Tolak"))))), /*#__PURE__*/React.createElement(Modal, {
-    open: !!reviewNewInv,
-    title: reviewNewInv ? `Detail / Edit Invoice — ${reviewNewInv.nomor}` : "",
-    onClose: () => setReviewNewInv(null)
-  }, reviewNewInv && reviewNewInvForm && /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      flexDirection: "column",
-      gap: 14
-    }
-  }, /*#__PURE__*/React.createElement("p", {
-    style: {
-      margin: 0,
-      fontSize: 12,
-      color: theme.muted
-    }
-  }, reviewNewInv.customerNama, " — ", /*#__PURE__*/React.createElement("strong", {
-    style: {
-      color: theme.green
-    }
-  }, fmt(reviewNewInv.total))), /*#__PURE__*/React.createElement(Select, {
-    label: "Tipe Pembayaran",
-    value: reviewNewInvForm.tipePembayaran,
-    onChange: v => setReviewNewInvForm({
-      ...reviewNewInvForm,
-      tipePembayaran: v
-    }),
-    options: [{
-      value: "COD",
-      label: "COD"
-    }, {
-      value: "TEMPO",
-      label: "TEMPO"
-    }]
-  }), reviewNewInvForm.tipePembayaran === "TEMPO" && /*#__PURE__*/React.createElement(Input, {
-    label: "Tanggal Jatuh Tempo",
-    type: "date",
-    value: reviewNewInvForm.tanggalJatuhTempo,
-    onChange: v => setReviewNewInvForm({
-      ...reviewNewInvForm,
-      tanggalJatuhTempo: v
-    })
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "No. Faktur Pajak",
-    value: reviewNewInvForm.noFakturPajak,
-    onChange: v => setReviewNewInvForm({
-      ...reviewNewInvForm,
-      noFakturPajak: v
-    })
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "Catatan",
-    multiline: true,
-    value: reviewNewInvForm.catatan,
-    onChange: v => setReviewNewInvForm({
-      ...reviewNewInvForm,
-      catatan: v
-    })
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 10,
-      justifyContent: "flex-end",
-      flexWrap: "wrap"
-    }
-  }, /*#__PURE__*/React.createElement(Btn, {
-    variant: "ghost",
-    onClick: () => setReviewNewInv(null)
-  }, "Tutup"), /*#__PURE__*/React.createElement(Btn, {
-    variant: "ghost",
-    onClick: saveReviewNewInv
-  }, "💾 Simpan Perubahan"), /*#__PURE__*/React.createElement(Btn, {
-    variant: "danger",
-    onClick: reviewNewInvReject
-  }, "✗ Tolak"), /*#__PURE__*/React.createElement(Btn, {
-    variant: "success",
-    onClick: reviewNewInvApprove
-  }, "✓ Approve")))), pendingInvEdits.length > 0 && /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, "✗ Tolak")))));
+  const sectionApprovalEdit = pendingInvEdits.length > 0 && /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "Menunggu Approval Edit (GM)",
     count: pendingInvEdits.length,
     badgeColor: theme.yellow,
@@ -24277,83 +24291,45 @@ function InvoiceModule({
     size: "sm",
     variant: "success",
     onClick: () => approveInvEdit(r)
-  }, "✓ Approve"))))), /*#__PURE__*/React.createElement(Modal, {
-    open: !!reviewInvEdit,
-    title: reviewInvEdit ? `Detail / Edit Pengajuan — ${reviewInvEdit.targetLabel}` : "",
-    onClose: () => setReviewInvEdit(null)
-  }, reviewInvEdit && reviewInvEditForm && /*#__PURE__*/React.createElement("div", {
+  }, "✓ Approve")))));
+  const sectionApprovalSelesaiManual = isOwnerLike && pendingSelesaiManual.length > 0 && /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "Menunggu Approval Selesai (Manual)",
+    count: pendingSelesaiManual.length,
+    badgeColor: theme.yellow,
+    storageKey: "inv_pending_selesai_manual",
+    defaultOpen: true
+  }, pendingSelesaiManual.map(r => /*#__PURE__*/React.createElement("div", {
+    key: r.id,
     style: {
       display: "flex",
-      flexDirection: "column",
-      gap: 14
+      justifyContent: "space-between",
+      alignItems: "center",
+      padding: "10px 0",
+      borderBottom: `1px solid ${theme.border}`
     }
-  }, /*#__PURE__*/React.createElement("p", {
+  }, /*#__PURE__*/React.createElement("div", {
     style: {
-      margin: 0,
-      fontSize: 12,
-      color: theme.muted
+      fontSize: 13
     }
-  }, "Diajukan oleh ", reviewInvEdit.requestedBy, " (", reviewInvEdit.tanggal, ")"), /*#__PURE__*/React.createElement(Input, {
-    label: "No. Invoice",
-    value: reviewInvEditForm.nomor || "",
-    onChange: v => setReviewInvEditForm({
-      ...reviewInvEditForm,
-      nomor: v
-    })
-  }), /*#__PURE__*/React.createElement(Select, {
-    label: "Tipe Pembayaran",
-    value: reviewInvEditForm.tipePembayaran,
-    onChange: v => setReviewInvEditForm({
-      ...reviewInvEditForm,
-      tipePembayaran: v
-    }),
-    options: [{
-      value: "COD",
-      label: "COD"
-    }, {
-      value: "TEMPO",
-      label: "TEMPO"
-    }]
-  }), reviewInvEditForm.tipePembayaran === "TEMPO" && /*#__PURE__*/React.createElement(Input, {
-    label: "Tanggal Jatuh Tempo",
-    type: "date",
-    value: reviewInvEditForm.tanggalJatuhTempo,
-    onChange: v => setReviewInvEditForm({
-      ...reviewInvEditForm,
-      tanggalJatuhTempo: v
-    })
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "No. Faktur Pajak",
-    value: reviewInvEditForm.noFakturPajak,
-    onChange: v => setReviewInvEditForm({
-      ...reviewInvEditForm,
-      noFakturPajak: v
-    })
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "Catatan",
-    multiline: true,
-    value: reviewInvEditForm.catatan,
-    onChange: v => setReviewInvEditForm({
-      ...reviewInvEditForm,
-      catatan: v
-    })
-  }), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, r.targetLabel), " — diajukan oleh ", r.requestedBy, " (", r.tanggal, ")"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
-      gap: 10,
-      justifyContent: "flex-end",
-      flexWrap: "wrap"
+      gap: 8
     }
   }, /*#__PURE__*/React.createElement(Btn, {
-    variant: "ghost",
-    onClick: () => setReviewInvEdit(null)
-  }, "Tutup"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
     variant: "danger",
-    onClick: () => rejectInvEdit(reviewInvEdit)
+    onClick: () => rejectSelesaiManual(r)
   }, "✗ Tolak"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
     variant: "success",
-    onClick: () => approveInvEdit(reviewInvEdit, reviewInvEditForm)
-  }, "✓ Approve")))), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    onClick: () => approveSelesaiManual(r)
+  }, "✓ Approve")))));
+  const sectionDaftar = /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "Daftar Invoice",
     count: filtered.length,
     badgeColor: theme.accent,
@@ -24370,7 +24346,13 @@ function InvoiceModule({
           cursor: "pointer"
         },
         onClick: () => setDetail(inv)
-      }, inv.nomor), inv.tanggal, inv.soNomor, inv.noPoClient || "-", inv.terminLabel ? /*#__PURE__*/React.createElement(Badge, {
+      }, inv.nomor), inv.tanggal, inv.soNomor, inv.noPoClient ? /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: theme.accentLight,
+          cursor: "pointer"
+        },
+        onClick: () => setDetailPO(inv)
+      }, inv.noPoClient) : "-", inv.terminLabel ? /*#__PURE__*/React.createElement(Badge, {
         color: theme.purple
       }, inv.terminLabel, " (", inv.terminPercent, "%)") : /*#__PURE__*/React.createElement(Badge, {
         color: theme.muted
@@ -24597,7 +24579,8 @@ function InvoiceModule({
     onClick: () => setEditInv(null)
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     onClick: submitEditInv
-  }, "Ajukan Perubahan"))))), (isFinance || isOwnerLike) && /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }, "Ajukan Perubahan")))));
+  const sectionPembayaran = (isFinance || isOwnerLike) && /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "Pembayaran",
     count: filtered.filter(i => i.statusBayar !== "Lunas" && i.statusApproval === "Disetujui GM").length,
     badgeColor: theme.red,
@@ -24629,7 +24612,226 @@ function InvoiceModule({
     size: "sm",
     variant: "success",
     onClick: () => openBayar(inv)
-  }, "Catat Pembayaran")))), /*#__PURE__*/React.createElement(Modal, {
+  }, "Catat Pembayaran"))));
+
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      flexWrap: "wrap",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("h2", {
+    style: {
+      margin: 0,
+      color: theme.text
+    }
+  }, "Invoice"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: filter,
+    onChange: setFilter,
+    options: ["Semua", "Belum Lunas", "Sebagian", "Lunas"].map(v => ({
+      value: v,
+      label: v
+    })),
+    style: {
+      width: 150
+    }
+  }), /*#__PURE__*/React.createElement(ExportExcelBtn, {
+    onClick: () => exportToExcel(filtered.map(i => ({
+      nomor: i.nomor,
+      tanggal: i.tanggal,
+      noSO: i.soNomor,
+      noPOClient: i.noPoClient || "-",
+      client: i.customerNama,
+      tipePembayaran: i.tipePembayaran,
+      jatuhTempo: i.tanggalJatuhTempo || "-",
+      noFakturPajak: i.noFakturPajak || "-",
+      total: i.total,
+      terbayar: i.terbayar || 0,
+      statusBayar: i.statusBayar,
+      statusApproval: i.statusApproval
+    })), "Invoice.xlsx", "Invoice")
+  }), (isFinance || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setModal(true)
+  }, "+ Buat Invoice Manual"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      background: theme.surface,
+      padding: "8px 14px",
+      borderRadius: 8,
+      border: `1px dashed ${theme.border}`
+    }
+  }, "🔒 Description part bersifat internal — tidak ditampilkan di Invoice yang diterima client. Invoice baru wajib disetujui GM sebelum dikirim ke client."), /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari no. invoice / no. SO / client...",
+    value: search,
+    onChange: setSearch
+  }), sectionApprovalGM, sectionApprovalEdit, sectionApprovalSelesaiManual, sectionOngoing, sectionDismissed, sectionPembayaran, sectionDaftar, null, null, /*#__PURE__*/React.createElement(Modal, {
+    open: !!reviewNewInv,
+    title: reviewNewInv ? `Detail / Edit Invoice — ${reviewNewInv.nomor}` : "",
+    onClose: () => setReviewNewInv(null)
+  }, reviewNewInv && reviewNewInvForm && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, reviewNewInv.customerNama, " — ", /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.green
+    }
+  }, fmt(reviewNewInv.total))), /*#__PURE__*/React.createElement(Select, {
+    label: "Tipe Pembayaran",
+    value: reviewNewInvForm.tipePembayaran,
+    onChange: v => setReviewNewInvForm({
+      ...reviewNewInvForm,
+      tipePembayaran: v
+    }),
+    options: [{
+      value: "COD",
+      label: "COD"
+    }, {
+      value: "TEMPO",
+      label: "TEMPO"
+    }]
+  }), reviewNewInvForm.tipePembayaran === "TEMPO" && /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal Jatuh Tempo",
+    type: "date",
+    value: reviewNewInvForm.tanggalJatuhTempo,
+    onChange: v => setReviewNewInvForm({
+      ...reviewNewInvForm,
+      tanggalJatuhTempo: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "No. Faktur Pajak",
+    value: reviewNewInvForm.noFakturPajak,
+    onChange: v => setReviewNewInvForm({
+      ...reviewNewInvForm,
+      noFakturPajak: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Catatan",
+    multiline: true,
+    value: reviewNewInvForm.catatan,
+    onChange: v => setReviewNewInvForm({
+      ...reviewNewInvForm,
+      catatan: v
+    })
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end",
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setReviewNewInv(null)
+  }, "Tutup"), /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: saveReviewNewInv
+  }, "💾 Simpan Perubahan"), /*#__PURE__*/React.createElement(Btn, {
+    variant: "danger",
+    onClick: reviewNewInvReject
+  }, "✗ Tolak"), /*#__PURE__*/React.createElement(Btn, {
+    variant: "success",
+    onClick: reviewNewInvApprove
+  }, "✓ Approve")))), null, /*#__PURE__*/React.createElement(Modal, {
+    open: !!reviewInvEdit,
+    title: reviewInvEdit ? `Detail / Edit Pengajuan — ${reviewInvEdit.targetLabel}` : "",
+    onClose: () => setReviewInvEdit(null)
+  }, reviewInvEdit && reviewInvEditForm && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Diajukan oleh ", reviewInvEdit.requestedBy, " (", reviewInvEdit.tanggal, ")"), /*#__PURE__*/React.createElement(Input, {
+    label: "No. Invoice",
+    value: reviewInvEditForm.nomor || "",
+    onChange: v => setReviewInvEditForm({
+      ...reviewInvEditForm,
+      nomor: v
+    })
+  }), /*#__PURE__*/React.createElement(Select, {
+    label: "Tipe Pembayaran",
+    value: reviewInvEditForm.tipePembayaran,
+    onChange: v => setReviewInvEditForm({
+      ...reviewInvEditForm,
+      tipePembayaran: v
+    }),
+    options: [{
+      value: "COD",
+      label: "COD"
+    }, {
+      value: "TEMPO",
+      label: "TEMPO"
+    }]
+  }), reviewInvEditForm.tipePembayaran === "TEMPO" && /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal Jatuh Tempo",
+    type: "date",
+    value: reviewInvEditForm.tanggalJatuhTempo,
+    onChange: v => setReviewInvEditForm({
+      ...reviewInvEditForm,
+      tanggalJatuhTempo: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "No. Faktur Pajak",
+    value: reviewInvEditForm.noFakturPajak,
+    onChange: v => setReviewInvEditForm({
+      ...reviewInvEditForm,
+      noFakturPajak: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Catatan",
+    multiline: true,
+    value: reviewInvEditForm.catatan,
+    onChange: v => setReviewInvEditForm({
+      ...reviewInvEditForm,
+      catatan: v
+    })
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end",
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setReviewInvEdit(null)
+  }, "Tutup"), /*#__PURE__*/React.createElement(Btn, {
+    variant: "danger",
+    onClick: () => rejectInvEdit(reviewInvEdit)
+  }, "✗ Tolak"), /*#__PURE__*/React.createElement(Btn, {
+    variant: "success",
+    onClick: () => approveInvEdit(reviewInvEdit, reviewInvEditForm)
+  }, "✓ Approve")))), null, null, /*#__PURE__*/React.createElement(Modal, {
     open: !!bayarModal,
     title: editingPayIdx !== null ? `Revisi Penerimaan Pembayaran — ${bayarModal?.nomor}` : `Catat Penerimaan Pembayaran — ${bayarModal?.nomor}`,
     onClose: () => {
@@ -24745,8 +24947,10 @@ function InvoiceModule({
     }
   }, "No. Purchase Order (Client): ", /*#__PURE__*/React.createElement("strong", {
     style: {
-      color: theme.text
-    }
+      color: theme.accentLight,
+      cursor: "pointer"
+    },
+    onClick: () => setDetailPO(detail)
   }, detail.noPoClient)), detail.noFakturPajak && /*#__PURE__*/React.createElement("p", {
     style: {
       margin: 0,
@@ -25409,7 +25613,47 @@ function InvoiceModule({
     onClick: () => setFakturModal(null)
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     onClick: saveFaktur
-  }, "Simpan")))));
+  }, "Simpan")))), /*#__PURE__*/React.createElement(Modal, {
+    open: !!detailPO,
+    title: `Detail PO — ${detailPO?.noPoClient || "-"}`,
+    onClose: () => setDetailPO(null),
+    width: 900
+  }, detailPO && (() => {
+    const { so, linkedPOs } = poDetailFor(detailPO);
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 16
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "grid",
+        gridTemplateColumns: "1fr 1fr 1fr",
+        gap: 10,
+        fontSize: 13
+      }
+    }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+      style: { color: theme.muted }
+    }, "No. PO Client:"), " ", /*#__PURE__*/React.createElement("strong", { style: { color: theme.text } }, detailPO.noPoClient || "-")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+      style: { color: theme.muted }
+    }, "No. Sales Order:"), " ", /*#__PURE__*/React.createElement("strong", { style: { color: theme.text } }, detailPO.soNomor || "-")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+      style: { color: theme.muted }
+    }, "Client:"), " ", /*#__PURE__*/React.createElement("strong", { style: { color: theme.text } }, detailPO.customerNama || "-"))), so && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
+      style: { margin: "0 0 8px", color: theme.muted, fontSize: 13 }
+    }, "ITEM SALES ORDER"), /*#__PURE__*/React.createElement(Table, {
+      headers: ["Part/Unit Number", "Nama", "Qty", "Harga", "Subtotal"],
+      rows: (so.items || []).map(it => [it.partNumber || it.unitNumber || "-", it.partName || it.unitName || "-", fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)])
+    })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
+      style: { margin: "0 0 8px", color: theme.muted, fontSize: 13 }
+    }, "PURCHASE ORDER (KE SUPPLIER) YANG MEMENUHI SO INI"), /*#__PURE__*/React.createElement(Table, {
+      headers: ["No. PO", "Tipe", "Supplier", "Total", "Status"],
+      rows: linkedPOs.map(po => [po.nomor, po._tipe, po.supplierNama, po._tipe === "Overseas" ? fmtMoney(po.total, po.currency) : fmt(po.total), /*#__PURE__*/React.createElement(Badge, {
+        color: po.status === "Menunggu Approval GM" ? theme.yellow : theme.green
+      }, po.status)]),
+      emptyMsg: "Belum ada Purchase Order internal yang tertaut ke SO ini (mungkin semua stock tersedia tanpa perlu PO baru)."
+    })));
+  })()));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -30200,6 +30444,8 @@ function KomisiModule({ store, session }) {
   const [search, setSearch] = useState("");
   const [editSO, setEditSO] = useState(null); // SO being edited by superuser (override modal)
   const [editForm, setEditForm] = useState({ salesDiscountOverride: "", rateOverride: "" });
+  const [payRow, setPayRow] = useState(null); // row being paid (partial payment modal)
+  const [payForm, setPayForm] = useState({ tanggal: today(), jumlah: "" });
 
   const overrideFor = so => komisiOverrides.find(o => o.soNomor === so.nomor) || null;
 
@@ -30210,7 +30456,7 @@ function KomisiModule({ store, session }) {
   const filtered = search.trim() ? rows.filter(r => [r.so.nomor, r.so.customerNama, r.so.salesManagerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(search.trim().toLowerCase()))) : rows;
 
   const totalKomisi = filtered.reduce((s, r) => s + r.nilaiKomisi, 0);
-  const totalBelumDibayar = filtered.filter(r => !r.dibayar).reduce((s, r) => s + r.nilaiKomisi, 0);
+  const totalBelumDibayar = filtered.reduce((s, r) => s + r.sisaDibayar, 0);
 
   const openEdit = r => {
     setEditSO(r.so);
@@ -30235,16 +30481,44 @@ function KomisiModule({ store, session }) {
     setEditSO(null);
   };
 
-  const toggleDibayar = async r => {
+  // Komisi bisa dibayar bertahap (tidak selalu sekaligus) — buka modal untuk mencatat tanggal +
+  // jumlah pembayaran, ditambahkan ke riwayatPembayaran. Status Lunas/Sebagian/Belum Dibayar
+  // diturunkan otomatis dari total riwayatPembayaran vs nilaiKomisi (lihat computeKomisiForSO).
+  const openPay = r => {
     if (!isOwnerLike) return;
-    const willPay = !r.dibayar;
-    if (!await askConfirm(willPay ? `Tandai komisi ${r.so.nomor} (${fmt(r.nilaiKomisi)}) sebagai Sudah Dibayar?` : `Batalkan status Sudah Dibayar untuk ${r.so.nomor}?`)) return;
+    setPayRow(r);
+    setPayForm({ tanggal: today(), jumlah: r.sisaDibayar > 0 ? String(Math.round(r.sisaDibayar)) : "" });
+  };
+
+  const confirmPay = async () => {
+    const jumlah = Number(payForm.jumlah) || 0;
+    if (jumlah <= 0) return alert("Jumlah pembayaran harus lebih dari 0.");
+    if (!payForm.tanggal) return alert("Tanggal pembayaran wajib diisi.");
+    if (!await askConfirm(`Catat pembayaran komisi ${payRow.so.nomor} sebesar ${fmt(jumlah)} pada ${payForm.tanggal}?`)) return;
+    const existing = overrideFor(payRow.so);
+    const newRiwayat = [...(payRow.riwayatPembayaran || []), { tanggal: payForm.tanggal, jumlah, oleh: session.nama }];
+    const newSudah = newRiwayat.reduce((s, p) => s + (Number(p.jumlah) || 0), 0);
+    const lunas = newSudah >= payRow.nilaiKomisi - 0.5;
+    const patch = { riwayatPembayaran: newRiwayat, dibayar: lunas, dibayarTanggal: lunas ? payForm.tanggal : null, dibayarOleh: lunas ? session.nama : null };
+    if (existing) {
+      setKomisiOverrides(komisiOverrides.map(o => o.soNomor === payRow.so.nomor ? { ...o, ...patch } : o));
+    } else {
+      setKomisiOverrides([...komisiOverrides, { soNomor: payRow.so.nomor, salesDiscountOverride: null, rateOverride: null, ...patch }]);
+    }
+    setPayRow(null);
+  };
+
+  const undoLastPayment = async r => {
+    if (!isOwnerLike || !r.riwayatPembayaran.length) return;
+    const last = r.riwayatPembayaran[r.riwayatPembayaran.length - 1];
+    if (!await askConfirm(`Batalkan pembayaran terakhir ${r.so.nomor} (${fmt(last.jumlah)} pada ${last.tanggal || "-"})?`)) return;
     const existing = overrideFor(r.so);
-    const patch = { dibayar: willPay, dibayarTanggal: willPay ? today() : null, dibayarOleh: willPay ? session.nama : null };
+    const newRiwayat = r.riwayatPembayaran.slice(0, -1);
+    const newSudah = newRiwayat.reduce((s, p) => s + (Number(p.jumlah) || 0), 0);
+    const lunas = newSudah >= r.nilaiKomisi - 0.5;
+    const patch = { riwayatPembayaran: newRiwayat, dibayar: lunas, dibayarTanggal: lunas ? existing?.dibayarTanggal : null, dibayarOleh: lunas ? existing?.dibayarOleh : null };
     if (existing) {
       setKomisiOverrides(komisiOverrides.map(o => o.soNomor === r.so.nomor ? { ...o, ...patch } : o));
-    } else {
-      setKomisiOverrides([...komisiOverrides, { soNomor: r.so.nomor, salesDiscountOverride: null, rateOverride: null, ...patch }]);
     }
   };
 
@@ -30252,9 +30526,14 @@ function KomisiModule({ store, session }) {
     ? ["SO", "Tanggal", "Client", "Sales", "Nilai SO", "Sales Discount", "Tipe Client", "Rate", "Nilai Komisi", "Status"]
     : ["SO", "Tanggal", "Client", "Nilai SO", "Tipe Client", "Rate", "Nilai Komisi", "Status"];
 
+  const statusColor = s => s === "Lunas" ? theme.green : s === "Sebagian" ? theme.yellow : theme.muted;
+
   const rowsRendered = filtered.map(r => {
     const rateCell = React.createElement("span", { style: { color: r.rateIsOverridden ? theme.yellow : theme.text } }, `${r.rate}%${r.rateIsOverridden ? " *" : ""}`);
-    const statusCell = React.createElement(Badge, { color: r.dibayar ? theme.green : theme.muted }, r.dibayar ? "Sudah Dibayar" : "Belum Dibayar");
+    const statusCell = React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 2 } },
+      React.createElement(Badge, { color: statusColor(r.statusBayar) }, r.statusBayar),
+      r.statusBayar === "Sebagian" && React.createElement("span", { style: { fontSize: 11, color: theme.muted } }, `Terbayar ${fmt(r.sudahDibayar)} · Sisa ${fmt(r.sisaDibayar)}`)
+    );
     const nilaiKomisiCell = React.createElement("span", { style: { fontWeight: 700, color: theme.accentLight } }, fmt(r.nilaiKomisi));
     const typeBadge = React.createElement(Badge, { color: r.customerType === "NEW" ? theme.yellow : theme.cyan }, r.customerType === "NEW" ? "Baru" : "Repeat");
     if (!isOwnerLike) {
@@ -30265,8 +30544,9 @@ function KomisiModule({ store, session }) {
       onClick: () => openEdit(r)
     }, r.salesDiscount > 0 ? `${fmt(r.salesDiscount)}${r.salesDiscountIsOverridden ? " *" : ""}` : "- (edit)");
     const actionCell = React.createElement("div", { style: { display: "flex", gap: 6 } },
-      React.createElement(Btn, { size: "sm", variant: "ghost", onClick: () => openEdit(r) }, "✎"),
-      React.createElement(Btn, { size: "sm", variant: r.dibayar ? "ghost" : "success", onClick: () => toggleDibayar(r) }, r.dibayar ? "↺" : "✓ Bayar")
+      React.createElement(Btn, { size: "sm", variant: "ghost", title: "Edit Sales Discount/Rate", onClick: () => openEdit(r) }, "✎"),
+      r.statusBayar !== "Lunas" && React.createElement(Btn, { size: "sm", variant: "success", title: "Catat Pembayaran", onClick: () => openPay(r) }, "✓ Bayar"),
+      r.riwayatPembayaran.length > 0 && React.createElement(Btn, { size: "sm", variant: "ghost", title: "Batalkan pembayaran terakhir", onClick: () => undoLastPayment(r) }, "↺")
     );
     return [r.so.nomor, r.so.tanggal, r.so.customerNama, r.so.salesManagerNama || "-", fmt(r.nilaiSO), salesDiscCell, typeBadge, rateCell, nilaiKomisiCell, React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-start" } }, statusCell, actionCell)];
   });
@@ -30306,6 +30586,26 @@ function KomisiModule({ store, session }) {
         React.createElement("div", { style: { display: "flex", gap: 10, justifyContent: "flex-end" } },
           React.createElement(Btn, { variant: "ghost", onClick: () => setEditSO(null) }, "Batal"),
           React.createElement(Btn, { onClick: saveOverride }, "Simpan")
+        )
+      )
+    ),
+    isOwnerLike && React.createElement(Modal, { open: !!payRow, title: payRow ? `Catat Pembayaran Komisi — ${payRow.so.nomor}` : "", onClose: () => setPayRow(null), width: 420 },
+      payRow && React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 14 } },
+        React.createElement("p", { style: { fontSize: 12, color: theme.muted, margin: 0 } },
+          `Nilai Komisi ${fmt(payRow.nilaiKomisi)} · Sudah dibayar ${fmt(payRow.sudahDibayar)} · Sisa ${fmt(payRow.sisaDibayar)}`),
+        payRow.riwayatPembayaran.length > 0 && React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4 } },
+          React.createElement("span", { style: { fontSize: 11, color: theme.muted, fontWeight: 600 } }, "RIWAYAT PEMBAYARAN"),
+          payRow.riwayatPembayaran.map((p, i) => React.createElement("div", { key: i, style: { fontSize: 12, color: theme.text, display: "flex", justifyContent: "space-between" } },
+            React.createElement("span", null, p.tanggal || "-"),
+            React.createElement("span", null, fmt(p.jumlah)),
+            React.createElement("span", { style: { color: theme.muted } }, p.oleh || "-")
+          ))
+        ),
+        React.createElement(Input, { label: "Tanggal Pembayaran", type: "date", value: payForm.tanggal, onChange: v => setPayForm({ ...payForm, tanggal: v }) }),
+        React.createElement(Input, { label: "Jumlah Pembayaran", type: "number", value: payForm.jumlah, onChange: v => setPayForm({ ...payForm, jumlah: v }), placeholder: "Bisa parsial, tidak harus sekaligus" }),
+        React.createElement("div", { style: { display: "flex", gap: 10, justifyContent: "flex-end" } },
+          React.createElement(Btn, { variant: "ghost", onClick: () => setPayRow(null) }, "Batal"),
+          React.createElement(Btn, { variant: "success", onClick: confirmPay }, "Simpan Pembayaran")
         )
       )
     )
@@ -34363,8 +34663,11 @@ function JurnalModule({
     poOverseas,
     payrollRuns,
     tickets,
-    invoices
+    invoices,
+    coa,
+    setCoa
   } = store;
+  const SELISIH_KURS_COA_KODE = "OPS-013";
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director" || session.role === "finance";
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState(null);
@@ -34467,6 +34770,96 @@ function JurnalModule({
     });
     if (autoEntries.length > 0) setJurnal(prev => [...prev, ...autoEntries]);
   }, [poLocal, poOverseas, payrollRuns, tickets, invoices]);
+
+  // ONE-TIME BACKFILL — root cause of "Jurnal masih tercatat Rp padahal PO Overseas pakai mata uang
+  // asing": the sync effect above only sets currency/kursReferensi/nominal when an entry is FIRST
+  // created (idempotent via existingSourceIds) and never revisits it afterward, so any PO Overseas
+  // jurnal entry synced before the currency field existed got permanently stuck with currency:"IDR",
+  // and ANY jurnal entry (Lokal or Overseas) whose source PO later grew (e.g. biayaTambahan/ongkir
+  // added after the PO was first created) keeps showing the PO's OLD, smaller total forever.
+  // Confirmed directly against production data: 17 of 26 PO-Overseas-sourced entries had a currency
+  // mismatch, and 3 had a stale nominal (all missing biayaTambahan added after entry creation, with
+  // no riwayatPembayaran recorded — i.e. no partial-payment history that truing up would clobber).
+  // Both are corrected here, for "Belum Lunas" entries only — an already-"Lunas" entry's historical
+  // payment figures are left untouched since they reflect whatever was actually true at the time it
+  // was paid.
+  useEffect(() => {
+    const fixes = [];
+    jurnal.forEach(j => {
+      if (j.status !== "Belum Lunas") return;
+      if (j.sourceModule === "PO Overseas") {
+        const po = poOverseas.find(p => p.nomor === j.sourceId);
+        if (!po) return;
+        const currencyMismatch = po.currency && po.currency !== j.currency;
+        const nominalMismatch = typeof po.total === "number" && Math.abs(po.total - (j.nominal || 0)) > 0.5;
+        if (currencyMismatch || nominalMismatch) fixes.push({
+          id: j.id,
+          currency: po.currency || j.currency,
+          kursReferensi: po.kursReferensi || null,
+          ...(nominalMismatch ? { nominal: po.total } : {})
+        });
+      } else if (j.sourceModule === "PO Lokal") {
+        const po = poLocal.find(p => p.nomor === j.sourceId);
+        if (!po) return;
+        if (typeof po.total === "number" && Math.abs(po.total - (j.nominal || 0)) > 0.5) fixes.push({
+          id: j.id,
+          nominal: po.total
+        });
+      }
+    });
+    if (fixes.length > 0) {
+      setJurnal(prev => prev.map(j => {
+        const fix = fixes.find(f => f.id === j.id);
+        return fix ? { ...j, ...fix } : j;
+      }));
+    }
+  }, [jurnal, poOverseas, poLocal]);
+
+  // ONE-TIME BACKFILL #2 — root cause of Hutang/Piutang Berjalan being wildly overstated: the PO
+  // Lokal/Overseas payment forms let a PO be marked "Sudah Dibayar" directly (outside Jurnal's own
+  // bank-tagged Tandai Lunas flow), and nothing ever told the auto-created Jurnal entry about it —
+  // it just stayed "Belum Lunas" forever even though the underlying PO was fully paid. Confirmed
+  // directly against production data: 76 PO-sourced jurnal entries (mostly PO Lokal) were stuck this
+  // way. Synced straight to "Lunas" here, same convention as the pre-existing invoice auto-sync
+  // above (paidBy tagged as historical, no bank selected) since we don't retroactively know which
+  // account these older payments actually went through, and this is a paper reconciliation of what
+  // already happened, not a fresh bank movement to post to Rekonsiliasi Bank.
+  useEffect(() => {
+    const fixes = [];
+    jurnal.forEach(j => {
+      if (j.status !== "Belum Lunas") return;
+      const po = j.sourceModule === "PO Overseas" ? poOverseas.find(p => p.nomor === j.sourceId)
+        : j.sourceModule === "PO Lokal" ? poLocal.find(p => p.nomor === j.sourceId)
+        : null;
+      if (po && po.statusBayar === "Sudah Dibayar") fixes.push({
+        id: j.id,
+        status: "Lunas",
+        metodeBayar: null,
+        paidBy: "(riwayat sebelum Rekonsiliasi Bank)",
+        paidDate: po.tanggalBayar || po.paidDate || j.tanggal
+      });
+    });
+    if (fixes.length > 0) {
+      setJurnal(prev => prev.map(j => {
+        const fix = fixes.find(f => f.id === j.id);
+        return fix ? { ...j, ...fix } : j;
+      }));
+    }
+  }, [jurnal, poOverseas, poLocal]);
+
+  // Auto-provision the "Selisih Kurs" (currency exchange gain/loss) COA account the first time
+  // anyone opens Jurnal — it doesn't exist in older installs' seeded COA, and every PO Overseas
+  // payment now posts its own gain/loss here as a separate, auditable entry (see confirmPayModal).
+  useEffect(() => {
+    if (!coa.some(c => c.kode === SELISIH_KURS_COA_KODE)) {
+      setCoa(prev => prev.some(c => c.kode === SELISIH_KURS_COA_KODE) ? prev : [...prev, {
+        kode: SELISIH_KURS_COA_KODE,
+        nama: "Selisih Kurs",
+        kategori: "Finance",
+        perOrang: false
+      }]);
+    }
+  }, [coa]);
   const save = () => {
     if (!form.keterangan || !form.nominal) return alert("Keterangan dan nominal wajib diisi");
     setJurnal([...jurnal, {
@@ -34493,6 +34886,14 @@ function JurnalModule({
   // BCA/MANDIRI). Foreign-currency entries (PO Overseas) additionally ask for the Kurs (rate) used
   // for THIS payment, since that's what actually determines the IDR amount leaving the bank and
   // (if a Kurs Referensi was set on the PO) the resulting selisih kurs gain/loss.
+  // FOREIGN-CURRENCY (PO Overseas) entries can now be paid in installments — each installment
+  // (DP/cicilan/pelunasan) carries its own kurs, since that's how these are actually paid in
+  // practice and the rate genuinely moves between payments. `riwayatPembayaran` accumulates every
+  // installment; the entry only flips to "Lunas" once the cumulative jumlah covers entry.nominal.
+  // IDR-only entries are untouched by this — they keep the original single-shot Tandai Lunas flow.
+  const isForeignEntry = entry => !!(entry.currency && entry.currency !== "IDR");
+  const sudahDibayar = entry => (entry.riwayatPembayaran || []).reduce((s, r) => s + (r.jumlah || 0), 0);
+  const sisaBayar = entry => Math.max(0, (entry.nominal || 0) - sudahDibayar(entry));
   const [payModal, setPayModal] = useState(null); // { entry, mode: 'lunas'|'edit', metode, tanggal, kursBayar, nominal, keterangan }
   const openLunas = (entry, metode) => setPayModal({
     entry,
@@ -34500,7 +34901,7 @@ function JurnalModule({
     metode,
     tanggal: today(),
     kursBayar: entry.kursBayar || entry.kursReferensi || "",
-    nominal: entry.nominal,
+    nominal: isForeignEntry(entry) ? sisaBayar(entry) : entry.nominal,
     keterangan: entry.keterangan
   });
   const openEditEntry = entry => setPayModal({
@@ -34553,27 +34954,105 @@ function JurnalModule({
       keterangan
     } = payModal;
     if (!tanggal) return alert("Tanggal wajib diisi");
-    const isForeign = entry.currency && entry.currency !== "IDR";
+    const isForeign = isForeignEntry(entry);
     if (isForeign && !kursBayar) return alert(`Isi Kurs (IDR per 1 ${entry.currency}) yang dipakai untuk pembayaran ini`);
     const nominalNum = parseFloat(nominal) || 0;
     const kursNum = parseFloat(kursBayar) || 0;
     const nominalIDR = isForeign ? nominalNum * kursNum : nominalNum;
     const selisihKurs = isForeign && entry.kursReferensi ? (kursNum - entry.kursReferensi) * nominalNum : null;
+
+    if (isForeign && mode === "lunas") {
+      // Installment payment — append to riwayatPembayaran instead of overwriting the entry, so
+      // every payment's own kurs (and the resulting gain/loss vs kursReferensi) is preserved.
+      if (nominalNum <= 0) return alert(`Isi jumlah pembayaran (${entry.currency})`);
+      const remaining = sisaBayar(entry);
+      if (nominalNum > remaining + 0.01) return alert(`Jumlah pembayaran (${entry.currency} ${fmtNum(nominalNum)}) melebihi sisa yang harus dibayar (${entry.currency} ${fmtNum(remaining)}).`);
+      const payRecord = {
+        tanggal,
+        jumlah: nominalNum,
+        kurs: kursNum,
+        nominalIDR,
+        selisihKurs,
+        metode,
+        oleh: session.nama
+      };
+      const newRiwayat = [...(entry.riwayatPembayaran || []), payRecord];
+      const newSisa = Math.max(0, remaining - nominalNum);
+      const nowLunas = newSisa <= 0.01;
+      const updated = {
+        ...entry,
+        keterangan,
+        riwayatPembayaran: newRiwayat,
+        kursBayar: kursNum,
+        ...(nowLunas ? {
+          status: "Lunas",
+          metodeBayar: metode,
+          paidBy: session.nama,
+          paidDate: tanggal,
+          nominalIDR: newRiwayat.reduce((s, r) => s + r.nominalIDR, 0),
+          selisihKurs: newRiwayat.reduce((s, r) => s + (r.selisihKurs || 0), 0)
+        } : {})
+      };
+      const arr = [...jurnal];
+      arr[jurnal.indexOf(entry)] = updated;
+      // Selisih kurs is posted as its OWN Jurnal entry under the "Selisih Kurs" COA account — a
+      // real, auditable gain/loss transaction, not just a number on the PO's entry — per explicit
+      // request. It's a paper recognition of what already happened at time of payment, not a fresh
+      // bank movement, so it's created straight as "Lunas" and never synced to Rekonsiliasi Bank.
+      const kursEntries = selisihKurs && Math.abs(selisihKurs) > 0.5 ? [{
+        id: "JRN-" + uid(),
+        tanggal,
+        kategori: "Selisih Kurs",
+        keterangan: `Selisih Kurs ${entry.sourceModule || ""} ${entry.sourceId || entry.id} — bayar ${entry.currency} ${fmtNum(nominalNum)} @ ${fmtNum(kursNum)} (ref ${fmtNum(entry.kursReferensi)})`,
+        nominal: Math.abs(selisihKurs),
+        currency: "IDR",
+        coaKode: SELISIH_KURS_COA_KODE,
+        sourceId: `${entry.id}-KURS-${newRiwayat.length}`,
+        sourceModule: "Selisih Kurs",
+        tipe: selisihKurs >= 0 ? "Pemasukan" : "Pengeluaran",
+        status: "Lunas",
+        metodeBayar: null,
+        paidBy: session.nama,
+        paidDate: tanggal,
+        autoGenerated: true
+      }] : [];
+      setJurnal([...arr, ...kursEntries]);
+      syncBankRecon(updated, metode, tanggal, nominalIDR);
+      logAudit(store, session, {
+        module: "Jurnal",
+        docNomor: entry.id,
+        action: nowLunas ? "Tandai Lunas" : "Catat Pembayaran (Sebagian)",
+        detail: `${entry.keterangan} — ${metode} — ${entry.currency} ${fmtNum(nominalNum)} @ kurs ${fmtNum(kursNum)} (${fmt(nominalIDR)})${selisihKurs ? ` — Selisih Kurs: ${fmt(selisihKurs)}` : ""}${nowLunas ? "" : ` — Sisa: ${entry.currency} ${fmtNum(newSisa)}`}`
+      });
+      setPayModal(null);
+      return;
+    }
+
     const arr = [...jurnal];
     const idx = jurnal.indexOf(entry);
+    // A foreign entry with riwayatPembayaran already has its correct AGGREGATE nominalIDR/selisihKurs
+    // (sum of each installment's own kurs — see confirmPayModal's isForeign&&mode==='lunas' branch
+    // above). This generic edit path predates installments and would otherwise recompute those from
+    // a single nominal/kursBayar pair, silently overwriting the correct aggregated figures with a
+    // wrong single-shot approximation. So for these entries, editing here only touches
+    // keterangan/metode/tanggal — nominal, kursBayar, nominalIDR and selisihKurs stay untouched;
+    // to correct an individual installment's amount/kurs, remove/re-add via riwayatPembayaran instead.
+    const hasRiwayat = isForeign && (entry.riwayatPembayaran || []).length > 0;
     const updated = {
       ...entry,
       keterangan,
-      nominal: nominalNum,
       status: "Lunas",
       metodeBayar: metode,
       paidBy: session.nama,
       paidDate: tanggal,
-      ...(isForeign ? {
-        kursBayar: kursNum,
-        nominalIDR,
-        selisihKurs
-      } : {})
+      ...(hasRiwayat ? {} : {
+        nominal: nominalNum,
+        ...(isForeign ? {
+          kursBayar: kursNum,
+          nominalIDR,
+          selisihKurs
+        } : {})
+      })
     };
     arr[idx] = updated;
     setJurnal(arr);
@@ -34629,14 +35108,19 @@ function JurnalModule({
   const filtered = jurnal.filter(matchesSearch).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const ongoing = filtered.filter(j => j.status === "Belum Lunas");
   const closed = filtered.filter(j => j.status === "Lunas");
-  const totalHutangBerjalan = jurnal.filter(j => j.status === "Belum Lunas" && j.tipe !== "Pemasukan").reduce((s, j) => s + j.nominal, 0);
-  const totalPiutangBerjalan = jurnal.filter(j => j.status === "Belum Lunas" && j.tipe === "Pemasukan").reduce((s, j) => s + j.nominal, 0);
+  // Foreign-currency entries can be partially paid while still "Belum Lunas" (riwayatPembayaran) —
+  // use sisaBayar (outstanding balance), not the full original nominal, so these cards don't
+  // overstate hutang/piutang berjalan by the portion already paid.
+  const outstandingNominal = j => isForeignEntry(j) ? sisaBayar(j) : j.nominal;
+  const totalHutangBerjalan = jurnal.filter(j => j.status === "Belum Lunas" && j.tipe !== "Pemasukan").reduce((s, j) => s + outstandingNominal(j), 0);
+  const totalPiutangBerjalan = jurnal.filter(j => j.status === "Belum Lunas" && j.tipe === "Pemasukan").reduce((s, j) => s + outstandingNominal(j), 0);
   const kategoriColor = {
     "Purchase Order Lokal": theme.purple,
     "Purchase Order Overseas": theme.yellow,
     Payroll: theme.green,
     "Tiket Perjalanan": theme.cyan,
     "Pembayaran Invoice": theme.accent,
+    "Selisih Kurs": theme.pink || theme.purple,
     Lainnya: theme.muted
   };
 
@@ -34680,6 +35164,8 @@ function JurnalModule({
       kategori: j.kategori,
       keterangan: j.keterangan,
       nominal: j.nominal,
+      sudahDibayar: isForeignEntry(j) ? sudahDibayar(j) : (j.status === "Lunas" ? j.nominal : 0),
+      sisa: isForeignEntry(j) ? sisaBayar(j) : (j.status === "Lunas" ? 0 : j.nominal),
       currency: j.currency || "IDR",
       status: j.status,
       metodeBayar: j.metodeBayar || ""
@@ -34747,7 +35233,13 @@ function JurnalModule({
         cursor: "pointer"
       },
       onClick: () => setDetail(j)
-    }, j.keterangan), fmtMoney(j.nominal, j.currency), /*#__PURE__*/React.createElement("div", {
+    }, j.keterangan), (j.riwayatPembayaran || []).length > 0 ? /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", null, fmtMoney(j.nominal, j.currency)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        color: theme.yellow,
+        marginTop: 2
+      }
+    }, "Sudah dibayar ", fmtMoney(sudahDibayar(j), j.currency), " · Sisa ", fmtMoney(sisaBayar(j), j.currency))) : fmtMoney(j.nominal, j.currency), /*#__PURE__*/React.createElement("div", {
       style: {
         display: "flex",
         gap: 6,
@@ -34761,7 +35253,7 @@ function JurnalModule({
       key: m,
       size: "sm",
       variant: "success",
-      title: `Tandai Lunas via ${m}`,
+      title: isForeignEntry(j) ? `Catat Pembayaran via ${m}` : `Tandai Lunas via ${m}`,
       style: {
         padding: "4px 8px"
       },
@@ -34913,7 +35405,26 @@ function JurnalModule({
       style: {
         color: detail.selisihKurs >= 0 ? theme.green : theme.red
       }
-    }, detail.selisihKurs >= 0 ? "Untung " : "Rugi ", fmt(Math.abs(detail.selisihKurs)))))), /*#__PURE__*/React.createElement("p", {
+    }, detail.selisihKurs >= 0 ? "Untung " : "Rugi ", fmt(Math.abs(detail.selisihKurs)))))), (detail.riwayatPembayaran || []).length > 0 && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
+      style: {
+        margin: "0 0 8px",
+        color: theme.muted,
+        fontSize: 13
+      }
+    }, "RIWAYAT PEMBAYARAN (per installment, kurs berbeda-beda)"), /*#__PURE__*/React.createElement(Table, {
+      headers: ["Tanggal", `Jumlah (${detail.currency})`, "Kurs", "≈ IDR", "Selisih Kurs", "Metode", "Oleh"],
+      rows: detail.riwayatPembayaran.map(r => [r.tanggal, fmtNum(r.jumlah), fmtNum(r.kurs), fmt(r.nominalIDR), r.selisihKurs !== null && r.selisihKurs !== undefined ? /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: r.selisihKurs >= 0 ? theme.green : theme.red
+        }
+      }, r.selisihKurs >= 0 ? "Untung " : "Rugi ", fmt(Math.abs(r.selisihKurs))) : "-", r.metode, r.oleh])
+    }), detail.status !== "Lunas" && /*#__PURE__*/React.createElement("p", {
+      style: {
+        margin: "8px 0 0",
+        fontSize: 12,
+        color: theme.yellow
+      }
+    }, "Sisa yang harus dibayar: ", /*#__PURE__*/React.createElement("strong", null, fmtMoney(sisaBayar(detail), detail.currency)))), /*#__PURE__*/React.createElement("p", {
       style: {
         margin: 0,
         fontSize: 13,
@@ -35063,7 +35574,7 @@ function JurnalModule({
     onClick: save
   }, "Simpan")))), /*#__PURE__*/React.createElement(Modal, {
     open: !!payModal,
-    title: payModal?.mode === "lunas" ? `Tandai Lunas via ${payModal.metode} — ${payModal.entry.id}` : `Edit Entry — ${payModal?.entry?.id}`,
+    title: payModal?.mode === "lunas" ? `${payModal.entry && isForeignEntry(payModal.entry) ? "Catat Pembayaran" : "Tandai Lunas"} via ${payModal.metode} — ${payModal.entry.id}` : `Edit Entry — ${payModal?.entry?.id}`,
     onClose: () => setPayModal(null),
     width: 480
   }, payModal && /*#__PURE__*/React.createElement("div", {
@@ -35085,7 +35596,17 @@ function JurnalModule({
       ...payModal,
       keterangan: v
     })
-  }), /*#__PURE__*/React.createElement(Input, {
+  }), payModal.mode === "lunas" && isForeignEntry(payModal.entry) && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Sisa yang harus dibayar: ", /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, fmtMoney(sisaBayar(payModal.entry), payModal.entry.currency)), " — bisa dibayar bertahap, isi jumlah yang dibayar SEKARANG saja."), /*#__PURE__*/React.createElement(Input, {
     label: `Nominal${payModal.entry.currency && payModal.entry.currency !== "IDR" ? ` (${payModal.entry.currency})` : " (Rp)"}`,
     type: "number",
     value: payModal.nominal,
@@ -35142,7 +35663,7 @@ function JurnalModule({
     onClick: () => setPayModal(null)
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     onClick: payModal.mode === "lunas" || payModal.entry.status === "Lunas" ? confirmPayModal : savePlainEdit
-  }, payModal.mode === "lunas" ? "Konfirmasi Lunas" : "Simpan")))));
+  }, payModal.mode === "lunas" ? isForeignEntry(payModal.entry) ? "Konfirmasi Pembayaran" : "Konfirmasi Lunas" : "Simpan")))));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
