@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-10.1";
+const APP_BUILD = "2026-08-10.2";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -1049,12 +1049,12 @@ const ROLE_DEFS = {
   finance_director: {
     label: "Finance Director",
     color: "#f59e0b",
-    modules: ["dashboard", "invoice", "payroll", "customer", "supplier", "financial_dashboard", "client_history", "attendance", "jurnal", "bank_recon", "price_analysis", "price_analysis_purchase"]
+    modules: ["dashboard", "invoice", "payroll", "customer", "supplier", "financial_dashboard", "client_history", "attendance", "jurnal", "bank_recon", "price_analysis", "price_analysis_purchase", "komisi"]
   },
   sales_manager: {
     label: "Sales Manager",
     color: "#3b82f6",
-    modules: ["dashboard", "quotation_unit", "customer", "client_history", "sales_activity", "kpi_sales", "attendance", "price_analysis"]
+    modules: ["dashboard", "quotation_unit", "customer", "client_history", "sales_activity", "kpi_sales", "attendance", "price_analysis", "komisi"]
   },
   service_manager: {
     label: "Service Manager",
@@ -1157,6 +1157,40 @@ const isNewCustomerAsOf = (salesOrders, customerId, so) => {
   return hist.length > 0 && hist[0].nomor === so.nomor;
 };
 const customerTypeForSO = (salesOrders, so) => isNewCustomerAsOf(salesOrders, so.customerId, so) ? "NEW" : "RETURNING";
+
+// KOMISI (Sales Commission) — deliberately a standalone module, separate from PayrollModule's
+// existing calcKomisi() (which stays untouched, per explicit instruction, and keeps computing
+// (so.subtotal - so.diskon) x rate for the payslip). This module instead nets out the internal
+// "SALES DISCOUNT" kickback (quot.salesDiscount — see QuotationUnit/QuotationPS) before applying
+// the rate, since that nominal is a titipan to a third party, not part of the sales rep's real
+// commission basis. Looks up the source quotation via so.sourceNomor (the only link that exists —
+// quotations don't carry a reverse SO reference). Eligibility = every SO with status "Aktif" (all
+// SOs are "Aktif" for life; there's no separate "Selesai"/"Batal" status literal in this app), per
+// explicit decision to not gate commission on shipment/invoice completion.
+const findQuotationForSO = (store, so) => {
+  if (!so || !so.sourceNomor) return null;
+  return (store.quotationsUnit || []).find(q => q.nomor === so.sourceNomor) || (store.quotationsPS || []).find(q => q.nomor === so.sourceNomor) || null;
+};
+const KOMISI_RATE_NEW = 1.2;
+const KOMISI_RATE_RETURNING = 0.8;
+const computeKomisiForSO = (store, so, override) => {
+  const quot = findQuotationForSO(store, so);
+  const rawSalesDiscount = quot && quot.salesDiscount && quot.salesDiscount.aktif ? Number(quot.salesDiscount.nominal) || 0 : 0;
+  const hasSalesDiscountOverride = override && override.salesDiscountOverride !== null && override.salesDiscountOverride !== undefined && override.salesDiscountOverride !== "";
+  const salesDiscount = hasSalesDiscountOverride ? Number(override.salesDiscountOverride) || 0 : rawSalesDiscount;
+  const nilaiSO = Number(so.total) || 0;
+  const basis = Math.max(0, nilaiSO - salesDiscount);
+  const customerType = customerTypeForSO(store.salesOrders || [], so);
+  const recommendedRate = customerType === "NEW" ? KOMISI_RATE_NEW : KOMISI_RATE_RETURNING;
+  const hasRateOverride = override && (override.rateOverride === KOMISI_RATE_NEW || override.rateOverride === KOMISI_RATE_RETURNING);
+  const rate = hasRateOverride ? override.rateOverride : recommendedRate;
+  const nilaiKomisi = basis * rate / 100;
+  return {
+    so, quot, salesDiscount, salesDiscountIsOverridden: hasSalesDiscountOverride, nilaiSO, basis,
+    customerType, recommendedRate, rate, rateIsOverridden: hasRateOverride, nilaiKomisi,
+    dibayar: !!(override && override.dibayar), dibayarTanggal: override?.dibayarTanggal || null, dibayarOleh: override?.dibayarOleh || null
+  };
+};
 
 // Mekanik Report sub-statuses
 const KEPARAHAN_OPTIONS = ["Tidak ada Kendala", "Ringan", "Sedang", "Berat", "Kritikal"];
@@ -1362,6 +1396,10 @@ const ALL_MODULES = [{
   icon: "📈",
   label: "Analisa Harga"
 }, {
+  id: "komisi",
+  icon: "💸",
+  label: "Komisi"
+}, {
   id: "price_analysis_purchase",
   icon: "📉",
   label: "Analisa Harga Pembelian"
@@ -1410,7 +1448,7 @@ const SIDEBAR_GROUPS = [{
 }, {
   key: "sales",
   label: "SALES",
-  moduleIds: ["quotation_unit", "quotation_ps", "sales_activity", "client_history", "price_analysis"]
+  moduleIds: ["quotation_unit", "quotation_ps", "sales_activity", "client_history", "price_analysis", "komisi"]
 }, {
   key: "operation",
   label: "OPERATION",
@@ -2402,6 +2440,7 @@ function useStore() {
   const [editRequests, setEditRequests] = usePersisted("erp_edit_requests", []); // Pending edit/add/delete requests needing GM approval (Client, Master Part)
   const [coa, setCoa] = usePersisted("erp_coa", seedCOA); // Master COA - office operational cost accounts
   const [salesActivities, setSalesActivities] = usePersisted("erp_sales_activities", []); // Daily sales activity log: visits, calls, operational costs
+  const [komisiOverrides, setKomisiOverrides] = usePersisted("erp_komisi", []); // Komisi Sales: sparse per-SO overrides { soNomor, salesDiscountOverride, rateOverride, dibayar, dibayarTanggal, dibayarOleh } — standalone from Payroll's calcKomisi
   const [attendance, setAttendance] = usePersisted("erp_attendance", []); // Absensi: daily check-in records for uang makan/harian + lembur calc
   const [rekapAbsensi, setRekapAbsensi] = usePersisted("erp_rekap_absensi", []); // Absensi "Rekap Mesin": corrected weekly recap parsed from fingerprint-machine XLS, feeds Payroll
   const [jurnal, setJurnal] = usePersisted("erp_jurnal", []); // Jurnal: outgoing costs (auto from PO/Payroll/Travel + manual entries) AND incoming payments (auto from Invoice) — tipe "Pengeluaran"/"Pemasukan" distinguishes the two; mark Lunas via BCA/MANDIRI/CASH, which (for BCA/MANDIRI) posts a matching entry into Rekonsiliasi Bank
@@ -2663,6 +2702,8 @@ function useStore() {
     setCoa,
     salesActivities,
     setSalesActivities,
+    komisiOverrides,
+    setKomisiOverrides,
     attendance,
     setAttendance,
     rekapAbsensi,
@@ -30142,6 +30183,136 @@ function SalesActivityModule({
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// KOMISI — Sales commission module. Nilai komisi = (Nilai SO - Sales Discount/titipan) x rate.
+// Rate is recommended 1.2% for a customer's first-ever SO, 0.8% for repeat, but SUPERUSER
+// (owner/gm/finance_director) can override both the recommended rate and the Sales Discount
+// nominal per-SO (e.g. when the titipan wasn't formally logged on the quotation, or was
+// renegotiated). Confidential by design: regular sales reps only ever see their OWN rows, and
+// never see the raw Sales Discount nominal — only the net commission figure. Eligibility = every
+// SO with status "Aktif" (all SOs are "Aktif" for life in this app), regardless of
+// shipment/invoice completion, per explicit decision. Deliberately standalone from
+// PayrollModule's existing calcKomisi() (left untouched) — see computeKomisiForSO() above.
+// ════════════════════════════════════════════════════════════════════════════
+function KomisiModule({ store, session }) {
+  const { salesOrders, komisiOverrides, setKomisiOverrides } = store;
+  const isSalesRep = session.role === "sales_manager";
+  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
+  const [search, setSearch] = useState("");
+  const [editSO, setEditSO] = useState(null); // SO being edited by superuser (override modal)
+  const [editForm, setEditForm] = useState({ salesDiscountOverride: "", rateOverride: "" });
+
+  const overrideFor = so => komisiOverrides.find(o => o.soNomor === so.nomor) || null;
+
+  const eligibleSOs = (salesOrders || []).filter(so => so.status === "Aktif" && (isSalesRep ? so.salesManagerUsername === session.username : true));
+
+  const rows = eligibleSOs.map(so => computeKomisiForSO(store, so, overrideFor(so))).sort((a, b) => (b.so.tanggal || "").localeCompare(a.so.tanggal || ""));
+
+  const filtered = search.trim() ? rows.filter(r => [r.so.nomor, r.so.customerNama, r.so.salesManagerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(search.trim().toLowerCase()))) : rows;
+
+  const totalKomisi = filtered.reduce((s, r) => s + r.nilaiKomisi, 0);
+  const totalBelumDibayar = filtered.filter(r => !r.dibayar).reduce((s, r) => s + r.nilaiKomisi, 0);
+
+  const openEdit = r => {
+    setEditSO(r.so);
+    setEditForm({
+      salesDiscountOverride: r.salesDiscountIsOverridden ? String(r.salesDiscount) : "",
+      rateOverride: r.rateIsOverridden ? String(r.rate) : ""
+    });
+  };
+
+  const saveOverride = () => {
+    const soNomor = editSO.nomor;
+    const patch = {
+      salesDiscountOverride: editForm.salesDiscountOverride === "" ? null : Number(editForm.salesDiscountOverride),
+      rateOverride: editForm.rateOverride === "" ? null : Number(editForm.rateOverride)
+    };
+    const existing = overrideFor(editSO);
+    if (existing) {
+      setKomisiOverrides(komisiOverrides.map(o => o.soNomor === soNomor ? { ...o, ...patch } : o));
+    } else {
+      setKomisiOverrides([...komisiOverrides, { soNomor, dibayar: false, dibayarTanggal: null, dibayarOleh: null, ...patch }]);
+    }
+    setEditSO(null);
+  };
+
+  const toggleDibayar = async r => {
+    if (!isOwnerLike) return;
+    const willPay = !r.dibayar;
+    if (!await askConfirm(willPay ? `Tandai komisi ${r.so.nomor} (${fmt(r.nilaiKomisi)}) sebagai Sudah Dibayar?` : `Batalkan status Sudah Dibayar untuk ${r.so.nomor}?`)) return;
+    const existing = overrideFor(r.so);
+    const patch = { dibayar: willPay, dibayarTanggal: willPay ? today() : null, dibayarOleh: willPay ? session.nama : null };
+    if (existing) {
+      setKomisiOverrides(komisiOverrides.map(o => o.soNomor === r.so.nomor ? { ...o, ...patch } : o));
+    } else {
+      setKomisiOverrides([...komisiOverrides, { soNomor: r.so.nomor, salesDiscountOverride: null, rateOverride: null, ...patch }]);
+    }
+  };
+
+  const headers = isOwnerLike
+    ? ["SO", "Tanggal", "Client", "Sales", "Nilai SO", "Sales Discount", "Tipe Client", "Rate", "Nilai Komisi", "Status"]
+    : ["SO", "Tanggal", "Client", "Nilai SO", "Tipe Client", "Rate", "Nilai Komisi", "Status"];
+
+  const rowsRendered = filtered.map(r => {
+    const rateCell = React.createElement("span", { style: { color: r.rateIsOverridden ? theme.yellow : theme.text } }, `${r.rate}%${r.rateIsOverridden ? " *" : ""}`);
+    const statusCell = React.createElement(Badge, { color: r.dibayar ? theme.green : theme.muted }, r.dibayar ? "Sudah Dibayar" : "Belum Dibayar");
+    const nilaiKomisiCell = React.createElement("span", { style: { fontWeight: 700, color: theme.accentLight } }, fmt(r.nilaiKomisi));
+    const typeBadge = React.createElement(Badge, { color: r.customerType === "NEW" ? theme.yellow : theme.cyan }, r.customerType === "NEW" ? "Baru" : "Repeat");
+    if (!isOwnerLike) {
+      return [r.so.nomor, r.so.tanggal, r.so.customerNama, fmt(r.nilaiSO), typeBadge, rateCell, nilaiKomisiCell, statusCell];
+    }
+    const salesDiscCell = React.createElement("span", {
+      style: { cursor: "pointer", color: r.salesDiscountIsOverridden ? theme.yellow : theme.accentLight },
+      onClick: () => openEdit(r)
+    }, r.salesDiscount > 0 ? `${fmt(r.salesDiscount)}${r.salesDiscountIsOverridden ? " *" : ""}` : "- (edit)");
+    const actionCell = React.createElement("div", { style: { display: "flex", gap: 6 } },
+      React.createElement(Btn, { size: "sm", variant: "ghost", onClick: () => openEdit(r) }, "✎"),
+      React.createElement(Btn, { size: "sm", variant: r.dibayar ? "ghost" : "success", onClick: () => toggleDibayar(r) }, r.dibayar ? "↺" : "✓ Bayar")
+    );
+    return [r.so.nomor, r.so.tanggal, r.so.customerNama, r.so.salesManagerNama || "-", fmt(r.nilaiSO), salesDiscCell, typeBadge, rateCell, nilaiKomisiCell, React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-start" } }, statusCell, actionCell)];
+  });
+
+  return React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 20 } },
+    React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 } },
+      React.createElement("h2", { style: { margin: 0, color: theme.text } }, "Komisi Sales ", isSalesRep && React.createElement("span", { style: { fontSize: 13, color: theme.muted, fontWeight: 400 } }, "(", session.nama, ")")),
+      React.createElement(ExportExcelBtn, { onClick: () => exportToExcel(filtered.map(r => ({ so: r.so.nomor, tanggal: r.so.tanggal, client: r.so.customerNama, sales: r.so.salesManagerNama, nilaiSO: r.nilaiSO, ...(isOwnerLike ? { salesDiscount: r.salesDiscount } : {}), tipeClient: r.customerType, rate: r.rate, nilaiKomisi: r.nilaiKomisi, status: r.dibayar ? "Sudah Dibayar" : "Belum Dibayar" })), "Komisi_Sales.xlsx", "Komisi Sales") })
+    ),
+    React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))", gap: 16 } },
+      React.createElement(Card, null, React.createElement("span", { style: { color: theme.muted, fontSize: 13 } }, "Total Komisi"), React.createElement("div", { style: { fontSize: 22, fontWeight: 700, color: theme.accentLight, marginTop: 6 } }, fmt(totalKomisi))),
+      React.createElement(Card, null, React.createElement("span", { style: { color: theme.muted, fontSize: 13 } }, "Belum Dibayar"), React.createElement("div", { style: { fontSize: 22, fontWeight: 700, color: theme.yellow, marginTop: 6 } }, fmt(totalBelumDibayar))),
+      React.createElement(Card, null, React.createElement("span", { style: { color: theme.muted, fontSize: 13 } }, "Jumlah SO"), React.createElement("div", { style: { fontSize: 22, fontWeight: 700, color: theme.text, marginTop: 6 } }, filtered.length))
+    ),
+    React.createElement(Card, null,
+      React.createElement(Input, { placeholder: "Cari No. SO / client" + (isOwnerLike ? " / sales" : "") + "...", value: search, onChange: setSearch, style: { marginBottom: 12 } }),
+      !isOwnerLike && React.createElement("p", { style: { fontSize: 11, color: theme.muted, marginBottom: 8 } }, "Menampilkan komisi Anda pribadi. Detail Sales Discount hanya terlihat oleh Superuser."),
+      isOwnerLike && React.createElement("p", { style: { fontSize: 11, color: theme.muted, marginBottom: 8 } }, "* = nilai sudah di-override manual. Klik kolom Sales Discount untuk edit Sales Discount / Rate per-SO."),
+      React.createElement(Table, {
+        headers,
+        rows: rowsRendered,
+        resizable: isOwnerLike,
+        storageKey: isOwnerLike ? `erp_komisi_colwidths_${session.username}` : undefined,
+        emptyMsg: "Belum ada SO yang eligible untuk komisi"
+      })
+    ),
+    isOwnerLike && React.createElement(Modal, { open: !!editSO, title: editSO ? `Edit Komisi — ${editSO.nomor}` : "", onClose: () => setEditSO(null), width: 460 },
+      editSO && React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 14 } },
+        React.createElement("p", { style: { fontSize: 12, color: theme.muted, margin: 0 } }, "Kosongkan field untuk kembali ke nilai otomatis (dari Quotation / rekomendasi sistem)."),
+        React.createElement(Input, { label: "Sales Discount / Titipan (override)", type: "number", value: editForm.salesDiscountOverride, onChange: v => setEditForm({ ...editForm, salesDiscountOverride: v }), placeholder: "Otomatis dari Quotation" }),
+        React.createElement(Select, {
+          label: "Rate Komisi (override)",
+          value: editForm.rateOverride,
+          onChange: v => setEditForm({ ...editForm, rateOverride: v }),
+          options: [{ value: "", label: "Otomatis (rekomendasi sistem)" }, { value: "1.2", label: "1.2% — Client Baru" }, { value: "0.8", label: "0.8% — Repeat Order" }]
+        }),
+        React.createElement("div", { style: { display: "flex", gap: 10, justifyContent: "flex-end" } },
+          React.createElement(Btn, { variant: "ghost", onClick: () => setEditSO(null) }, "Batal"),
+          React.createElement(Btn, { onClick: saveOverride }, "Simpan")
+        )
+      )
+    )
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // ANALISA HARGA — price-history / fluctuation comparison, pulled from every quotation line
 // item ever issued (Unit + Parts/Service). Lets Sales/Finance see how a given part or unit's
 // price has moved over time and across different customers, without touching the quotations
@@ -37145,6 +37316,11 @@ function App() {
         });
       case "sales_activity":
         return /*#__PURE__*/React.createElement(SalesActivityModule, {
+          store: store,
+          session: session
+        });
+      case "komisi":
+        return /*#__PURE__*/React.createElement(KomisiModule, {
           store: store,
           session: session
         });
