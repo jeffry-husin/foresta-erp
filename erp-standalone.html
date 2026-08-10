@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-08.6";
+const APP_BUILD = "2026-08-10.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -5342,9 +5342,22 @@ function MasterPart({
       if (p.kategori !== "Service" && p.stok !== null) {
         const teralokasi = reservedQtyForAll(allocationByPart, p.partNumber);
         const freeStock = Math.max(0, (p.stok || 0) - teralokasi);
-        teralokasiCol = teralokasi > 0 ? /*#__PURE__*/React.createElement(Badge, {
+        // Per-SO breakdown as a native hover tooltip — Teralokasi is a single combined number (sum
+        // across every active SO competing for this part), which on its own looks inconsistent with
+        // the per-SO "Stok Tersedia" shown when creating an Item Requisition (that one only reflects
+        // ONE SO's share of the same pool). Root cause of a reported confusion: Master Part showed
+        // "Teralokasi 2" while SO-010's IR screen showed "Stok Tersedia 1" for the same part — both
+        // were correct, just showing different slices of the same FIFO allocation with no way to see
+        // the breakdown. Object.entries here is already in FIFO order (earliest SO tanggal first —
+        // see stockAllocationForAllParts, which builds the allocation object in that same claim
+        // order), so the tooltip doubles as a quick view of who's first in the queue.
+        const allocEntries = Object.entries(allocationByPart[p.partNumber] || {}).filter(([, a]) => a.allocated > 0);
+        const teralokasiTitle = allocEntries.length ? `Teralokasi ke:\n${allocEntries.map(([so, a]) => `${so}: ${a.allocated}`).join("\n")}` : "";
+        teralokasiCol = teralokasi > 0 ? /*#__PURE__*/React.createElement("span", {
+          title: teralokasiTitle
+        }, /*#__PURE__*/React.createElement(Badge, {
           color: theme.yellow
-        }, fmtNum(teralokasi)) : "-";
+        }, fmtNum(teralokasi))) : "-";
         freeStockCol = /*#__PURE__*/React.createElement(Badge, {
           color: freeStock > 10 ? theme.green : freeStock > 0 ? theme.yellow : theme.red
         }, fmtNum(freeStock));
