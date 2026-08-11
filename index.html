@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-10.6";
+const APP_BUILD = "2026-08-10.7";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -23187,7 +23187,8 @@ function DeliveryOrderModule({
           nama: detail.createdBy
         },
         disetujuiLabel: "Penerima",
-        sizeBoost: 2
+        sizeBoost: 2,
+        uniformFont: true
       });
     }
   })))), /*#__PURE__*/React.createElement(Modal, {
@@ -28438,7 +28439,16 @@ function printDocument({
   // duplicating this whole function/CSS block just for DO, every font-size below is computed via
   // fs(n) = n + sizeBoost, and the DO print call site passes sizeBoost: 2. Every other caller
   // (Quotation/Invoice/PO/etc.) omits it, so they keep their original sizes unchanged.
-  sizeBoost = 0
+  sizeBoost = 0,
+  // Delivery Order was asked to use one consistent font throughout the printed document — same
+  // font as the "Nama Barang" item column (which already renders in the default body font stack).
+  // Every element in this template already inherits `body`'s font-family normally, but some print/
+  // PDF renderers apply their own substitution per element (headings, bold text, table cells) when
+  // no font-family is explicitly set on that element — which is what made some text look like a
+  // different, less legible font than the item rows. Setting `* { font-family }` forces every
+  // element to explicitly use the same stack, eliminating that per-element substitution. Scoped to
+  // DO only (uniformFont: true at the DO call site) so other document types are unaffected.
+  uniformFont = false
 }) {
   const fs = n => n + sizeBoost;
   // Always use the live company settings from the Setting Perusahaan module (falls back to
@@ -28480,6 +28490,7 @@ function printDocument({
     <style>
       @page { size: A4 portrait; margin: 12mm; }
       body { font-family: 'Segoe UI', Arial, sans-serif; margin: 20px; color: #1a1a1a; }
+      ${uniformFont ? "* { font-family: 'Segoe UI', Arial, sans-serif; }" : ""}
       .header { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 3px solid #1a1a1a; padding-bottom: 16px; margin-bottom: 24px; }
       .company { font-size: ${fs(20)}px; font-weight: 800; white-space: nowrap; }
       .doctitle { font-size: ${fs(26)}px; font-weight: 800; text-align: right; color: #2563eb; }
