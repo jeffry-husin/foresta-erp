@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-10.7";
+const APP_BUILD = "2026-08-10.8";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -18274,8 +18274,10 @@ function PurchaseOrderModule({
     beaMasuk: "",
     ppnImport: "",
     pphImport: "",
+    noInvoicePIB: "",
     tanggalPembayaranPIB: "",
     ekspedisiSupplierId: "",
+    noInvoiceEkspedisi: "",
     ekspedisiBiaya: "",
     tanggalPembayaranEkspedisi: ""
   });
@@ -18863,8 +18865,10 @@ function PurchaseOrderModule({
       beaMasuk: "",
       ppnImport: "",
       pphImport: "",
+      noInvoicePIB: "",
       tanggalPembayaranPIB: "",
       ekspedisiSupplierId: "",
+      noInvoiceEkspedisi: "",
       ekspedisiBiaya: "",
       tanggalPembayaranEkspedisi: ""
     });
@@ -18875,9 +18879,11 @@ function PurchaseOrderModule({
       beaMasuk: parseFloat(importCostForm.beaMasuk) || 0,
       ppnImport: parseFloat(importCostForm.ppnImport) || 0,
       pphImport: parseFloat(importCostForm.pphImport) || 0,
+      noInvoicePIB: importCostForm.noInvoicePIB || "",
       // Tanggal pembayaran PIB = tanggal pembayaran gabungan Bea Masuk + PPN Import + PPH Import.
       tanggalPembayaranPIB: importCostForm.tanggalPembayaranPIB || "",
       ekspedisiNama: ekspedisi?.nama || "",
+      noInvoiceEkspedisi: importCostForm.noInvoiceEkspedisi || "",
       ekspedisiBiaya: parseFloat(importCostForm.ekspedisiBiaya) || 0,
       // Tanggal pembayaran khusus Ekspedisi — dipisah dari tanggal pembayaran PIB.
       tanggalPembayaranEkspedisi: importCostForm.tanggalPembayaranEkspedisi || ""
@@ -18889,6 +18895,15 @@ function PurchaseOrderModule({
     };
     setPo(arr);
     setImportCostModal(null);
+  };
+  const deleteImportCost = async p => {
+    const ok = await askConfirm(`Hapus data Import Cost untuk PO ${p.nomor}? Tindakan ini tidak bisa dibatalkan.`);
+    if (!ok) return;
+    const arr = [...po];
+    const idx = po.indexOf(p);
+    const { importCost, ...rest } = arr[idx];
+    arr[idx] = rest;
+    setPo(arr);
   };
   const statusColor = {
     "Menunggu Approval GM": theme.yellow,
@@ -19258,11 +19273,17 @@ function PurchaseOrderModule({
       color: theme.muted
     }
   }, "Diakses oleh Ibu Maria — ditarik per PO Overseas yang sudah diterima."), /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. PO", "Supplier", "Bea Masuk", "PPN Import", "PPH Import", "Tgl Bayar PIB", "Ekspedisi", "Tgl Bayar Ekspedisi", "Aksi"],
-    rows: po.filter(p => p.status === "Sudah Diterima" || p.status === "Disetujui GM - Kirim ke Supplier").map(p => [p.nomor, p.supplierNama, p.importCost ? fmt(p.importCost.beaMasuk) : "-", p.importCost ? fmt(p.importCost.ppnImport) : "-", p.importCost ? fmt(p.importCost.pphImport) : "-", p.importCost?.tanggalPembayaranPIB ? fmtDateRev(p.importCost.tanggalPembayaranPIB) : "-", p.importCost ? `${p.importCost.ekspedisiNama} (${fmt(p.importCost.ekspedisiBiaya)})` : "-", p.importCost?.tanggalPembayaranEkspedisi ? fmtDateRev(p.importCost.tanggalPembayaranEkspedisi) : "-", isMaria || isOwnerLike ? /*#__PURE__*/React.createElement(Btn, {
+    headers: ["No. PO", "Supplier", "Bea Masuk", "PPN Import", "PPH Import", "No. Invoice PIB", "Tgl Bayar PIB", "Ekspedisi", "No. Invoice Ekspedisi", "Tgl Bayar Ekspedisi", "Aksi"],
+    rows: po.filter(p => p.status === "Sudah Diterima" || p.status === "Disetujui GM - Kirim ke Supplier").map(p => [p.nomor, p.supplierNama, p.importCost ? fmt(p.importCost.beaMasuk) : "-", p.importCost ? fmt(p.importCost.ppnImport) : "-", p.importCost ? fmt(p.importCost.pphImport) : "-", p.importCost?.noInvoicePIB || "-", p.importCost?.tanggalPembayaranPIB ? fmtDateRev(p.importCost.tanggalPembayaranPIB) : "-", p.importCost ? `${p.importCost.ekspedisiNama} (${fmt(p.importCost.ekspedisiBiaya)})` : "-", p.importCost?.noInvoiceEkspedisi || "-", p.importCost?.tanggalPembayaranEkspedisi ? fmtDateRev(p.importCost.tanggalPembayaranEkspedisi) : "-", isMaria || isOwnerLike ? /*#__PURE__*/React.createElement("div", {
+      style: { display: "flex", gap: 6 }
+    }, /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       onClick: () => openImportCost(p)
-    }, p.importCost ? "Edit" : "+ Input") : "-"]),
+    }, p.importCost ? "Edit" : "+ Input"), isOwnerLike && p.importCost ? /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "danger",
+      onClick: () => deleteImportCost(p)
+    }, "Hapus") : null) : "-"]),
     emptyMsg: "Belum ada PO Overseas"
   })), /*#__PURE__*/React.createElement(Modal, {
     open: !!irDetail,
@@ -20052,6 +20073,13 @@ function PurchaseOrderModule({
     }),
     type: "number"
   }), /*#__PURE__*/React.createElement(Input, {
+    label: "No. Invoice/PIB Import",
+    value: importCostForm.noInvoicePIB,
+    onChange: v => setImportCostForm({
+      ...importCostForm,
+      noInvoicePIB: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
     label: "Tanggal Pembayaran PIB (Bea Masuk + PPN Import + PPH Import)",
     value: importCostForm.tanggalPembayaranPIB,
     onChange: v => setImportCostForm({
@@ -20070,6 +20098,13 @@ function PurchaseOrderModule({
       value: s.id,
       label: s.nama
     }))
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "No. Invoice Ekspedisi",
+    value: importCostForm.noInvoiceEkspedisi,
+    onChange: v => setImportCostForm({
+      ...importCostForm,
+      noInvoiceEkspedisi: v
+    })
   }), /*#__PURE__*/React.createElement(Input, {
     label: "Biaya Ekspedisi (Rp)",
     value: importCostForm.ekspedisiBiaya,
