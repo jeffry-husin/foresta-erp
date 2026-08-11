@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-10.5";
+const APP_BUILD = "2026-08-10.6";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -23186,7 +23186,8 @@ function DeliveryOrderModule({
         dibuatOleh: {
           nama: detail.createdBy
         },
-        disetujuiLabel: "Penerima"
+        disetujuiLabel: "Penerima",
+        sizeBoost: 2
       });
     }
   })))), /*#__PURE__*/React.createElement(Modal, {
@@ -28432,8 +28433,14 @@ function printDocument({
   company,
   bankInfoText,
   terbilangText,
-  currency
+  currency,
+  // Delivery Order print was asked to be 2pt larger than every other document type — rather than
+  // duplicating this whole function/CSS block just for DO, every font-size below is computed via
+  // fs(n) = n + sizeBoost, and the DO print call site passes sizeBoost: 2. Every other caller
+  // (Quotation/Invoice/PO/etc.) omits it, so they keep their original sizes unchanged.
+  sizeBoost = 0
 }) {
+  const fs = n => n + sizeBoost;
   // Always use the live company settings from the Setting Perusahaan module (falls back to
   // the original hardcoded defaults only if a caller hasn't been updated to pass it yet).
   const co = {
@@ -28445,41 +28452,41 @@ function printDocument({
     alert("Popup diblokir browser. Izinkan popup untuk mencetak dokumen.");
     return;
   }
-  const rows = items.map(r => `<tr>${r.map(c => `<td style="padding:8px 10px;border-bottom:1px solid #ddd;font-size:13px;white-space:pre-wrap;word-break:break-word;">${c}</td>`).join("")}</tr>`).join("");
-  const headerCols = itemHeaders.map(h => `<th style="padding:8px 10px;text-align:left;font-size:12px;color:#555;border-bottom:2px solid #333;">${h}</th>`).join("");
-  const extraRowsHtml = (extraInfoRows || []).map(([k, v]) => `<div style="display:flex;justify-content:space-between;font-size:13px;padding:2px 0;"><span style="color:#666;">${k}</span><span style="font-weight:600;">${v}</span></div>`).join("");
+  const rows = items.map(r => `<tr>${r.map(c => `<td style="padding:8px 10px;border-bottom:1px solid #ddd;font-size:${fs(13)}px;white-space:pre-wrap;word-break:break-word;">${c}</td>`).join("")}</tr>`).join("");
+  const headerCols = itemHeaders.map(h => `<th style="padding:8px 10px;text-align:left;font-size:${fs(12)}px;color:#555;border-bottom:2px solid #333;">${h}</th>`).join("");
+  const extraRowsHtml = (extraInfoRows || []).map(([k, v]) => `<div style="display:flex;justify-content:space-between;font-size:${fs(13)}px;padding:2px 0;"><span style="color:#666;">${k}</span><span style="font-weight:600;">${v}</span></div>`).join("");
   // Task #176: the on-screen Term of Payment forms (Quotation/SO) always show each termin's Rupiah
   // nominal alongside its %, but the printed document only ever showed the % — so a client reading
   // the printed Quotation/SO had to do the math themselves. Add a Nominal column here, computed the
   // same way the on-screen forms compute it (document total × termin %), so print matches screen.
   const paymentTermsHtml = (paymentTerms || []).length ? `
       <div style="margin-top:16px;">
-        <div style="font-size:12px;font-weight:700;color:#555;margin-bottom:6px;">TERM OF PAYMENT</div>
+        <div style="font-size:${fs(12)}px;font-weight:700;color:#555;margin-bottom:6px;">TERM OF PAYMENT</div>
         <table>
           <thead><tr>
-            <th style="padding:6px 10px;text-align:left;font-size:12px;color:#555;border-bottom:2px solid #333;">Termin</th>
-            <th style="padding:6px 10px;text-align:left;font-size:12px;color:#555;border-bottom:2px solid #333;">%</th>
-            <th style="padding:6px 10px;text-align:left;font-size:12px;color:#555;border-bottom:2px solid #333;">Nominal</th>
-            <th style="padding:6px 10px;text-align:left;font-size:12px;color:#555;border-bottom:2px solid #333;">Keterangan</th>
+            <th style="padding:6px 10px;text-align:left;font-size:${fs(12)}px;color:#555;border-bottom:2px solid #333;">Termin</th>
+            <th style="padding:6px 10px;text-align:left;font-size:${fs(12)}px;color:#555;border-bottom:2px solid #333;">%</th>
+            <th style="padding:6px 10px;text-align:left;font-size:${fs(12)}px;color:#555;border-bottom:2px solid #333;">Nominal</th>
+            <th style="padding:6px 10px;text-align:left;font-size:${fs(12)}px;color:#555;border-bottom:2px solid #333;">Keterangan</th>
           </tr></thead>
-          <tbody>${paymentTerms.map(t => `<tr><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:13px;">${t.label}</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:13px;">${t.percent}%</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:13px;">${fmtMoney((total || 0) * (parseFloat(t.percent) || 0) / 100, currency)}</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:13px;">${t.note || "-"}</td></tr>`).join("")}</tbody>
+          <tbody>${paymentTerms.map(t => `<tr><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:${fs(13)}px;">${t.label}</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:${fs(13)}px;">${t.percent}%</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:${fs(13)}px;">${fmtMoney((total || 0) * (parseFloat(t.percent) || 0) / 100, currency)}</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:${fs(13)}px;">${t.note || "-"}</td></tr>`).join("")}</tbody>
         </table>
       </div>` : "";
   // skipTopSpace: when the caller already reserves vertical space above the signature line
   // (e.g. the materai stamp box), don't add the usual blank-line padding on top of that.
-  const sigBlock = (person, skipTopSpace) => person ? `${person.signature ? `<img src="${person.signature}" style="max-height:50px;display:block;margin:0 auto 6px;" />` : skipTopSpace ? "" : "<br/><br/><br/>"}____________________<br/>${person.nama}${person.jabatan ? `<br/><span style="font-size:11px;color:#666;">${person.jabatan}</span>` : ""}` : skipTopSpace ? "____________________" : "<br/><br/><br/>____________________";
+  const sigBlock = (person, skipTopSpace) => person ? `${person.signature ? `<img src="${person.signature}" style="max-height:50px;display:block;margin:0 auto 6px;" />` : skipTopSpace ? "" : "<br/><br/><br/>"}____________________<br/>${person.nama}${person.jabatan ? `<br/><span style="font-size:${fs(11)}px;color:#666;">${person.jabatan}</span>` : ""}` : skipTopSpace ? "____________________" : "<br/><br/><br/>____________________";
   win.document.write(`
     <html><head><title>${docTitle} - ${nomor}</title>
     <style>
       @page { size: A4 portrait; margin: 12mm; }
       body { font-family: 'Segoe UI', Arial, sans-serif; margin: 20px; color: #1a1a1a; }
       .header { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 3px solid #1a1a1a; padding-bottom: 16px; margin-bottom: 24px; }
-      .company { font-size: 20px; font-weight: 800; white-space: nowrap; }
-      .doctitle { font-size: 26px; font-weight: 800; text-align: right; color: #2563eb; }
+      .company { font-size: ${fs(20)}px; font-weight: 800; white-space: nowrap; }
+      .doctitle { font-size: ${fs(26)}px; font-weight: 800; text-align: right; color: #2563eb; }
       table { width: 100%; border-collapse: collapse; margin: 20px 0; }
       .totals { margin-top: 16px; width: 320px; margin-left: auto; }
-      .totals .row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; }
-      .totals .final { font-size: 18px; font-weight: 800; border-top: 2px solid #333; padding-top: 8px; margin-top: 6px; color: #16a34a; }
+      .totals .row { display: flex; justify-content: space-between; padding: 4px 0; font-size: ${fs(13)}px; }
+      .totals .final { font-size: ${fs(18)}px; font-weight: 800; border-top: 2px solid #333; padding-top: 8px; margin-top: 6px; color: #16a34a; }
       @media print { body { margin: 0; } }
     </style></head>
     <body>
@@ -28488,19 +28495,19 @@ function printDocument({
           ${co.logo ? `<img src="${co.logo}" style="max-height:56px;max-width:120px;object-fit:contain;" />` : ""}
           <div>
             <div class="company">${co.nama}</div>
-            ${co.alamat ? `<div style="font-size:12px;color:#666;margin-top:2px;white-space:pre-line;">${co.alamat}</div>` : ""}
-            <div style="font-size:12px;color:#666;margin-top:2px;">${co.telepon} · ${co.email}${co.npwp ? ` · NPWP: ${co.npwp}` : ""}</div>
+            ${co.alamat ? `<div style="font-size:${fs(12)}px;color:#666;margin-top:2px;white-space:pre-line;">${co.alamat}</div>` : ""}
+            <div style="font-size:${fs(12)}px;color:#666;margin-top:2px;">${co.telepon} · ${co.email}${co.npwp ? ` · NPWP: ${co.npwp}` : ""}</div>
           </div>
         </div>
         <div>
           <div class="doctitle">${docTitle}</div>
-          <div style="text-align:right;font-size:13px;margin-top:6px;">No: <strong>${nomor}</strong><br/>${tanggalLabel}: ${fmtDateRev(tanggal)}</div>
+          <div style="text-align:right;font-size:${fs(13)}px;margin-top:6px;">No: <strong>${nomor}</strong><br/>${tanggalLabel}: ${fmtDateRev(tanggal)}</div>
         </div>
       </div>
       <div style="margin-bottom:20px;">
-        <div style="font-size:12px;color:#666;">${partyLabel}</div>
-        <div style="font-size:15px;font-weight:700;">${partyName}</div>
-        ${partyExtra ? `<div style="font-size:12px;color:#666;">${partyExtra}</div>` : ""}
+        <div style="font-size:${fs(12)}px;color:#666;">${partyLabel}</div>
+        <div style="font-size:${fs(15)}px;font-weight:700;">${partyName}</div>
+        ${partyExtra ? `<div style="font-size:${fs(12)}px;color:#666;">${partyExtra}</div>` : ""}
       </div>
       ${extraRowsHtml ? `<div style="background:#f5f5f5;border-radius:8px;padding:10px 14px;margin-bottom:16px;">${extraRowsHtml}</div>` : ""}
       <table>
@@ -28516,15 +28523,15 @@ function printDocument({
         ${uangMuka ? `<div class="row"><span>${uangMukaLabel}</span><span>-${fmtMoney(uangMuka, currency)}</span></div>` : ""}
         <div class="row final"><span>TOTAL</span><span>${fmtMoney(total, currency)}</span></div>
       </div>
-      ${terbilangText ? `<div style="text-align:right;font-size:11px;color:#666;font-style:italic;margin-top:4px;">Terbilang: ${terbilangText}</div>` : ""}` : ""}
-      ${bankInfoText ? `<div style="margin-top:16px;background:#f5f5f5;border-radius:8px;padding:10px 14px;font-size:12px;"><strong>Informasi Pembayaran:</strong><br/>${bankInfoText}</div>` : ""}
+      ${terbilangText ? `<div style="text-align:right;font-size:${fs(11)}px;color:#666;font-style:italic;margin-top:4px;">Terbilang: ${terbilangText}</div>` : ""}` : ""}
+      ${bankInfoText ? `<div style="margin-top:16px;background:#f5f5f5;border-radius:8px;padding:10px 14px;font-size:${fs(12)}px;"><strong>Informasi Pembayaran:</strong><br/>${bankInfoText}</div>` : ""}
       ${paymentTermsHtml}
-      ${catatan ? `<div style="margin-top:24px;font-size:12px;color:#666;white-space:pre-wrap;word-break:break-word;"><strong>Catatan:</strong> ${String(catatan).replace(/</g, "&lt;")}</div>` : ""}
-      <div style="margin-top:20px;display:flex;justify-content:${disetujuiAlign === "left" ? "flex-start" : hideCreatedBy ? "center" : "space-between"};font-size:12px;">
+      ${catatan ? `<div style="margin-top:24px;font-size:${fs(12)}px;color:#666;white-space:pre-wrap;word-break:break-word;"><strong>Catatan:</strong> ${String(catatan).replace(/</g, "&lt;")}</div>` : ""}
+      <div style="margin-top:20px;display:flex;justify-content:${disetujuiAlign === "left" ? "flex-start" : hideCreatedBy ? "center" : "space-between"};font-size:${fs(12)}px;">
         ${hideCreatedBy ? "" : `<div style="text-align:center;width:200px;">${dibuatOlehLabel}<br/><br/>${sigBlock(dibuatOleh)}</div>`}
         <div style="text-align:center;width:200px;">${disetujuiLabel}${showMateraiSpace ? Array(materaiSpasi).fill("<br/>").join("") : "<br/>"}${sigBlock(disetujuiOleh, showMateraiSpace)}</div>
       </div>
-      <div style="margin-top:40px;text-align:center;font-style:italic;font-size:7px;color:#888;border-top:1px solid #ddd;padding-top:10px;line-height:1.5;">
+      <div style="margin-top:40px;text-align:center;font-style:italic;font-size:${fs(7)}px;color:#888;border-top:1px solid #ddd;padding-top:10px;line-height:1.5;">
         DISCLAIMER<br/>
         "Dokumen ini telah diterbitkan dan ditandatangani secara elektronik melalui sistem PT FORESTA TRANSTEK sehingga sah dan mengikat secara hukum tanpa memerlukan tanda tangan basah maupun stempel perusahaan, sesuai dengan ketentuan UU ITE No. 11 Tahun 2008.<br/>
         Lampiran ini merupakan bukti sah dan hanya berlaku sesuai dengan nomor, tanggal, serta syarat dan ketentuan yang tercantum di dalamnya.<br/>
