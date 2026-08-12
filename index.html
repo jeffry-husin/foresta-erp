@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-10.9";
+const APP_BUILD = "2026-08-12.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -1462,6 +1462,10 @@ const ALL_MODULES = [{
   icon: "📜",
   label: "Audit Trail"
 }, {
+  id: "document_trail",
+  icon: "🧭",
+  label: "Document Trail"
+}, {
   id: "users",
   icon: "👤",
   label: "Manajemen User"
@@ -1474,8 +1478,12 @@ const ALL_MODULES = [{
 // this exact order per request. Any module id not listed here (shouldn't happen — every
 // ALL_MODULES entry is placed) falls through and is appended as standalone so nothing silently
 // disappears from the sidebar if a new module is ever added without updating this list.
-const SIDEBAR_STANDALONE_IDS = ["dashboard", "financial_dashboard", "workshop_dashboard", "audit_trail"];
+const SIDEBAR_STANDALONE_IDS = ["dashboard", "financial_dashboard", "workshop_dashboard"];
 const SIDEBAR_GROUPS = [{
+  key: "trail",
+  label: "TRAIL",
+  moduleIds: ["audit_trail", "document_trail"]
+}, {
   key: "database",
   label: "DATABASE",
   moduleIds: ["master_part", "master_unit", "master_coa", "master_mill", "customer", "supplier"]
@@ -1536,6 +1544,10 @@ function getAllowedModules(role, customModules) {
   // Master Part must be visible/searchable for every user (many modules reference parts by
   // number/name), regardless of role default or an individually-configured custom module list.
   if (!list.includes("master_part")) list = [...list, "master_part"];
+  // Document Trail (cross-module SO->IR->PO->GR->DO progress view) is available to every user
+  // regardless of role, since it exists specifically so all departments can check where a job
+  // stands without opening each module individually — same rationale as Form Cuti/Uang Makan.
+  if (!list.includes("document_trail")) list = [...list, "document_trail"];
   return list;
 }
 // Payroll hard rule: only owner/gm regardless of role list
@@ -19140,7 +19152,7 @@ function PurchaseOrderModule({
       color: theme.muted
     }
   }, "Semua PO yang belum diterima dan/atau belum lunas dibayar — pindah ke PO CLOSED hanya setelah barang diterima Workshop DAN pembayaran lunas. Input No. Invoice Supplier, edit item/Biaya Tambahan, dan tandai pembayaran di sini."), /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. PO", "Tanggal", "Supplier", "Tipe Bayar", "Jatuh Tempo", "Total", "Status", "No. Invoice Supplier", "No. Faktur Pajak", "Status Bayar", "Aksi"],
+    headers: ["No. PO", "No. IR", "Tanggal", "Supplier", "Tipe Bayar", "Jatuh Tempo", "Total", "Status", "No. Invoice Supplier", "No. Faktur Pajak", "Status Bayar", "Aksi"],
     rows: poFiltered.filter(p => !isPoClosed(p)).map(p => {
       const due = getDueStatus(p.tipePembayaran, p.tanggalJatuhTempo);
       return [/*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("span", {
@@ -19156,7 +19168,7 @@ function PurchaseOrderModule({
         }
       }, /*#__PURE__*/React.createElement(Badge, {
         color: theme.red
-      }, "⚠ URGENT"))), fmtDateRev(p.tanggal), p.supplierNama, /*#__PURE__*/React.createElement(Badge, {
+      }, "⚠ URGENT"))), (p.irNomors || []).join(", ") || "-", fmtDateRev(p.tanggal), p.supplierNama, /*#__PURE__*/React.createElement(Badge, {
         color: p.tipePembayaran === "COD" ? theme.cyan : theme.purple
       }, payLabel(p.tipePembayaran)), p.tipePembayaran === "TEMPO" ? /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement(Badge, {
         color: due.color
@@ -19268,7 +19280,7 @@ function PurchaseOrderModule({
       color: theme.muted
     }
   }, "PO otomatis masuk ke sini hanya setelah barang diterima Workshop DAN pembayaran sudah lunas."), /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. PO", "Tanggal", "Supplier", "Total", "No. Invoice Supplier", "Status Bayar", "Aksi"],
+    headers: ["No. PO", "No. IR", "Tanggal", "Supplier", "Total", "No. Invoice Supplier", "Status Bayar", "Aksi"],
     rows: poFiltered.filter(p => isPoClosed(p)).map(p => [/*#__PURE__*/React.createElement("span", {
       style: {
         color: theme.accentLight,
@@ -19276,7 +19288,7 @@ function PurchaseOrderModule({
         cursor: "pointer"
       },
       onClick: () => setDetail(p)
-    }, p.nomor), fmtDateRev(p.tanggal), p.supplierNama, fmtMoney(p.total, p.currency), p.noInvoiceSupplier || "-", /*#__PURE__*/React.createElement(Badge, {
+    }, p.nomor), (p.irNomors || []).join(", ") || "-", fmtDateRev(p.tanggal), p.supplierNama, fmtMoney(p.total, p.currency), p.noInvoiceSupplier || "-", /*#__PURE__*/React.createElement(Badge, {
       color: p.statusBayar === "Sudah Dibayar" ? theme.green : p.statusBayar === "Dibayar Sebagian" ? theme.yellow : theme.red
     }, p.statusBayar), /*#__PURE__*/React.createElement("div", {
       style: {
@@ -29513,6 +29525,218 @@ function AuditTrailModule({
     emptyMsg: "Belum ada riwayat approval"
   })));
 }
+// ════════════════════════════════════════════════════════════════════════════
+// DOCUMENT TRAIL — end-to-end status of each Sales Order's document chain:
+// Quotation -> SO -> IR -> PO -> Penerimaan Barang -> Delivery Order -> Mekanik Report,
+// with a done/ongoing indicator per stage, so anyone can check progress without opening
+// each module separately. Visible to all users (like Master Part / Uang Makan).
+// ════════════════════════════════════════════════════════════════════════════
+function DocumentTrailModule({
+  store,
+  session
+}) {
+  const {
+    quotationsUnit,
+    quotationsPS,
+    salesOrders,
+    itemRequisitions,
+    poLocal,
+    poOverseas,
+    goodsReceipts,
+    deliveryOrders,
+    visits,
+    invoices
+  } = store;
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("Semua");
+  const soFullyShipped = so => {
+    const soDOs = (deliveryOrders || []).filter(d => d.soNomor === so.nomor);
+    if (soDOs.length === 0) return false;
+    return (so.items || []).every(it => {
+      const key = it.partNumber || it.unitCode;
+      const shippedQty = soDOs.reduce((sum, d) => sum + (d.items || []).filter(di => di.partNumber === key).reduce((s, di) => s + (Number(di.qty) || 0), 0), 0);
+      return shippedQty >= (Number(it.qty) || 0);
+    });
+  };
+  const rows = (salesOrders || []).map(so => {
+    const quot = so.sourceNomor ? [...(quotationsUnit || []), ...(quotationsPS || [])].find(q => q.nomor === so.sourceNomor) : null;
+    const irs = (itemRequisitions || []).filter(ir => ir.soNomor === so.nomor);
+    const irNomors = irs.map(ir => ir.nomor);
+    const pos = [...(poLocal || []).map(p => ({ ...p, _tipe: "Lokal" })), ...(poOverseas || []).map(p => ({ ...p, _tipe: "Overseas" }))].filter(po => (po.irNomors || []).some(n => irNomors.includes(n)));
+    const poNomors = pos.map(p => p.nomor);
+    const grs = (goodsReceipts || []).filter(g => poNomors.includes(g.poNomor));
+    const dos = (deliveryOrders || []).filter(d => d.soNomor === so.nomor);
+    const mrVisits = (visits || []).filter(v => v.soNomor === so.nomor);
+    const hasInvoice = (invoices || []).some(i => i.soNomor === so.nomor);
+    const top = so.termOfPayment || [];
+    const allTerminInvoiced = top.length > 0 && top.every(t => (invoices || []).some(i => i.soNomor === so.nomor && i.terminLabel === t.label));
+    const soDone = soFullyShipped(so) || (top.length > 0 ? allTerminInvoiced : hasInvoice) || !!so.selesaiManual;
+    // Stage status: null = not applicable (no IR/PO needed, e.g. stock direct fulfillment); true = done; false = ongoing
+    const irDone = irs.length === 0 ? null : irs.every(ir => ir.status === "Sudah di-PO");
+    const poDone = pos.length === 0 ? null : pos.every(p => p.status === "Sudah Diterima");
+    const grDone = pos.length === 0 ? null : grs.length > 0 && pos.every(p => p.status === "Sudah Diterima");
+    const doApplicable = ["Parts", "BOTH", undefined, null].includes(so.fulfillmentType) || dos.length > 0 || (so.items || []).some(it => it.partNumber);
+    const doDone = doApplicable ? dos.length > 0 && soFullyShipped(so) : null;
+    const mrApplicable = ["MR", "BOTH"].includes(so.fulfillmentType);
+    const mrDone = mrApplicable ? mrVisits.some(v => v.status === "Selesai") : null;
+    return {
+      so,
+      quot,
+      irs,
+      pos,
+      grs,
+      dos,
+      mrVisits,
+      soDone,
+      irDone,
+      poDone,
+      grDone,
+      doDone,
+      mrDone
+    };
+  });
+  const filtered = rows.filter(r => {
+    const q = search.trim().toLowerCase();
+    const matchSearch = q === "" || [r.so.nomor, r.quot?.nomor, r.so.customerNama, ...r.irs.map(x => x.nomor), ...r.pos.map(x => x.nomor), ...r.dos.map(x => x.nomor)].filter(Boolean).some(x => String(x).toLowerCase().includes(q));
+    const matchStatus = statusFilter === "Semua" || (statusFilter === "Selesai" ? r.soDone : !r.soDone);
+    return matchSearch && matchStatus;
+  }).sort((a, b) => (b.so.tanggal || "").localeCompare(a.so.tanggal || ""));
+  const Stage = ({ label, applicable, done, docs }) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      gap: 2,
+      minWidth: 76
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 16
+    }
+  }, applicable === null ? "—" : done ? "✅" : "🟡"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 10,
+      color: theme.muted
+    }
+  }, label), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      color: theme.text,
+      textAlign: "center"
+    }
+  }, applicable === null ? "-" : (docs && docs.length ? docs.join(", ") : "Belum ada")));
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 20
+    }
+  }, /*#__PURE__*/React.createElement("h2", {
+    style: {
+      margin: 0,
+      color: theme.text
+    }
+  }, "Document Trail — Status Rantai Dokumen per Sales Order"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    value: search,
+    onChange: setSearch,
+    placeholder: "Cari No. SO / Quotation / IR / PO / DO / Client...",
+    style: {
+      width: 320
+    }
+  }), /*#__PURE__*/React.createElement(Select, {
+    value: statusFilter,
+    onChange: setStatusFilter,
+    options: ["Semua", "On Going", "Selesai"].map(s => ({
+      value: s,
+      label: s
+    })),
+    style: {
+      width: 160
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 10
+    }
+  }, filtered.map(r => /*#__PURE__*/React.createElement(Card, {
+    key: r.so.id || r.so.nomor
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: 12,
+      flexWrap: "wrap",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, r.so.nomor), " — ", r.so.customerNama, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Dari Quotation: ", r.quot ? r.quot.nomor : "-", " · Tanggal SO: ", r.so.tanggal || "-")), /*#__PURE__*/React.createElement(Badge, {
+    color: r.soDone ? theme.green : theme.yellow
+  }, r.soDone ? "✓ Selesai" : "Ongoing")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 14,
+      overflowX: "auto",
+      paddingBottom: 4
+    }
+  }, /*#__PURE__*/React.createElement(Stage, {
+    label: "Quotation",
+    applicable: r.quot ? true : null,
+    done: !!r.quot,
+    docs: r.quot ? [r.quot.nomor] : []
+  }), /*#__PURE__*/React.createElement(Stage, {
+    label: "SO",
+    applicable: true,
+    done: true,
+    docs: [r.so.nomor]
+  }), /*#__PURE__*/React.createElement(Stage, {
+    label: "IR",
+    applicable: r.irDone,
+    done: r.irDone,
+    docs: r.irs.map(x => x.nomor)
+  }), /*#__PURE__*/React.createElement(Stage, {
+    label: "PO",
+    applicable: r.poDone,
+    done: r.poDone,
+    docs: r.pos.map(x => x.nomor)
+  }), /*#__PURE__*/React.createElement(Stage, {
+    label: "Penerimaan",
+    applicable: r.grDone,
+    done: r.grDone,
+    docs: r.grs.map(x => x.nomor)
+  }), /*#__PURE__*/React.createElement(Stage, {
+    label: "DO",
+    applicable: r.doDone,
+    done: r.doDone,
+    docs: r.dos.map(x => x.nomor)
+  }), /*#__PURE__*/React.createElement(Stage, {
+    label: "Mekanik",
+    applicable: r.mrDone,
+    done: r.mrDone,
+    docs: r.mrVisits.map(x => x.nomor || x.id)
+  }))))), filtered.length === 0 && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: theme.muted,
+      textAlign: "center",
+      margin: 0
+    }
+  }, "Tidak ada Sales Order yang cocok.")));
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 // MUTASI BARANG — read-only, fully automatic stock movement ledger. Never entered manually; every
@@ -37991,6 +38215,11 @@ function App() {
         });
       case "audit_trail":
         return /*#__PURE__*/React.createElement(AuditTrailModule, {
+          store: store,
+          session: session
+        });
+      case "document_trail":
+        return /*#__PURE__*/React.createElement(DocumentTrailModule, {
           store: store,
           session: session
         });
