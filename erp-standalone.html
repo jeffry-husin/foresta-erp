@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-10.8";
+const APP_BUILD = "2026-08-10.9";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -1550,10 +1550,11 @@ function hasUangDinasAccess(session) {
   if (!session) return false;
   if (session.role === "owner" || session.role === "gm" || session.role === "finance_director") return true;
   if (session.username === "workshop1" || session.username === "workshop2") return true;
+  if (hasAdminModule(session, "uang_dinas")) return true;
   return session.role === "mekanik" || session.role === "freelance";
 }
 function isUangDinasSuperUser(session) {
-  return !!session && (session.role === "owner" || session.role === "gm" || session.role === "finance_director");
+  return !!session && (session.role === "owner" || session.role === "gm" || session.role === "finance_director" || hasAdminModule(session, "uang_dinas"));
 }
 // FULL/ADMIN ACCESS PER MODULE — many modules distinguish between "can see this module at all"
 // (customModules / role default list) and "can see everyone's data + do admin actions within it"
@@ -1841,7 +1842,7 @@ const USER_DAN_AKSES_SEED = [{
   username: "admin1",
   nama: "Epy",
   role: "sales_admin",
-  customModules: ["dashboard", "master_part", "master_unit", "customer", "part_request", "sales_order", "mekanik_report", "ticketing", "maintenance_schedule", "workshop_dashboard", "workshop_ops", "attendance"]
+  customModules: ["dashboard", "master_part", "master_unit", "customer", "part_request", "sales_order", "mekanik_report", "ticketing", "maintenance_schedule", "workshop_dashboard", "workshop_ops", "attendance", "uang_dinas", "uang_dinas:admin", "uang_makan", "uang_makan:admin"]
 }, {
   username: "admin2",
   nama: "Pipin",
@@ -4921,21 +4922,53 @@ function MasterPart({
     // Functional form — re-fetches the latest server parts list right before applying this
     // approval, so approving one pending request (which may sit for a while before GM gets to it)
     // can't silently overwrite parts someone else added/edited in the meantime.
+    // BUG FIX (2026-08-11) — safety net: if two "Tambah" (new part) requests were submitted close
+    // together, genPartNumber's pending-request check (above) should already keep them from
+    // colliding going forward, but as a second line of defense this must NEVER silently overwrite
+    // an already-approved part just because a later request happens to carry the same Part Number
+    // (e.g. someone typed a manual duplicate). Previously this branch used the same "find by
+    // partNumber, overwrite if found" logic for both Edit AND Tambah — for Tambah that meant the
+    // second approval clobbered the first one's part instead of creating a separate item, so the
+    // second (and any further) approved item just silently vanished. Tambah now always inserts as
+    // its own new row; if its Part Number turns out to already be taken, it's auto-renumbered to a
+    // fresh unique one instead of overwriting, and that correction is recorded in the audit log.
+    let correctedNumber = null;
     setParts(prev => {
       const arr = [...prev];
       if (req.action === "Hapus") {
         const idx = arr.findIndex(p => p.partNumber === req.targetId);
         if (idx >= 0) arr.splice(idx, 1);
+      } else if (req.action === "Tambah") {
+        let finalPayload = payload;
+        if (arr.find(p => p.partNumber === payload.partNumber)) {
+          let n = arr.length + 1;
+          let candidate;
+          do {
+            candidate = "PN-" + new Date().getFullYear() + "-" + String(n).padStart(4, "0");
+            n++;
+          } while (arr.find(p => p.partNumber === candidate));
+          correctedNumber = candidate;
+          finalPayload = {
+            ...payload,
+            partNumber: candidate
+          };
+        }
+        arr.push(finalPayload);
       } else {
+        // Edit: this part number is the target's own existing identity, so overwrite-in-place is correct.
         const idx = arr.findIndex(p => p.partNumber === req.targetId);
         if (idx >= 0) arr[idx] = payload;else arr.push(payload);
       }
       return arr;
     });
+    const finalPayload = correctedNumber ? {
+      ...payload,
+      partNumber: correctedNumber
+    } : payload;
     const reqArr = [...editRequests];
     reqArr[editRequests.indexOf(req)] = {
       ...req,
-      payload,
+      payload: finalPayload,
       status: "Disetujui GM"
     };
     setEditRequests(reqArr);
@@ -4943,8 +4976,9 @@ function MasterPart({
       module: "Master Part",
       docNomor: req.targetLabel,
       action: `Approve ${req.action}`,
-      detail: ""
+      detail: correctedNumber ? `Part Number "${payload.partNumber}" sudah dipakai part lain — otomatis diganti jadi "${correctedNumber}" agar tidak menimpa part yang sudah ada.` : ""
     });
+    if (correctedNumber) alert(`Part Number "${payload.partNumber}" sudah dipakai part lain (kemungkinan pengajuan lain yang disetujui lebih dulu). Sistem otomatis memberi Part Number baru: "${correctedNumber}" agar part ini tidak menimpa data yang sudah ada. Silakan cek Master Part.`);
     setReviewReq(null);
   };
   const rejectEditRequest = req => {
@@ -5022,13 +5056,23 @@ function MasterPart({
     });
   };
   // Auto-generate a unique Part Number when the user leaves it blank on a new part.
+  // BUG FIX (2026-08-11): this used to only check collisions against the already-committed `parts`
+  // array. When several non-GM users submit new parts for approval close together, none of those
+  // pending submissions are in `parts` yet (they only land there once GM approves), so every one of
+  // them independently computed the SAME "next" candidate number. GM would then approve them one by
+  // one and each subsequent approval would silently overwrite the previously-approved part (see
+  // approveEditRequest below) instead of creating a separate item — items "disappeared" even after
+  // being approved. Fix: also check against every OTHER Part Number already reserved by a pending
+  // ("Menunggu Approval GM") Master Part "Tambah" request, so simultaneous submissions can't collide.
+  const pendingNewPartNumbers = () => new Set(editRequests.filter(r => r.module === "Master Part" && r.action === "Tambah" && r.status === "Menunggu Approval GM").map(r => r.payload?.partNumber).filter(Boolean));
   const genPartNumber = () => {
+    const pending = pendingNewPartNumbers();
     let n = parts.length + 1;
     let candidate;
     do {
       candidate = "PN-" + new Date().getFullYear() + "-" + String(n).padStart(4, "0");
       n++;
-    } while (parts.find(p => p.partNumber === candidate));
+    } while (parts.find(p => p.partNumber === candidate) || pending.has(candidate));
     return candidate;
   };
   const save = () => {
@@ -5066,7 +5110,9 @@ function MasterPart({
     } else {
       // Non-GM roles: every add/edit goes through GM approval
       const action = editIdx !== null ? "Edit" : "Tambah";
-      if (action === "Tambah" && parts.find(p => p.partNumber === item.partNumber)) return alert("Part Number sudah ada");
+      // Also check pending (not-yet-approved) submissions, not just committed `parts` — otherwise a
+      // manually-typed Part Number can still collide with another request still awaiting GM approval.
+      if (action === "Tambah" && (parts.find(p => p.partNumber === item.partNumber) || pendingNewPartNumbers().has(item.partNumber))) return alert("Part Number sudah ada / sedang diajukan oleh pengajuan lain yang masih menunggu approval GM.");
       submitEditRequest(store, session, {
         module: "Master Part",
         action,
@@ -27450,7 +27496,7 @@ function UangMakanModule({
     setEmployees,
     rekapAbsensi
   } = store;
-  const isAdmin = hasPayrollAccess(session.role);
+  const isAdmin = hasPayrollAccess(session.role) || hasAdminModule(session, "uang_makan");
   const myEmp = (employees || []).find(e => e.username === session.username);
   // Rekap Absensi is saved PER PERIODE (weekly, Kamis–Rabu per HRD's fingerprint-machine cutoff —
   // same convention already used by Laporan Mingguan Mekanik in Rekap Absensi). Uang Makan is a
