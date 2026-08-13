@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-13.1";
+const APP_BUILD = "2026-08-13.2";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -1194,6 +1194,37 @@ const findQuotationForSO = (store, so) => {
   if (!so || !so.sourceNomor) return null;
   return (store.quotationsUnit || []).find(q => q.nomor === so.sourceNomor) || (store.quotationsPS || []).find(q => q.nomor === so.sourceNomor) || null;
 };
+// ════════════════════════════════════════════════════════════════════════════
+// QUOTATION REVISION FAMILY — single shared source of truth (bug fixed 2026-08-13, QPS-2026-0002
+// Bumi Sawit Kencana + identical bug in Unit Quotation, SalesOrderModule, and KPI Sales).
+//
+// An SO's sourceNomor is permanently set to whichever quotation nomor was current at the moment it
+// was pulled. If a quotation that already has a (possibly partial) SO gets revised afterward, the
+// revision gets a NEW nomor (e.g. UQ-024 -> UQ-024-R1) — so any code that looks up "does this
+// quotation already have an SO" or "what date did this quotation become an SO" via an EXACT nomor
+// match against so.sourceNomor silently finds nothing for the fresh revision, even though its
+// predecessor already has one. This showed up as quotations reappearing in FOLLOW UP / ON GOING
+// forever after already being converted, and would equally under-count SO-linked KPI metrics for
+// any quotation that was ever revised post-SO.
+//
+// FIX: every FORWARD lookup (quotation -> its SO(s)) must resolve through the whole revision family
+// (original nomor + every -R# descendant sharing the same revisiDari root), not just the single
+// nomor of whichever revision object happens to be in hand. Reverse lookups (SO -> its source
+// quotation, via findQuotationForSO above) are NOT affected by this bug and must stay an exact
+// match — so.sourceNomor correctly points at whichever exact quotation record was current when
+// that specific SO was created, and that record is never deleted, only superseded.
+//
+// Going forward: ANY new code that needs to check "does this quotation have an SO" or find SO(s)
+// belonging to a quotation MUST call quotationFamilyNomors / soMatchesQuotationFamily below instead
+// of writing a fresh so.sourceNomor === q.nomor comparison — that direct comparison pattern is
+// exactly what caused this bug three separate times before it was consolidated here.
+const quotationFamilyNomors = (quotationsUnit, quotationsPS, nomor) => {
+  const all = [...(quotationsUnit || []), ...(quotationsPS || [])];
+  const q0 = all.find(x => x.nomor === nomor);
+  const fam = q0 ? q0.revisiDari || q0.nomor : nomor;
+  return all.filter(x => (x.revisiDari || x.nomor) === fam).map(x => x.nomor);
+};
+const soMatchesQuotationFamily = (so, quotationsUnit, quotationsPS, quotNomor) => quotationFamilyNomors(quotationsUnit, quotationsPS, quotNomor).includes(so.sourceNomor);
 const KOMISI_RATE_NEW = 1.2;
 const KOMISI_RATE_RETURNING = 0.8;
 const computeKomisiForSO = (store, so, override) => {
@@ -13147,15 +13178,12 @@ function QuotationUnit({
   // fresh revision object finds ZERO related SOs — the revision looks completely unordered even
   // though its predecessor already has one, and it reappears in ON GOING / FOLLOW UP forever. Now
   // matches on the whole revision family (original + every -R#), not just the single current nomor.
+  // Uses the shared quotationFamilyNomors helper (see its definition near findQuotationForSO) so
+  // this revision-family matching logic lives in exactly one place going forward.
   const quotItemKeyUQ = it => it.partNumber && it.partNumber !== "-" ? it.partNumber : `${it.partNumber || ""}::${it.partName || ""}`;
-  const quotFamilyNomorsUQ = nomor => {
-    const q0 = quotationsUnit.find(x => x.nomor === nomor);
-    const fam = q0 ? q0.revisiDari || q0.nomor : nomor;
-    return quotationsUnit.filter(x => (x.revisiDari || x.nomor) === fam).map(x => x.nomor);
-  };
   const quotAlreadyHasSO = q => {
     const nomor = typeof q === "string" ? q : q.nomor;
-    const famNomors = quotFamilyNomorsUQ(nomor);
+    const famNomors = quotationFamilyNomors(quotationsUnit, store.quotationsPS, nomor);
     const relatedSO = salesOrders.filter(so => famNomors.includes(so.sourceNomor));
     if (relatedSO.length === 0) return false;
     if (typeof q === "string") return true;
@@ -14697,15 +14725,12 @@ function QuotationPS({
   // quotation nomor was current when it was pulled. If a quotation with a partial SO already made
   // against it gets revised later, the revision has a NEW nomor, so an exact-nomor lookup finds zero
   // related SOs for it and it wrongly reappears in ON GOING / FOLLOW UP forever. Match on the whole
-  // revision family (original + every -R#) instead of just the current nomor. Mirrors the identical
-  // fix in QuotationUnit (quotFamilyNomorsUQ) and SalesOrderModule (quotAlreadyHasSO).
+  // revision family (original + every -R#) instead of just the current nomor, via the shared
+  // quotationFamilyNomors helper (see its definition near findQuotationForSO) — mirrors the
+  // identical fix in QuotationUnit and SalesOrderModule, all three now calling the same function.
   const qpsItemKeyPS = it => it.partNumber && it.partNumber !== "-" ? it.partNumber : `${it.partNumber || ""}::${it.partName || ""}`;
-  const quotFamilyNomorsPS = q => {
-    const fam = q.revisiDari || q.nomor;
-    return quotationsPS.filter(x => (x.revisiDari || x.nomor) === fam).map(x => x.nomor);
-  };
   const quotAlreadyHasSOPS = q => {
-    const famNomors = quotFamilyNomorsPS(q);
+    const famNomors = quotationFamilyNomors(store.quotationsUnit, quotationsPS, q.nomor);
     const relatedSO = (salesOrders || []).filter(so => famNomors.includes(so.sourceNomor));
     if (relatedSO.length === 0) return false;
     const pulled = new Set(relatedSO.flatMap(so => (so.items || []).map(qpsItemKeyPS)));
@@ -15889,20 +15914,15 @@ function SalesOrderModule({
   // quotation nomor was current when it was pulled. If a quotation with a partial SO already made
   // against it gets revised later (new nomor, e.g. ...-R1), an exact-nomor lookup against the fresh
   // revision finds zero related SOs, so the picker wrongly re-offers it as fully unordered. Match on
-  // the whole revision family (original + every -R#) in whichever list (Unit or PS) the quotation
-  // belongs to. Mirrors the identical fix in QuotationUnit/QuotationPS list components.
+  // the whole revision family (original + every -R#) via the shared quotationFamilyNomors helper
+  // (see its definition near findQuotationForSO) — mirrors the identical fix in
+  // QuotationUnit/QuotationPS list components, all three now calling the same function.
   const quotItemKey = it => it.partNumber && it.partNumber !== "-" ? it.partNumber : `${it.partNumber || ""}::${it.partName || ""}`;
-  const quotFamilyNomors = nomor => {
-    const src = [...(quotationsUnit || []), ...(quotationsPS || [])];
-    const q0 = src.find(x => x.nomor === nomor);
-    const fam = q0 ? q0.revisiDari || q0.nomor : nomor;
-    return src.filter(x => (x.revisiDari || x.nomor) === fam).map(x => x.nomor);
-  };
-  const quotPulledItemKeySet = nomor => new Set(salesOrders.filter(so => quotFamilyNomors(nomor).includes(so.sourceNomor)).flatMap(so => (so.items || []).map(quotItemKey)));
+  const quotPulledItemKeySet = nomor => new Set(salesOrders.filter(so => quotationFamilyNomors(quotationsUnit, quotationsPS, nomor).includes(so.sourceNomor)).flatMap(so => (so.items || []).map(quotItemKey)));
   const quotUninvoicedItems = q => (q.items || []).filter(it => !quotPulledItemKeySet(q.nomor).has(quotItemKey(it)));
   const quotAlreadyHasSO = q => {
     const nomor = typeof q === "string" ? q : q.nomor;
-    const hasAnySO = salesOrders.some(so => quotFamilyNomors(nomor).includes(so.sourceNomor));
+    const hasAnySO = salesOrders.some(so => quotationFamilyNomors(quotationsUnit, quotationsPS, nomor).includes(so.sourceNomor));
     if (!hasAnySO) return false;
     if (typeof q === "string") return true; // fallback: no item detail available, keep old (any-SO) behavior
     return quotUninvoicedItems(q).length === 0;
@@ -34287,7 +34307,12 @@ function KPISalesModule({
     const q = [...quotationsUnit, ...(quotationsPS || [])].find(x => x.nomor === nomor);
     return q?.tanggal;
   };
-  const soDateForQuot = quotNomor => salesOrders.find(so => so.sourceNomor === quotNomor)?.tanggal;
+  // BUG FIX (12/8/2026, generalized from QPS-2026-0002 Bumi Sawit Kencana): a quotation's SO is
+  // looked up here too — if the quotation was revised after its SO was pulled, an exact-nomor match
+  // against so.sourceNomor would silently return undefined for the new revision, understating "SO
+  // Diterima"/revenue KPI for anyone whose deal was ever revised post-SO. Use the shared
+  // quotationFamilyNomors helper (see its definition near findQuotationForSO) instead.
+  const soDateForQuot = quotNomor => salesOrders.find(so => quotationFamilyNomors(quotationsUnit, quotationsPS, quotNomor).includes(so.sourceNomor))?.tanggal;
   // Target KPI (kpiTargets) disimpan sebagai angka BULANAN (mis. "Target Kontak Baru: 15" berarti
   // 15/bulan). Supaya perbandingan tetap adil saat periode yang dipilih lebih/kurang dari sebulan
   // (atau saat tidak ada periode dipilih sama sekali, yaitu all-time sejak data paling awal), target
@@ -34397,7 +34422,21 @@ function KPISalesModule({
     // (same as above — a deal counts toward the period it was QUOTED in), "so" instead uses the
     // resulting Sales Order's own tanggal (the period the client's PO/SO was actually created in)
     // — these can land in very different periods for a quotation that took a while to close.
-    const myQuotSuccessAll = myQuotAll.filter(q => q.status === "Sudah jadi SO");
+    // BUG FIX (12/8/2026, generalized from QPS-2026-0002 Bumi Sawit Kencana): q.status alone
+    // undercounts "success" here — a revision always starts fresh at "Menunggu Approval GM" (see
+    // QuotationUnit/QuotationPS's revision save logic), even when an EARLIER revision in the same
+    // family already has a full SO. Without this fallback, revising a quotation after it's already
+    // won would make that sales manager's deal silently vanish from "SO Diterima"/revenue KPIs.
+    // Mirrors the quotAlreadyHasSO/quotAlreadyHasSOPS item-coverage check used everywhere else.
+    const kpiItemKey = it => it.partNumber && it.partNumber !== "-" ? it.partNumber : `${it.partNumber || ""}::${it.partName || ""}`;
+    const quotHasFullSOCoverage = q => {
+      const famNomors = quotationFamilyNomors(quotationsUnit, quotationsPS, q.nomor);
+      const relatedSO = salesOrders.filter(so => famNomors.includes(so.sourceNomor));
+      if (relatedSO.length === 0) return false;
+      const pulled = new Set(relatedSO.flatMap(so => (so.items || []).map(kpiItemKey)));
+      return (q.items || []).every(it => pulled.has(kpiItemKey(it)));
+    };
+    const myQuotSuccessAll = myQuotAll.filter(q => q.status === "Sudah jadi SO" || quotHasFullSOCoverage(q));
     const myQuotSuccess = !kpiPeriodeAktif ? myQuotSuccessAll : myQuotSuccessAll.filter(q => inKpiPeriode(kpiPeriodeBasis === "so" ? soDateForQuot(q.nomor) : q.tanggal));
     // Target SO achievement — ALWAYS measured against the current calendar month/year, independent
     // of whatever periode filter is selected above on the main KPI Sales screen, so "apakah target
@@ -34443,7 +34482,10 @@ function KPISalesModule({
     // determine NEW vs RETURNING (see customerTypeForSO — first-ever SO for that customerId = NEW).
     let newCustomerRevenue = 0;
     myQuotSuccess.forEach(q => {
-      const so = salesOrders.find(s => s.sourceNomor === q.nomor);
+      // Same revision-family bug class as soDateForQuot above — a q that was revised after its SO
+      // was pulled would silently fail this exact-nomor match and drop out of the NEW-customer
+      // revenue count entirely.
+      const so = salesOrders.find(s => quotationFamilyNomors(quotationsUnit, quotationsPS, q.nomor).includes(s.sourceNomor));
       if (so && customerTypeForSO(salesOrders, so) === "NEW") newCustomerRevenue += preTax(q);
     });
     const newCustomerRevenuePct = valueQuotationSO ? Math.round(newCustomerRevenue / valueQuotationSO * 100) : 0;
