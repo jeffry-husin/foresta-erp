@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-12.4";
+const APP_BUILD = "2026-08-13.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -13140,10 +13140,23 @@ function QuotationUnit({
   // BUG FIX (SQ-099-FRT-VII-2026-R5 — Sirajasa Bentalatama): mirrors the identical fix in
   // SalesOrderModule — only treat a quotation as "already has SO" once every one of its items has
   // actually been pulled into an SO, not the moment ANY (possibly partial) SO exists for it.
+  // BUG FIX (12/8/2026 — QPS-2026-0002 Bumi Sawit Kencana, discovered via same pattern in Unit
+  // Quotation): an SO's sourceNomor is fixed to whatever quotation nomor was current at the moment
+  // it was pulled. If a quotation with a partial SO already made against it is later revised (e.g.
+  // UQ-024 -> UQ-024-R1), the revision gets a NEW nomor, so this exact-nomor lookup against the
+  // fresh revision object finds ZERO related SOs — the revision looks completely unordered even
+  // though its predecessor already has one, and it reappears in ON GOING / FOLLOW UP forever. Now
+  // matches on the whole revision family (original + every -R#), not just the single current nomor.
   const quotItemKeyUQ = it => it.partNumber && it.partNumber !== "-" ? it.partNumber : `${it.partNumber || ""}::${it.partName || ""}`;
+  const quotFamilyNomorsUQ = nomor => {
+    const q0 = quotationsUnit.find(x => x.nomor === nomor);
+    const fam = q0 ? q0.revisiDari || q0.nomor : nomor;
+    return quotationsUnit.filter(x => (x.revisiDari || x.nomor) === fam).map(x => x.nomor);
+  };
   const quotAlreadyHasSO = q => {
     const nomor = typeof q === "string" ? q : q.nomor;
-    const relatedSO = salesOrders.filter(so => so.sourceNomor === nomor);
+    const famNomors = quotFamilyNomorsUQ(nomor);
+    const relatedSO = salesOrders.filter(so => famNomors.includes(so.sourceNomor));
     if (relatedSO.length === 0) return false;
     if (typeof q === "string") return true;
     const pulled = new Set(relatedSO.flatMap(so => (so.items || []).map(quotItemKeyUQ)));
@@ -14680,9 +14693,20 @@ function QuotationPS({
   // SOs (Parts + Jasa), and the second SO's completion could go unreflected in q.status, leaving a
   // fully-converted quotation stuck in ON GOING forever. Now decided by actual item coverage
   // (quotAlreadyHasSOPS), with q.status as a secondary signal only.
+  // BUG FIX (12/8/2026 — QPS-2026-0002 Bumi Sawit Kencana): an SO's sourceNomor is fixed to whatever
+  // quotation nomor was current when it was pulled. If a quotation with a partial SO already made
+  // against it gets revised later, the revision has a NEW nomor, so an exact-nomor lookup finds zero
+  // related SOs for it and it wrongly reappears in ON GOING / FOLLOW UP forever. Match on the whole
+  // revision family (original + every -R#) instead of just the current nomor. Mirrors the identical
+  // fix in QuotationUnit (quotFamilyNomorsUQ) and SalesOrderModule (quotAlreadyHasSO).
   const qpsItemKeyPS = it => it.partNumber && it.partNumber !== "-" ? it.partNumber : `${it.partNumber || ""}::${it.partName || ""}`;
+  const quotFamilyNomorsPS = q => {
+    const fam = q.revisiDari || q.nomor;
+    return quotationsPS.filter(x => (x.revisiDari || x.nomor) === fam).map(x => x.nomor);
+  };
   const quotAlreadyHasSOPS = q => {
-    const relatedSO = (salesOrders || []).filter(so => so.sourceNomor === q.nomor);
+    const famNomors = quotFamilyNomorsPS(q);
+    const relatedSO = (salesOrders || []).filter(so => famNomors.includes(so.sourceNomor));
     if (relatedSO.length === 0) return false;
     const pulled = new Set(relatedSO.flatMap(so => (so.items || []).map(qpsItemKeyPS)));
     return (q.items || []).every(it => pulled.has(qpsItemKeyPS(it)));
@@ -15861,12 +15885,24 @@ function SalesOrderModule({
   // pulled into at least one SO; a quotation with a leftover un-pulled item keeps showing in ON
   // GOING (so "Buat SO" can be used again for the rest) until it does, or is closed manually via
   // dismissQuotFromSOList below.
+  // BUG FIX (12/8/2026 — QPS-2026-0002 Bumi Sawit Kencana): an SO's sourceNomor is fixed to whatever
+  // quotation nomor was current when it was pulled. If a quotation with a partial SO already made
+  // against it gets revised later (new nomor, e.g. ...-R1), an exact-nomor lookup against the fresh
+  // revision finds zero related SOs, so the picker wrongly re-offers it as fully unordered. Match on
+  // the whole revision family (original + every -R#) in whichever list (Unit or PS) the quotation
+  // belongs to. Mirrors the identical fix in QuotationUnit/QuotationPS list components.
   const quotItemKey = it => it.partNumber && it.partNumber !== "-" ? it.partNumber : `${it.partNumber || ""}::${it.partName || ""}`;
-  const quotPulledItemKeySet = nomor => new Set(salesOrders.filter(so => so.sourceNomor === nomor).flatMap(so => (so.items || []).map(quotItemKey)));
+  const quotFamilyNomors = nomor => {
+    const src = [...(quotationsUnit || []), ...(quotationsPS || [])];
+    const q0 = src.find(x => x.nomor === nomor);
+    const fam = q0 ? q0.revisiDari || q0.nomor : nomor;
+    return src.filter(x => (x.revisiDari || x.nomor) === fam).map(x => x.nomor);
+  };
+  const quotPulledItemKeySet = nomor => new Set(salesOrders.filter(so => quotFamilyNomors(nomor).includes(so.sourceNomor)).flatMap(so => (so.items || []).map(quotItemKey)));
   const quotUninvoicedItems = q => (q.items || []).filter(it => !quotPulledItemKeySet(q.nomor).has(quotItemKey(it)));
   const quotAlreadyHasSO = q => {
     const nomor = typeof q === "string" ? q : q.nomor;
-    const hasAnySO = salesOrders.some(so => so.sourceNomor === nomor);
+    const hasAnySO = salesOrders.some(so => quotFamilyNomors(nomor).includes(so.sourceNomor));
     if (!hasAnySO) return false;
     if (typeof q === "string") return true; // fallback: no item detail available, keep old (any-SO) behavior
     return quotUninvoicedItems(q).length === 0;
@@ -20782,6 +20818,19 @@ function GoodsReceiptModule({
   const [receiverSettingsOpen, setReceiverSettingsOpen] = useState(false);
   const [detailGR, setDetailGR] = useState(null);
   const [detailIDO, setDetailIDO] = useState(null);
+  // Internal DO only stores poNomor natively — trace PO -> its IR(s) -> each IR's soNomor /
+  // soCustomerNama (already stored on the IR record) -> that SO's noPoClient, so the detail popup
+  // can show No. SO, No. IR, No. PO Client and Nama Customer instead of just the raw PO number.
+  const idoLinkedInfo = ido => {
+    if (!ido?.poNomor) return { irNomors: [], soNomors: [], customerNamas: [], noPoClients: [] };
+    const po = [...(poLocal || []), ...(poOverseas || [])].find(p => p.nomor === ido.poNomor);
+    const irNomors = po?.irNomors || [];
+    const irs = irNomors.map(n => (itemRequisitions || []).find(r => r.nomor === n)).filter(Boolean);
+    const soNomors = [...new Set(irs.map(r => r.soNomor).filter(Boolean))];
+    const customerNamas = [...new Set(irs.map(r => r.soCustomerNama).filter(Boolean))];
+    const noPoClients = [...new Set(soNomors.map(n => (salesOrders || []).find(s => s.nomor === n)?.noPoClient).filter(Boolean))];
+    return { irNomors, soNomors, customerNamas, noPoClients };
+  };
   const [editIDO, setEditIDO] = useState(null); // Internal DO record currently being edited
   const [editIDOForm, setEditIDOForm] = useState({
     mekanikNama: "",
@@ -21802,6 +21851,58 @@ function GoodsReceiptModule({
       color: theme.text
     }
   }, detailIDO.poNomor || "-")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted
+    }
+  }, "No. SO"), /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, idoLinkedInfo(detailIDO).soNomors.join(", ") || "-")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted
+    }
+  }, "No. IR"), /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, idoLinkedInfo(detailIDO).irNomors.join(", ") || "-")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted
+    }
+  }, "No. PO Client"), /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, idoLinkedInfo(detailIDO).noPoClients.join(", ") || "-")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted
+    }
+  }, "Nama Customer"), /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, idoLinkedInfo(detailIDO).customerNamas.join(", ") || "-")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between"
