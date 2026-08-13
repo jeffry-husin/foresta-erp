@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-12.3";
+const APP_BUILD = "2026-08-12.4";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -1207,6 +1207,12 @@ const computeKomisiForSO = (store, so, override) => {
   const recommendedRate = customerType === "NEW" ? KOMISI_RATE_NEW : KOMISI_RATE_RETURNING;
   const hasRateOverride = override && (override.rateOverride === KOMISI_RATE_NEW || override.rateOverride === KOMISI_RATE_RETURNING);
   const rate = hasRateOverride ? override.rateOverride : recommendedRate;
+  // customerType above stays historically accurate (from customerTypeForSO — used elsewhere e.g.
+  // KPI Sales P1, must not change). But the Komisi module's own Tipe Client BADGE should follow a
+  // manual rate override: if GM/handler overrides the rate to the "repeat order" rate, the label
+  // should read Repeat too, not stay stuck on "Baru" just because it's historically this
+  // customer's first SO. Scoped to display only — does not touch customerTypeForSO itself.
+  const customerTypeDisplay = hasRateOverride ? (rate === KOMISI_RATE_NEW ? "NEW" : "RETURNING") : customerType;
   const nilaiKomisi = basis * rate / 100;
   // Komisi tidak selalu dibayar sekaligus — riwayatPembayaran menyimpan tiap pembayaran parsial
   // {tanggal, jumlah, oleh}. Legacy override records only have a boolean dibayar/dibayarTanggal/
@@ -1220,7 +1226,7 @@ const computeKomisiForSO = (store, so, override) => {
   const statusBayar = sudahDibayar <= 0 ? "Belum Dibayar" : sisaDibayar <= 0.5 ? "Lunas" : "Sebagian";
   return {
     so, quot, salesDiscount, salesDiscountIsOverridden: hasSalesDiscountOverride, nilaiSO, basis,
-    customerType, recommendedRate, rate, rateIsOverridden: hasRateOverride, nilaiKomisi,
+    customerType, customerTypeDisplay, recommendedRate, rate, rateIsOverridden: hasRateOverride, nilaiKomisi,
     riwayatPembayaran, sudahDibayar, sisaDibayar, statusBayar,
     dibayar: statusBayar === "Lunas", dibayarTanggal: override?.dibayarTanggal || null, dibayarOleh: override?.dibayarOleh || null
   };
@@ -18381,6 +18387,11 @@ function PurchaseOrderModule({
   const poFiltered = (poSearch.trim() ? po.filter(p => {
     const q = poSearch.trim().toLowerCase();
     if ([p.nomor, p.supplierNama].filter(Boolean).some(x => String(x).toLowerCase().includes(q))) return true;
+    // Bug fix (2026-08-12): search previously only matched No. PO / Supplier / item Part Number
+    // & Nama Barang — the "No. IR" column shown in the list (p.irNomors, an array) was never
+    // checked, so searching e.g. "IR-072" found nothing even though many POs in ON GOING/CLOSED
+    // were sourced from that IR.
+    if ((p.irNomors || []).some(x => String(x).toLowerCase().includes(q))) return true;
     return (p.items || []).some(it => [it.partNumber, it.partName].filter(Boolean).some(x => String(x).toLowerCase().includes(q)));
   }) : po).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const [modal, setModal] = useState(false);
@@ -18474,7 +18485,12 @@ function PurchaseOrderModule({
   const [irPick, setIrPick] = useState(null);
   const [irPickedIdx, setIrPickedIdx] = useState([]);
   const [irPickTarget, setIrPickTarget] = useState("create"); // 'create' | 'revise'
-  const newNomor = (arr = po) => genDocNumber(arr, isLocal ? "PL" : "PO");
+  // PO Overseas prefix changed from "PO" to "POV" (2026-08-12) so it's not confused with the
+  // "PL" (Lokal) prefix at a glance. Only NEW PO Overseas get "POV" going forward — genDocNumber
+  // just looks at existing docs with the SAME prefix to compute the next sequence number, so
+  // existing "PO-xxx" documents are left untouched and simply won't collide with new "POV-xxx"
+  // ones (they're tracked as separate sequences).
+  const newNomor = (arr = po) => genDocNumber(arr, isLocal ? "PL" : "POV");
   const addDays = (dateStr, days) => {
     const d = new Date(dateStr);
     d.setDate(d.getDate() + parseInt(days));
@@ -18968,11 +18984,20 @@ function PurchaseOrderModule({
   };
   const saveSupplierDoc = () => {
     const arr = [...po];
+    const wasClosed = isPoClosed(supplierDocModal);
     arr[po.indexOf(supplierDocModal)] = {
       ...supplierDocModal,
       noInvoiceSupplier: supplierDocForm.isCash ? "CASH" : supplierDocForm.noInvoiceSupplier,
-      noFakturPajak: supplierDocForm.noFakturPajak
+      // PO yang sudah Closed hanya boleh edit No. Invoice Supplier — field lain (termasuk No.
+      // Faktur Pajak) dikunci ke nilai lama agar tidak berubah tanpa sengaja.
+      noFakturPajak: wasClosed ? supplierDocModal.noFakturPajak : supplierDocForm.noFakturPajak
     };
+    logAudit(store, session, {
+      module: `Purchase Order ${isLocal ? "Lokal" : "Overseas"}`,
+      docNomor: supplierDocModal.nomor,
+      action: "Edit No. Invoice Supplier",
+      detail: `${supplierDocModal.noInvoiceSupplier || "-"} → ${supplierDocForm.isCash ? "CASH" : supplierDocForm.noInvoiceSupplier}${wasClosed ? " (PO Closed)" : ""}`
+    });
     setPo(arr);
     setSupplierDocModal(null);
   };
@@ -19360,7 +19385,12 @@ function PurchaseOrderModule({
       variant: "ghost",
       title: "Edit Pembayaran",
       onClick: () => openEditPayment(p)
-    }, "✏️"), /*#__PURE__*/React.createElement(Btn, {
+    }, "✏️"), canMarkPaid && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      title: "Edit No. Invoice Supplier",
+      onClick: () => openSupplierDoc(p)
+    }, "🧾"), /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "ghost",
       title: "Catatan",
@@ -20626,7 +20656,13 @@ function PurchaseOrderModule({
       ...supplierDocForm,
       noInvoiceSupplier: v
     })
-  }), /*#__PURE__*/React.createElement(Input, {
+  }), supplierDocModal && isPoClosed(supplierDocModal) ? /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "PO ini sudah Closed — hanya No. Invoice Supplier yang bisa diedit. No. Faktur Pajak: ", supplierDocModal.noFakturPajak || "-") : /*#__PURE__*/React.createElement(Input, {
     label: "No. Faktur Pajak",
     value: supplierDocForm.noFakturPajak,
     onChange: v => setSupplierDocForm({
@@ -28581,17 +28617,19 @@ function printDocument({
   // fs(n) = n + sizeBoost, and the DO print call site passes sizeBoost: 2. Every other caller
   // (Quotation/Invoice/PO/etc.) omits it, so they keep their original sizes unchanged.
   sizeBoost = 0,
-  // Delivery Order was asked to use one consistent font throughout the printed document (some
-  // elements were inheriting a different stack than the "Nama Barang" item column). CORRECTED
-  // (2026-08-12): an earlier attempt pinned this to Times New Roman based on the wrong reference
-  // (a salary-letter document that turned out to be about wording, not typeface — see
-  // printSlipGaji's comment). The user then sent an actual DO print screenshot ("NS00206" /
-  // "NS00205") as the real font reference, which shows plain sans-serif characters — consistent
-  // with the app's normal 'Segoe UI', Arial, sans-serif stack, not a serif font. So this now just
-  // forces that same sans-serif stack uniformly via `* { font-family }` (plus the matching `body`
-  // rule above), eliminating per-element substitution some print/PDF renderers otherwise apply,
-  // without changing the typeface itself. Scoped to DO only (uniformFont: true at the DO call
-  // site) so other document types are unaffected.
+  // Delivery Order is printed on a dot-matrix, multi-copy (carbon) printer — the user sent an
+  // actual physical DO printout scan (faded copy) where only "NS00206", "NS00205", "FITTING
+  // HOSE" and "10" (the item table's data cells, which inherit the body's solid #1a1a1a color)
+  // came through legibly; the column headers and the Catatan line (styled with light gray
+  // #555/#666 text elsewhere in this function) were essentially unreadable on the carbon copy.
+  // CORRECTED (2026-08-12): an earlier attempt (twice) misread this as a font-FAMILY problem —
+  // first guessing Times New Roman from an unrelated salary-letter reference, then just unifying
+  // the family to match the item column. Neither addressed the actual cause: dot-matrix carbon
+  // copies need dark, heavy strokes, and this function's light gray label/caption colors don't
+  // carry through at all. Fix: for DO specifically, force every element to solid black with bold
+  // weight (`!important`, since inline styles like `color:#555` otherwise win over a plain rule),
+  // not just a consistent font family. Scoped to DO only (uniformFont: true at the DO call site)
+  // so other document types keep their normal (screen-oriented) muted grays.
   uniformFont = false
 }) {
   const fs = n => n + sizeBoost;
@@ -28634,7 +28672,7 @@ function printDocument({
     <style>
       @page { size: A4 portrait; margin: 12mm; }
       body { font-family: 'Segoe UI', Arial, sans-serif; margin: 20px; color: #1a1a1a; }
-      ${uniformFont ? "* { font-family: 'Segoe UI', Arial, sans-serif; }" : ""}
+      ${uniformFont ? "* { font-family: 'Segoe UI', Arial, sans-serif; color: #000 !important; font-weight: 700 !important; }" : ""}
       .header { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 3px solid #1a1a1a; padding-bottom: 16px; margin-bottom: 24px; }
       .company { font-size: ${fs(20)}px; font-weight: 800; white-space: nowrap; }
       .doctitle { font-size: ${fs(26)}px; font-weight: 800; text-align: right; color: #2563eb; }
@@ -28783,7 +28821,7 @@ function printSlipGaji(r, periode, company) {
       <div class="sig">
         Jakarta, ${fmtDateRev(new Date().toISOString().slice(0, 10))}<br/>
         Yang menerangkan,
-        <br/><br/><br/>
+        <br/><br/><br/><br/><br/>
         ____________________<br/>
         HRD Manager
       </div>
@@ -31019,7 +31057,7 @@ function KomisiModule({ store, session }) {
       r.statusBayar === "Sebagian" && React.createElement("span", { style: { fontSize: 11, color: theme.muted } }, `Terbayar ${fmt(r.sudahDibayar)} · Sisa ${fmt(r.sisaDibayar)}`)
     );
     const nilaiKomisiCell = React.createElement("span", { style: { fontWeight: 700, color: theme.accentLight } }, fmt(r.nilaiKomisi));
-    const typeBadge = React.createElement(Badge, { color: r.customerType === "NEW" ? theme.yellow : theme.cyan }, r.customerType === "NEW" ? "Baru" : "Repeat");
+    const typeBadge = React.createElement(Badge, { color: r.customerTypeDisplay === "NEW" ? theme.yellow : theme.cyan }, r.customerTypeDisplay === "NEW" ? "Baru" : "Repeat");
     if (!isOwnerLike) {
       return [r.so.nomor, r.so.tanggal, r.so.customerNama, fmt(r.nilaiSO), typeBadge, rateCell, nilaiKomisiCell, statusCell];
     }
@@ -31038,7 +31076,7 @@ function KomisiModule({ store, session }) {
   return React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 20 } },
     React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 } },
       React.createElement("h2", { style: { margin: 0, color: theme.text } }, "Komisi Sales ", isSalesRep && React.createElement("span", { style: { fontSize: 13, color: theme.muted, fontWeight: 400 } }, "(", session.nama, ")")),
-      React.createElement(ExportExcelBtn, { onClick: () => exportToExcel(filtered.map(r => ({ so: r.so.nomor, tanggal: r.so.tanggal, client: r.so.customerNama, sales: r.so.salesManagerNama, nilaiSO: r.nilaiSO, ...(isOwnerLike ? { salesDiscount: r.salesDiscount } : {}), tipeClient: r.customerType, rate: r.rate, nilaiKomisi: r.nilaiKomisi, status: r.dibayar ? "Sudah Dibayar" : "Belum Dibayar" })), "Komisi_Sales.xlsx", "Komisi Sales") })
+      React.createElement(ExportExcelBtn, { onClick: () => exportToExcel(filtered.map(r => ({ so: r.so.nomor, tanggal: r.so.tanggal, client: r.so.customerNama, sales: r.so.salesManagerNama, nilaiSO: r.nilaiSO, ...(isOwnerLike ? { salesDiscount: r.salesDiscount } : {}), tipeClient: r.customerTypeDisplay, rate: r.rate, nilaiKomisi: r.nilaiKomisi, status: r.dibayar ? "Sudah Dibayar" : "Belum Dibayar" })), "Komisi_Sales.xlsx", "Komisi Sales") })
     ),
     React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))", gap: 16 } },
       React.createElement(Card, null, React.createElement("span", { style: { color: theme.muted, fontSize: 13 } }, "Total Komisi"), React.createElement("div", { style: { fontSize: 22, fontWeight: 700, color: theme.accentLight, marginTop: 6 } }, fmt(totalKomisi))),
