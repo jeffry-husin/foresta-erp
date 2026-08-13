@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-13.4";
+const APP_BUILD = "2026-08-13.5";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -17146,7 +17146,8 @@ function ItemRequisitionModule({
     poLocal,
     poOverseas,
     goodsReceipts,
-    customers
+    customers,
+    deliveryOrders
   } = store;
   const isPipin = session.role === "inventory" || session.role === "admin2";
   const isSepti = session.role === "workshop_manager";
@@ -17359,6 +17360,15 @@ function ItemRequisitionModule({
   // jadi IR" until the parts physically arrived. Root cause of the reported bug (SO-001 already
   // converted to IR-003 but still appearing in the picker).
   const irRequestedQtyFor = (soNomor, partNumber) => (itemRequisitions || []).filter(ir => ir.soNomor === soNomor).reduce((sum, ir) => sum + (ir.items || []).filter(it => it.partNumber === partNumber).reduce((s, it) => s + (Number(it.qtyButuh) || 0), 0), 0);
+  // Total qty of a given SO+part already physically shipped out via Delivery Order. Needed
+  // because an SO can be fulfilled from existing stock WITHOUT ever going through Item
+  // Requisition at all (stock was already sufficient when the DO was made) — in that case
+  // irRequestedQtyFor above is 0 and can never cover the shortfall. Once the goods are gone
+  // (DO created), Master Part stock correctly drops to reflect that, but checkStockForSO would
+  // then misread "stock is now too low" as "this SO still needs procurement" and keep
+  // resurrecting it in the "Belum Jadi IR" picker forever — even though the SO is actually
+  // done. Root cause of QPS-2026-0004/SO-067/DO-019 reappearing after being fully delivered.
+  const deliveredQtyFor = (soNomor, partNumber) => (deliveryOrders || []).filter(d => d.soNomor === soNomor).reduce((sum, d) => sum + (d.items || []).filter(it => it.partNumber === partNumber).reduce((s, it) => s + (Number(it.qty) || 0), 0), 0);
   const checkStockForSO = soNomor => {
     const so = salesOrders.find(s => s.nomor === soNomor);
     if (!so) return [];
@@ -17370,7 +17380,8 @@ function ItemRequisitionModule({
       const reservedByOthers = reservedQtyForAllExcluding(allocationByPart, m.partNumber, soNomor);
       const stok = Math.max(0, stokRaw - reservedByOthers);
       const sudahDiminta = irRequestedQtyFor(soNomor, m.partNumber);
-      const kurang = Math.max(0, m.qty - stok - sudahDiminta);
+      const sudahDikirim = deliveredQtyFor(soNomor, m.partNumber);
+      const kurang = Math.max(0, m.qty - stok - sudahDiminta - sudahDikirim);
       return {
         partNumber: m.partNumber,
         partName: m.partName || part?.partName || m.partNumber,
