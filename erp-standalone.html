@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-13.2";
+const APP_BUILD = "2026-08-13.3";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -13110,7 +13110,7 @@ function QuotationUnit({
     onClick: () => setDetail(q)
   }, q.nomor), q.tanggal, liveNama(q), q.salesManagerNama, fmt(preTaxQ(q)), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(Badge, {
     color: statusColor[q.status]
-  }, q.status), needsFollowUp(q) && /*#__PURE__*/React.createElement("div", {
+  }, q.status), needsFollowUp(q) && !quotAlreadyHasSO(q) && /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 4
     }
@@ -13140,11 +13140,11 @@ function QuotationUnit({
     size: "sm",
     variant: "ghost",
     onClick: () => openRevision(q)
-  }, "↻ Revisi"), q.status === "Disetujui GM" && /*#__PURE__*/React.createElement(Btn, {
+  }, "↻ Revisi"), q.status === "Disetujui GM" && !quotAlreadyHasSO(q) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
     onClick: () => extendFollowUp(q)
-  }, "🔄 Extend"), q.status === "Disetujui GM" && /*#__PURE__*/React.createElement(Btn, {
+  }, "🔄 Extend"), q.status === "Disetujui GM" && !quotAlreadyHasSO(q) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "warning",
     onClick: () => closeQuotation(q)
@@ -14651,7 +14651,7 @@ function QuotationPS({
     color: theme.yellow
   }, "⚠ Part Rec Direvisi"))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(Badge, {
     color: statusColor[q.status]
-  }, q.status), needsFollowUp(q) && /*#__PURE__*/React.createElement("div", {
+  }, q.status), needsFollowUp(q) && !quotAlreadyHasSOPS(q) && /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 4
     }
@@ -14682,11 +14682,11 @@ function QuotationPS({
     size: "sm",
     variant: "ghost",
     onClick: () => openRevision(q)
-  }, "↻ Revisi"), q.status === "Disetujui GM" && /*#__PURE__*/React.createElement(Btn, {
+  }, "↻ Revisi"), q.status === "Disetujui GM" && !quotAlreadyHasSOPS(q) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
     onClick: () => extendFollowUp(q)
-  }, "🔄 Extend"), q.status === "Disetujui GM" && /*#__PURE__*/React.createElement(Btn, {
+  }, "🔄 Extend"), q.status === "Disetujui GM" && !quotAlreadyHasSOPS(q) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "warning",
     onClick: () => closeQuotationPS(q)
