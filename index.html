@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-13.3";
+const APP_BUILD = "2026-08-13.4";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -740,6 +740,15 @@ function readExcelFileMultiSheet(file) {
   });
 }
 
+// Normalizes a name for MATCHING purposes only (never for display) between the fingerprint
+// machine's raw export and Data Karyawan. Machine exports sometimes carry invisible characters —
+// non-breaking spaces, zero-width spaces, a BOM — or doubled internal spaces from its fixed-width
+// name field, which a plain .toLowerCase().trim() does not catch. A name can look byte-for-byte
+// identical on screen (e.g. "STEFANUS SUMARNO" in both the import and Data Karyawan) yet fail an
+// exact-string match because of one of these, silently falling back to the manual "-- Pilih --"
+// picker instead of auto-matching. Collapsing all whitespace runs (after stripping the invisible
+// characters) makes the match robust to both causes.
+const normalizeMesinNama = s => String(s || "").replace(/[ ​‌‍﻿]/g, " ").trim().toLowerCase().replace(/\s+/g, " ");
 // Parse a raw weekly fingerprint-machine export ("LAP REKAPITULASI - [tgl] - [tgl].xls") into a
 // {periode, karyawan[]} structure. The machine's layout is fixed by row/column position (not
 // named headers), so this reads in array mode (header:1) instead of the object-mode
@@ -831,7 +840,7 @@ function hitungKoreksiAbsensi(karyawan, hariLibur, penyesuaian) {
   const liburNum = Number(hariLibur) || 0;
   const numOrNull = v => v !== "" && v !== null && v !== undefined && !Number.isNaN(Number(v)) ? Number(v) : null;
   return (karyawan || []).map(k => {
-    const p = (penyesuaian || []).find(row => String(row.nama || "").toLowerCase().trim() === k.nama.toLowerCase().trim()) || {};
+    const p = (penyesuaian || []).find(row => normalizeMesinNama(row.nama) === normalizeMesinNama(k.nama)) || {};
     const dLuar = numOrNull(p.dLuar) || 0;
     const cutiEdit = numOrNull(p.cuti) ?? k.cuti;
     // Cuti Khusus (special/paid leave outside the 12-hari/year annual quota — menikah, keluarga
@@ -18083,10 +18092,10 @@ function ItemRequisitionModule({
       partyLabel: "No. Sales Order:",
       partyName: detail.soNomor || "-",
       partyExtra: detail.soCustomerNama || "",
-      itemHeaders: ["Part Number", "Part Name", "Qty Dibutuhkan", "Stok Tersedia", "Qty Kurang", "Catatan"],
+      itemHeaders: ["Part Number", "Part Name", "Deskripsi", "Qty Dibutuhkan", "Stok Tersedia", "Qty Kurang", "Catatan"],
       items: detail.items.map(it => {
         const live = liveIrItemStock(it, detail.soNomor);
-        return [it.partNumber, it.partName, fmtNum(it.qtyButuh), fmtNum(live.stokTersedia), fmtNum(live.qtyKurang), it.catatan || "-"];
+        return [it.partNumber, it.partName, it.description || parts.find(p => p.partNumber === it.partNumber)?.description || "-", fmtNum(it.qtyButuh), fmtNum(live.stokTersedia), fmtNum(live.qtyKurang), it.catatan || "-"];
       }),
       showPrice: false,
       extraInfoRows: [["Status", detail.status], ["No. Sales Order", detail.soNomor || "-"], ["No. PO Client", (salesOrders.find(s => s.nomor === detail.soNomor)?.noPoClient) || "-"], ["No. Purchase Order", irRefInfo(detail).poNomors.join(", ") || "-"]],
@@ -32667,7 +32676,7 @@ function RekapMesinPanel({
   const resolveEmpForName = nama => {
     const override = nameOverrides[nama];
     const target = override || nama;
-    return (employees || []).find(e => String(e.nama || "").toLowerCase().trim() === String(target || "").toLowerCase().trim()) || null;
+    return (employees || []).find(e => normalizeMesinNama(e.nama) === normalizeMesinNama(target)) || null;
   };
   const blankPenyesuaian = () => ({
     nama: "",
@@ -32733,7 +32742,7 @@ function RekapMesinPanel({
   const addKaryawanManual = () => {
     const emp = (employees || []).find(e => e.username === addManualName);
     if (!emp || !rawParsed) return;
-    if ((rawParsed.karyawan || []).some(k => String(k.nama || "").toLowerCase().trim() === emp.nama.toLowerCase().trim())) {
+    if ((rawParsed.karyawan || []).some(k => normalizeMesinNama(k.nama) === normalizeMesinNama(emp.nama))) {
       alert(`${emp.nama} sudah ada di daftar.`);
       return;
     }
@@ -33135,7 +33144,7 @@ function RekapMesinPanel({
     label: "+ Tambah Karyawan (tidak terbaca mesin)",
     value: addManualName,
     onChange: setAddManualName,
-    options: (employees || []).filter(e => !(rawParsed.karyawan || []).some(k => String(k.nama || "").toLowerCase().trim() === String(e.nama || "").toLowerCase().trim())).map(e => ({
+    options: (employees || []).filter(e => !(rawParsed.karyawan || []).some(k => normalizeMesinNama(k.nama) === normalizeMesinNama(e.nama))).map(e => ({
       value: e.username,
       label: e.nama
     })),
