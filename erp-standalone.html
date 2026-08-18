@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-13.7";
+const APP_BUILD = "2026-08-18.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -3985,12 +3985,28 @@ function Table({
   const searchedRows = search && quickSearch.trim() ? indexedRows.filter(({
     row
   }) => row.some(cell => tableCellText(cell).toLowerCase().includes(quickSearch.trim().toLowerCase()))) : indexedRows;
+  // tableCellSortValue() can return EITHER a number (dates, money/qty) OR a string (text, and the
+  // "-" placeholder fmtDateRev uses for empty/missing dates) depending on the cell. Comparing a
+  // number directly against a string with </> is unsafe: JS coerces the string via Number(), so
+  // Number("-") is NaN and BOTH `20260522 < "-"` and `20260522 > "-"` evaluate to false — the
+  // comparator reports them as "equal" even though they aren't. Array.prototype.sort requires a
+  // consistent (transitive) comparator to produce a correct order; once "-" rows are reported as
+  // "equal" to every date, the sort silently corrupts the ordering of the surrounding real dates
+  // too (reported via Maintenance Schedule's "Tanggal SO Terakhir" column mixing real dates with
+  // "-" rows). Normalizing both sides to the same type before comparing fixes this generically for
+  // every Table column app-wide, not just dates.
+  const compareSortValues = (va, vb) => {
+    const na = typeof va === "number",
+      nb = typeof vb === "number";
+    if (na && nb) return va < vb ? -1 : va > vb ? 1 : 0;
+    if (na !== nb) return na ? -1 : 1; // numbers always sort ahead of placeholder/text values
+    return va < vb ? -1 : va > vb ? 1 : 0;
+  };
   const sortedRows = sortCol === null ? searchedRows : searchedRows.slice().sort((a, b) => {
     const va = tableCellSortValue(a.row[sortCol]);
     const vb = tableCellSortValue(b.row[sortCol]);
-    if (va < vb) return sortDir === "asc" ? -1 : 1;
-    if (va > vb) return sortDir === "asc" ? 1 : -1;
-    return 0;
+    const cmp = compareSortValues(va, vb);
+    return sortDir === "asc" ? cmp : -cmp;
   });
   const totalPages = Math.max(1, Math.ceil(sortedRows.length / pageSize));
   const safePage = Math.min(page, totalPages - 1);
@@ -12900,7 +12916,14 @@ function QuotationUnit({
       // in the approval flow keeps its existing status either way.
       const newStatus = asDraft ? "Draft" : editingQ.status === "Draft" ? "Menunggu Approval GM" : editingQ.status;
       const arr = [...quotationsUnit];
-      const idx = quotationsUnit.indexOf(editingQ);
+      // Match by nomor, NOT object identity (indexOf(editingQ) used to compare references). The
+      // usePersisted cache periodically refreshes quotationsUnit from Supabase with brand-new
+      // array/object instances, so if that refresh lands between opening this edit form and
+      // clicking Simpan, editingQ no longer === any element in the fresh array — indexOf silently
+      // returns -1, the update below never runs, yet setModal(false)/setEditingQ(null) still fire,
+      // making the save LOOK successful while nothing was actually written. Reported as: editing a
+      // Quotation, adding items, saving, and the extra items never persisting.
+      const idx = quotationsUnit.findIndex(q => q.nomor === editingQ.nomor);
       if (idx >= 0) {
         arr[idx] = {
           ...editingQ,
@@ -14417,7 +14440,13 @@ function QuotationPS({
       // in the approval flow keeps its existing status either way.
       const newStatus = asDraft ? "Draft" : editingQ.status === "Draft" ? "Menunggu Approval GM" : editingQ.status;
       const arr = [...quotationsPS];
-      const idx = quotationsPS.indexOf(editingQ);
+      // Match by nomor, NOT object identity — see the matching note in QuotationUnit's save().
+      // indexOf(editingQ) relies on reference equality, which breaks the moment the background
+      // usePersisted cache refresh swaps in a new quotationsPS array from Supabase; the edit then
+      // silently no-ops (idx stays -1) while the modal still closes as if it saved. This is exactly
+      // what was reported for SQ-116-FRT-VIII-2026: editing the draft, adding items, saving, and the
+      // extra items never showing up (the record stayed at its original 8 items every time).
+      const idx = quotationsPS.findIndex(q => q.nomor === editingQ.nomor);
       if (idx >= 0) {
         arr[idx] = {
           ...editingQ,
@@ -24835,6 +24864,19 @@ function InvoiceModule({
       padding: 6
     }
   }, /*#__PURE__*/React.createElement("input", {
+    value: it.partNumber || "",
+    onChange: ev => setEditInvItemField(idx, "partNumber", ev.target.value),
+    placeholder: "Part Number",
+    style: {
+      flex: 1,
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 6,
+      padding: "5px 7px",
+      color: theme.text,
+      fontSize: 12
+    }
+  }), /*#__PURE__*/React.createElement("input", {
     value: it.partName || "",
     onChange: ev => setEditInvItemField(idx, "partName", ev.target.value),
     style: {
@@ -24890,7 +24932,7 @@ function InvoiceModule({
     onClick: () => setEditInvForm(f => ({
       ...f,
       items: [...f.items, {
-        partNumber: "-",
+        partNumber: "",
         partName: "Item baru",
         qty: 1,
         harga: 0,
@@ -27507,8 +27549,12 @@ function PayrollModule({
 function ticketTotalFor(t) {
   return t.totalHarga ?? (t.harga * ((t.mekanikNamaList || [t.mekanikNama]).length || 1));
 }
-function uangDinasSisaTransfer(r) {
-  return (Number(r.jumlahHari) || 0) * (Number(r.uangDinasRate) || 0) - (Number(r.uangSaku) || 0);
+// `rateOverride` lets callers pass the CURRENT Payroll rate instead of the rate frozen on the row
+// at creation time — see UangDinasModule's liveRateFor for why. Falls back to r.uangDinasRate (the
+// snapshot) when no override is given, e.g. for any other caller elsewhere in the app.
+function uangDinasSisaTransfer(r, rateOverride) {
+  const rate = rateOverride ?? r.uangDinasRate;
+  return (Number(r.jumlahHari) || 0) * (Number(rate) || 0) - (Number(r.uangSaku) || 0);
 }
 function UangDinasModule({
   store,
@@ -27518,8 +27564,21 @@ function UangDinasModule({
     dinasCatatan,
     setDinasCatatan,
     tickets,
-    salesOrders
+    salesOrders,
+    employees
   } = store;
+  // uangDinasRate is snapshotted onto each row from the employee's Payroll rate at the moment a
+  // Kunjungan is marked Selesai (see Mekanik Report's completeVisit) — it does NOT update on its
+  // own afterwards. Reported: editing an employee's uang dinas rate in Payroll doesn't retroactively
+  // change already-created Uang Dinas rows. Resolving the CURRENT rate live here (same pattern as
+  // liveNama elsewhere in the app for customerNama) means every total/display below always reflects
+  // today's Payroll setting, while the stored snapshot itself is left untouched for audit history —
+  // falls back to the frozen snapshot only if the employee record can no longer be found (e.g.
+  // deleted from Payroll since).
+  const liveRateFor = r => {
+    const emp = (employees || []).find(e => e.username === r.username);
+    return emp && emp.uangDinasRate !== undefined && emp.uangDinasRate !== null ? emp.uangDinasRate : r.uangDinasRate;
+  };
   const isSuper = isUangDinasSuperUser(session);
   const isWorkshopAdmin = isSuper || session.username === "workshop1" || session.username === "workshop2";
   const [editRow, setEditRow] = useState(null);
@@ -27561,7 +27620,7 @@ function UangDinasModule({
       module: "Uang Dinas",
       docNomor: r.id,
       action: r.status === "Sudah Dibayar" ? "Batal Sudah Dibayar" : "Tandai Sudah Dibayar",
-      detail: `${r.nama} · ${fmt(uangDinasSisaTransfer(r))}`
+      detail: `${r.nama} · ${fmt(uangDinasSisaTransfer(r, liveRateFor(r)))}`
     });
   };
   const addBiayaLain = async proj => {
@@ -27606,7 +27665,7 @@ function UangDinasModule({
     }
   }, "Ringkasan Biaya per Project (SO)"), projectRows.map(p => {
     const soMekanikRows = (dinasCatatan || []).filter(r => r.kind === "mekanik" && r.soNomor === p.soNomor);
-    const totalUangDinasSO = soMekanikRows.reduce((s, r) => s + (Number(r.jumlahHari) || 0) * (Number(r.uangDinasRate) || 0), 0);
+    const totalUangDinasSO = soMekanikRows.reduce((s, r) => s + (Number(r.jumlahHari) || 0) * (Number(liveRateFor(r)) || 0), 0);
     const totalUangSakuSO = soMekanikRows.reduce((s, r) => s + (Number(r.uangSaku) || 0), 0);
     const totalTiketSO = (tickets || []).filter(t => (t.soNomors || []).includes(p.soNomor)).reduce((s, t) => s + ticketTotalFor(t), 0);
     const totalBiayaLainSO = (p.biayaLain || []).reduce((s, b) => s + (Number(b.jumlah) || 0), 0);
@@ -27679,11 +27738,13 @@ function UangDinasModule({
     }
   }, "Uang Dinas per Mekanik"), /*#__PURE__*/React.createElement(Table, {
     headers: ["No SO", "Mekanik", "Tanggal", "Hari", "Rate/hari", "Total Uang Dinas", "Uang Saku", "Sisa Transfer", "Status", "Aksi"],
-    rows: mekanikRows.map(r => [r.soNomor || "-", r.nama, `${fmtDateRev(r.tanggalMulai)} s/d ${fmtDateRev(r.tanggalSelesai)}`, r.jumlahHari, fmt(r.uangDinasRate), fmt((Number(r.jumlahHari) || 0) * (Number(r.uangDinasRate) || 0)), fmt(r.uangSaku), /*#__PURE__*/React.createElement("strong", {
+    rows: mekanikRows.map(r => {
+      const rate = liveRateFor(r);
+      return [r.soNomor || "-", r.nama, `${fmtDateRev(r.tanggalMulai)} s/d ${fmtDateRev(r.tanggalSelesai)}`, r.jumlahHari, fmt(rate), fmt((Number(r.jumlahHari) || 0) * (Number(rate) || 0)), fmt(r.uangSaku), /*#__PURE__*/React.createElement("strong", {
       style: {
-        color: uangDinasSisaTransfer(r) >= 0 ? theme.green : theme.red
+        color: uangDinasSisaTransfer(r, rate) >= 0 ? theme.green : theme.red
       }
-    }, fmt(uangDinasSisaTransfer(r))), /*#__PURE__*/React.createElement(Badge, {
+    }, fmt(uangDinasSisaTransfer(r, rate))), /*#__PURE__*/React.createElement(Badge, {
       color: r.status === "Sudah Dibayar" ? theme.green : theme.yellow
     }, r.status || "Belum Dibayar"), /*#__PURE__*/React.createElement("div", {
       style: {
@@ -27698,7 +27759,8 @@ function UangDinasModule({
       size: "sm",
       variant: r.status === "Sudah Dibayar" ? "ghost" : "primary",
       onClick: () => togglePaid(r)
-    }, r.status === "Sudah Dibayar" ? "↩ Batal" : "💸 Sudah Dibayar"))])
+    }, r.status === "Sudah Dibayar" ? "↩ Batal" : "💸 Sudah Dibayar"))];
+    })
   }), mekanikRows.length === 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       color: theme.muted,
