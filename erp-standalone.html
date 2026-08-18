@@ -17,7 +17,7 @@
 <script crossorigin src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <style>
   * { box-sizing: border-box; }
-  body { margin: 0; padding: 0; }
+  body { margin: 0; padding: 0; font-family: 'Segoe UI', system-ui, sans-serif; }
 </style>
 </head>
 <body>
@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-13.5";
+const APP_BUILD = "2026-08-13.7";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -3865,8 +3865,23 @@ function tableCellText(node) {
   }
   return "";
 }
+// Every date column app-wide displays as "DD-MMM-YY" (see fmtDateRev/autoFormatTableCell above),
+// so by the time a cell reaches tableCellSortValue it's already a formatted string like "31-JUL-26"
+// — NOT the underlying ISO date. Without this, tableCellSortValue's fallback string compare sorts
+// on the leading two DAY digits first (since that's the start of the string) completely ignoring
+// month/year, e.g. "31-JUL-26" sorts ahead of "28-JUL-26" ahead of "22-MAY-26" — visibly scrambled
+// "sort by date" columns app-wide (reported via Maintenance Schedule's "Tanggal SO Terakhir").
+// Detected here and converted to a real YYYYMMDD sortable number before falling through.
+const DATE_DDMMMYY_RE = /^(\d{2})-([A-Za-z]{3})-(\d{2})$/;
 function tableCellSortValue(node) {
   const text = tableCellText(node).trim();
+  const dm = text.match(DATE_DDMMMYY_RE);
+  if (dm) {
+    const mi = REV_MONTHS.indexOf(dm[2].toUpperCase());
+    if (mi !== -1) {
+      return Number(`20${dm[3]}${String(mi + 1).padStart(2, "0")}${dm[1]}`);
+    }
+  }
   // Money/qty cells ("Rp 22.422.000", "150") are formatted with "." as a thousands separator (no
   // decimals) — stripping every non-digit/non-leading-minus character and parsing as an integer
   // sorts these numerically instead of lexicographically.
@@ -4529,6 +4544,7 @@ function BiayaLainModalBody({
 }) {
   const [ket, setKet] = useState("");
   const [jumlah, setJumlah] = useState("");
+  const [tanggal, setTanggal] = useState(today());
   const ketTrimmed = ket.trim();
   return /*#__PURE__*/React.createElement("div", {
     style: backdropStyle,
@@ -4544,6 +4560,11 @@ function BiayaLainModalBody({
       fontSize: 16
     }
   }, "Tambah Biaya Lain"), /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal",
+    value: tanggal,
+    onChange: setTanggal,
+    type: "date"
+  }), /*#__PURE__*/React.createElement(Input, {
     label: "Keterangan biaya",
     value: ket,
     onChange: setKet
@@ -4569,7 +4590,8 @@ function BiayaLainModalBody({
     disabled: !ketTrimmed,
     onClick: () => onSubmit({
       keterangan: ketTrimmed,
-      jumlah: Number(jumlah) || 0
+      jumlah: Number(jumlah) || 0,
+      tanggal: tanggal || today()
     })
   }, "Tambah"))));
 }
@@ -27545,12 +27567,13 @@ function UangDinasModule({
   const addBiayaLain = async proj => {
     const result = await askBiayaLain();
     if (!result) return;
-    const { keterangan: ket, jumlah } = result;
+    const { keterangan: ket, jumlah, tanggal } = result;
     setDinasCatatan(prev => (prev || []).map(p => p.id === proj.id ? {
       ...p,
       biayaLain: [...(p.biayaLain || []), {
         keterangan: ket,
-        jumlah
+        jumlah,
+        tanggal: tanggal || today()
       }]
     } : p));
   };
@@ -27631,7 +27654,11 @@ function UangDinasModule({
         fontSize: 13,
         color: theme.text
       }
-    }, /*#__PURE__*/React.createElement("span", null, "• ", b.keterangan), /*#__PURE__*/React.createElement("span", null, fmt(b.jumlah), " ", isWorkshopAdmin && /*#__PURE__*/React.createElement("button", {
+    }, /*#__PURE__*/React.createElement("span", null, "• ", b.keterangan, b.tanggal && /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.muted
+      }
+    }, " (", fmtDateRev(b.tanggal), ")")), /*#__PURE__*/React.createElement("span", null, fmt(b.jumlah), " ", isWorkshopAdmin && /*#__PURE__*/React.createElement("button", {
       onClick: () => removeBiayaLain(p, i),
       style: {
         marginLeft: 8,
