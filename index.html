@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-18.1";
+const APP_BUILD = "2026-08-18.4";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -27549,12 +27549,22 @@ function PayrollModule({
 function ticketTotalFor(t) {
   return t.totalHarga ?? (t.harga * ((t.mekanikNamaList || [t.mekanikNama]).length || 1));
 }
+// Uang Saku (pocket money) can be handed to a mekanik multiple times over a trip, not just once
+// up front — each disbursement is now its own dated entry in r.uangSakuList: [{id, tanggal, jumlah,
+// keterangan}]. This sums that list; rows created before this feature only have the old flat
+// r.uangSaku number (no list), so those fall back to it untouched.
+function totalUangSaku(r) {
+  if (Array.isArray(r.uangSakuList) && r.uangSakuList.length > 0) {
+    return r.uangSakuList.reduce((s, e) => s + (Number(e.jumlah) || 0), 0);
+  }
+  return Number(r.uangSaku) || 0;
+}
 // `rateOverride` lets callers pass the CURRENT Payroll rate instead of the rate frozen on the row
 // at creation time — see UangDinasModule's liveRateFor for why. Falls back to r.uangDinasRate (the
 // snapshot) when no override is given, e.g. for any other caller elsewhere in the app.
 function uangDinasSisaTransfer(r, rateOverride) {
   const rate = rateOverride ?? r.uangDinasRate;
-  return (Number(r.jumlahHari) || 0) * (Number(rate) || 0) - (Number(r.uangSaku) || 0);
+  return (Number(r.jumlahHari) || 0) * (Number(rate) || 0) - totalUangSaku(r);
 }
 function UangDinasModule({
   store,
@@ -27575,7 +27585,12 @@ function UangDinasModule({
   // today's Payroll setting, while the stored snapshot itself is left untouched for audit history —
   // falls back to the frozen snapshot only if the employee record can no longer be found (e.g.
   // deleted from Payroll since).
+  // Priority: r.rateOverride (per-job manual override, set via Edit) > live Payroll rate > frozen
+  // snapshot. Needed for freelance mekanik (e.g. Nurbani/Ajib) whose real uang dinas rate for a
+  // given SPK/job can legitimately differ from whatever single number sits in their Payroll
+  // profile — without this, every job for that person is forced onto one rate.
   const liveRateFor = r => {
+    if (r.rateOverride !== undefined && r.rateOverride !== null && r.rateOverride !== "") return Number(r.rateOverride);
     const emp = (employees || []).find(e => e.username === r.username);
     return emp && emp.uangDinasRate !== undefined && emp.uangDinasRate !== null ? emp.uangDinasRate : r.uangDinasRate;
   };
@@ -27583,6 +27598,14 @@ function UangDinasModule({
   const isWorkshopAdmin = isSuper || session.username === "workshop1" || session.username === "workshop2";
   const [editRow, setEditRow] = useState(null);
   const [editForm, setEditForm] = useState({});
+  // Sub-form for adding one new Uang Saku disbursement to editForm.uangSakuList — separate from
+  // editForm itself since it resets after each "+ Tambah" instead of persisting with the rest of
+  // the edit form.
+  const [sakuEntryForm, setSakuEntryForm] = useState({
+    tanggal: today(),
+    jumlah: "",
+    keterangan: ""
+  });
   const visibleRows = (dinasCatatan || []).filter(r => isWorkshopAdmin || r.username === session.username);
   const mekanikRows = visibleRows.filter(r => r.kind === "mekanik").sort((a, b) => (b.tanggalMulai || "").localeCompare(a.tanggalMulai || ""));
   const projectRows = isWorkshopAdmin ? (dinasCatatan || []).filter(r => r.kind === "project") : [];
@@ -27590,22 +27613,69 @@ function UangDinasModule({
     setEditRow(r);
     setEditForm({
       jumlahHari: r.jumlahHari,
-      uangSaku: r.uangSaku,
+      // Uang Saku used to be one flat number entered "di awal" — rows created before this feature
+      // only have that number, no dated history. Migrate it into the first list entry here so it
+      // shows up alongside any new entries the user adds, instead of silently disappearing.
+      uangSakuList: Array.isArray(r.uangSakuList) && r.uangSakuList.length > 0 ? r.uangSakuList.map(e => ({
+        ...e
+      })) : Number(r.uangSaku) > 0 ? [{
+        id: "US-" + uid(),
+        tanggal: r.tanggalMulai || today(),
+        jumlah: Number(r.uangSaku),
+        keterangan: "Migrasi data lama"
+      }] : [],
+      rateOverride: r.rateOverride ?? "",
       catatan: r.catatan || ""
     });
+    setSakuEntryForm({
+      tanggal: today(),
+      jumlah: "",
+      keterangan: ""
+    });
   };
+  const addSakuEntry = () => {
+    // Negative jumlah is allowed on purpose: it represents cash from an earlier advance that went
+    // back out to pay shared trip costs (logged separately at project-level Biaya Lain) rather than
+    // staying in the mekanik's pocket. Without this, Sisa Transfer would double-count that money —
+    // once as "already given" here, and again when the shared expense reduces the project budget.
+    if (sakuEntryForm.jumlah === "" || sakuEntryForm.jumlah === null || Number(sakuEntryForm.jumlah) === 0) return alert("Isi jumlah uang saku (boleh negatif untuk potongan biaya bersama)");
+    setEditForm(f => ({
+      ...f,
+      uangSakuList: [...(f.uangSakuList || []), {
+        id: "US-" + uid(),
+        tanggal: sakuEntryForm.tanggal || today(),
+        jumlah: Number(sakuEntryForm.jumlah) || 0,
+        keterangan: sakuEntryForm.keterangan || ""
+      }]
+    }));
+    setSakuEntryForm({
+      tanggal: today(),
+      jumlah: "",
+      keterangan: ""
+    });
+  };
+  const removeSakuEntry = id => setEditForm(f => ({
+    ...f,
+    uangSakuList: (f.uangSakuList || []).filter(e => e.id !== id)
+  }));
   const saveEdit = () => {
+    const uangSakuList = editForm.uangSakuList || [];
+    const uangSakuTotal = uangSakuList.reduce((s, e) => s + (Number(e.jumlah) || 0), 0);
     setDinasCatatan(prev => (prev || []).map(r => r.id === editRow.id ? {
       ...r,
       jumlahHari: Number(editForm.jumlahHari) || 0,
-      uangSaku: Number(editForm.uangSaku) || 0,
+      uangSakuList,
+      // Kept in sync as the sum so any other code path that still reads the old flat field (or an
+      // export/report outside this module) doesn't silently see 0.
+      uangSaku: uangSakuTotal,
+      rateOverride: editForm.rateOverride === "" || editForm.rateOverride === undefined || editForm.rateOverride === null ? null : Number(editForm.rateOverride),
       catatan: editForm.catatan
     } : r));
     logAudit(store, session, {
       module: "Uang Dinas",
       docNomor: editRow.id,
       action: "Edit",
-      detail: `${editRow.nama}: ${editForm.jumlahHari} hari, uang saku ${fmt(editForm.uangSaku)}`
+      detail: `${editRow.nama}: ${editForm.jumlahHari} hari, uang saku ${fmt(uangSakuTotal)} (${uangSakuList.length}x)`
     });
     setEditRow(null);
   };
@@ -27666,7 +27736,7 @@ function UangDinasModule({
   }, "Ringkasan Biaya per Project (SO)"), projectRows.map(p => {
     const soMekanikRows = (dinasCatatan || []).filter(r => r.kind === "mekanik" && r.soNomor === p.soNomor);
     const totalUangDinasSO = soMekanikRows.reduce((s, r) => s + (Number(r.jumlahHari) || 0) * (Number(liveRateFor(r)) || 0), 0);
-    const totalUangSakuSO = soMekanikRows.reduce((s, r) => s + (Number(r.uangSaku) || 0), 0);
+    const totalUangSakuSO = soMekanikRows.reduce((s, r) => s + totalUangSaku(r), 0);
     const totalTiketSO = (tickets || []).filter(t => (t.soNomors || []).includes(p.soNomor)).reduce((s, t) => s + ticketTotalFor(t), 0);
     const totalBiayaLainSO = (p.biayaLain || []).reduce((s, b) => s + (Number(b.jumlah) || 0), 0);
     const grandTotal = totalUangDinasSO + totalTiketSO + totalBiayaLainSO;
@@ -27740,7 +27810,15 @@ function UangDinasModule({
     headers: ["No SO", "Mekanik", "Tanggal", "Hari", "Rate/hari", "Total Uang Dinas", "Uang Saku", "Sisa Transfer", "Status", "Aksi"],
     rows: mekanikRows.map(r => {
       const rate = liveRateFor(r);
-      return [r.soNomor || "-", r.nama, `${fmtDateRev(r.tanggalMulai)} s/d ${fmtDateRev(r.tanggalSelesai)}`, r.jumlahHari, fmt(rate), fmt((Number(r.jumlahHari) || 0) * (Number(rate) || 0)), fmt(r.uangSaku), /*#__PURE__*/React.createElement("strong", {
+      const sakuCount = (r.uangSakuList || []).length;
+      return [r.soNomor || "-", r.nama, `${fmtDateRev(r.tanggalMulai)} s/d ${fmtDateRev(r.tanggalSelesai)}`, r.jumlahHari, fmt(rate), fmt((Number(r.jumlahHari) || 0) * (Number(rate) || 0)), /*#__PURE__*/React.createElement("span", {
+        title: sakuCount > 1 ? (r.uangSakuList || []).map(e => `${fmtDateRev(e.tanggal)}: ${fmt(e.jumlah)}`).join("\n") : undefined
+      }, fmt(totalUangSaku(r)), sakuCount > 1 && /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: theme.muted,
+          fontSize: 11
+        }
+      }, ` (${sakuCount}x)`)), /*#__PURE__*/React.createElement("strong", {
       style: {
         color: uangDinasSisaTransfer(r, rate) >= 0 ? theme.green : theme.red
       }
@@ -27786,14 +27864,108 @@ function UangDinasModule({
       jumlahHari: v
     })
   }), /*#__PURE__*/React.createElement(Input, {
-    label: "Uang Saku (sudah diberikan di awal)",
+    label: `Rate Uang Dinas / hari (opsional, khusus job ini — default Payroll: ${fmt((employees || []).find(e => e.username === editRow.username)?.uangDinasRate ?? editRow.uangDinasRate ?? 0)})`,
     type: "number",
-    value: editForm.uangSaku,
+    value: editForm.rateOverride,
     onChange: v => setEditForm({
       ...editForm,
-      uangSaku: v
+      rateOverride: v
+    })
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: `1px solid ${theme.border}`,
+      borderRadius: 10,
+      padding: 12,
+      display: "flex",
+      flexDirection: "column",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      fontWeight: 600
+    }
+  }, "Uang Saku — bisa diberikan beberapa kali, setiap kali dicatat tanggal & keterangannya"), (editForm.uangSakuList || []).length === 0 && /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: theme.muted,
+      fontSize: 12,
+      margin: 0
+    }
+  }, "Belum ada uang saku dicatat."), (editForm.uangSakuList || []).map(e => /*#__PURE__*/React.createElement("div", {
+    key: e.id,
+    style: {
+      display: "flex",
+      gap: 8,
+      alignItems: "center",
+      fontSize: 13,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 6,
+      padding: "6px 10px"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted,
+      minWidth: 70
+    }
+  }, fmtDateRev(e.tanggal)), /*#__PURE__*/React.createElement("strong", {
+    style: {
+      minWidth: 100,
+      color: Number(e.jumlah) < 0 ? theme.danger || "#d33" : theme.text
+    }
+  }, fmt(e.jumlah)), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted,
+      flex: 1
+    }
+  }, e.keterangan || "-"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => removeSakuEntry(e.id)
+  }, "✕"))), (editForm.uangSakuList || []).length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "right",
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Total: ", /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, fmt((editForm.uangSakuList || []).reduce((s, e) => s + (Number(e.jumlah) || 0), 0)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr 1.4fr auto",
+      gap: 6,
+      alignItems: "end"
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal",
+    type: "date",
+    value: sakuEntryForm.tanggal,
+    onChange: v => setSakuEntryForm({
+      ...sakuEntryForm,
+      tanggal: v
     })
   }), /*#__PURE__*/React.createElement(Input, {
+    label: "Jumlah (isi negatif utk potongan biaya bersama)",
+    type: "number",
+    value: sakuEntryForm.jumlah,
+    onChange: v => setSakuEntryForm({
+      ...sakuEntryForm,
+      jumlah: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Keterangan (opsional)",
+    value: sakuEntryForm.keterangan,
+    onChange: v => setSakuEntryForm({
+      ...sakuEntryForm,
+      keterangan: v
+    })
+  }), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    onClick: addSakuEntry
+  }, "+ Tambah"))), /*#__PURE__*/React.createElement(Input, {
     label: "Catatan",
     value: editForm.catatan,
     onChange: v => setEditForm({
@@ -29572,25 +29744,36 @@ function MaintenanceScheduleModule({
   const [mekanikNama, setMekanikNama] = useState("");
   const [completeModal, setCompleteModal] = useState(null);
   const [serviceDate, setServiceDate] = useState(today());
+  const [extendModal, setExtendModal] = useState(null);
+  const [extendReason, setExtendReason] = useState("");
   const addMonths = (dateStr, months) => {
     const d = new Date(dateStr);
     d.setMonth(d.getMonth() + months);
     return d.toISOString().split("T")[0];
   };
 
-  // Auto-refresh schedule based on the latest completed visit (Mekanik Report) or latest Sales Order for the same unit/client —
-  // not just from Delivery Order. Whichever is more recent becomes the new "last service date".
+  // Auto-refresh schedule based on the latest visit (Mekanik Report) or latest Sales Order for the
+  // same client — not just from Delivery Order. Whichever is more recent becomes the new "last
+  // service date". NOTE: this used to also require the visit's free-text "unitTerkait" field to
+  // contain the schedule's unitName/unitCode (e.g. "CRANE PALFINGER EPSILON S210LD128"), but that
+  // field is filled in with whatever label the mekanik typed for the visit (often just "Crane LIV"
+  // or similar shorthand) and essentially never matches the schedule's formal unit name — so real
+  // visits were silently ignored and Service Terakhir went stale (see Tania Selatan case: top
+  // RINGKASAN PER MILL section showed the 03-Aug visit via millId, but this table stayed on 17-Jul
+  // because "Crane LIV" doesn't contain "CRANE PALFINGER EPSILON S210LD128"). Matching on client
+  // only — same signal the top section effectively uses — keeps the two sections consistent. This
+  // also no longer requires the visit's Status Report to be "Selesai": a visit having happened at
+  // all is what "last service/visit date" means here, matching how the top section counts it.
   useEffect(() => {
     if (maintenanceSchedules.length === 0) return;
     let changed = false;
     const updated = maintenanceSchedules.map(m => {
       if (m.status === "Selesai") return m; // already superseded by a newer schedule entry
-      // Find the latest completed visit (status report = Selesai) for the same client + unit
-      const relevantVisits = visits.filter(v => v.customerNama === m.customerNama && (v.unitTerkait || "").includes(m.unitName || m.unitCode || ""));
-      const completedDates = relevantVisits.filter(v => statusReports.some(s => s.visitId === v.id && s.statusPekerjaan === "Selesai")).map(v => v.tanggal);
+      // Find the latest visit for the same client (Master Mill/Kunjungan level, not unit-text level)
+      const visitDates = visits.filter(v => v.customerNama === m.customerNama).map(v => v.tanggal);
       // Find the latest Sales Order date for the same client (as a secondary signal of recent activity)
       const soDates = salesOrders.filter(so => so.customerNama === m.customerNama).map(so => so.tanggal);
-      const allDates = [...completedDates, ...soDates].filter(Boolean).sort();
+      const allDates = [...visitDates, ...soDates].filter(Boolean).sort();
       const latest = allDates[allDates.length - 1];
       if (latest && latest > m.lastServiceDate) {
         changed = true;
@@ -29661,6 +29844,29 @@ function MaintenanceScheduleModule({
     setCompleteModal(null);
     setServiceDate(today());
   };
+  // Push a "Terlambat" schedule's due date out by 1 month — requires a reason so there's an audit
+  // trail of why a late maintenance kept getting pushed instead of silently going stale.
+  const extendSchedule = () => {
+    if (!extendReason.trim()) return alert("Isi alasan perpanjangan");
+    const arr = [...maintenanceSchedules];
+    const idx = maintenanceSchedules.indexOf(extendModal);
+    const oldDue = arr[idx].nextDueDate;
+    const newDue = addMonths(oldDue, 1);
+    arr[idx] = {
+      ...arr[idx],
+      nextDueDate: newDue,
+      extendHistory: [...(arr[idx].extendHistory || []), {
+        tanggal: today(),
+        dari: oldDue,
+        ke: newDue,
+        alasan: extendReason.trim(),
+        oleh: session.nama
+      }]
+    };
+    setMaintenanceSchedules(arr);
+    setExtendModal(null);
+    setExtendReason("");
+  };
   const sorted = [...maintenanceSchedules].sort((a, b) => a.nextDueDate.localeCompare(b.nextDueDate));
   const [msSearch, setMsSearch] = useState("");
   const msFiltered = msSearch.trim() ? sorted.filter(m => [m.unitName, m.unitCode, m.customerNama, m.soNomor, m.assignedMekanik].filter(Boolean).some(x => String(x).toLowerCase().includes(msSearch.trim().toLowerCase()))) : sorted;
@@ -29688,6 +29894,10 @@ function MaintenanceScheduleModule({
     };
   });
   const millSummaryFiltered = millSummarySearch.trim() ? millSummaryRows.filter(r => [r.clientNama, r.millName].some(x => String(x).toLowerCase().includes(millSummarySearch.trim().toLowerCase()))) : millSummaryRows;
+  // Follow-up worklist: any mill row from RINGKASAN PER MILL missing either date needs someone to
+  // chase it down — no SO date means no parts activity was ever logged for that client, no visit
+  // date means the mill has never had a recorded Kunjungan.
+  const millFollowUpRows = millSummaryRows.filter(r => !r.lastSODate || !r.lastVisitDate);
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -29755,6 +29965,26 @@ function MaintenanceScheduleModule({
     headers: ["Nama Client", "Nama Mill", "Tanggal SO Terakhir (Parts)", "Tanggal Visit Terakhir"],
     rows: millSummaryFiltered.map(r => [r.clientNama, r.millName, fmtDateRev(r.lastSODate), fmtDateRev(r.lastVisitDate)]),
     emptyMsg: "Belum ada data Master Mill"
+  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "⚠️ PERLU FOLLOW UP — Tanggal SO / Visit Kosong",
+    count: millFollowUpRows.length,
+    badgeColor: theme.red,
+    storageKey: "ms_mill_followup",
+    defaultOpen: millFollowUpRows.length > 0
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 10px",
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Mill/client di bawah ini belum punya Tanggal SO Terakhir dan/atau Tanggal Visit Terakhir — perlu di-follow up oleh Sales (untuk SO) dan/atau Workshop (untuk kunjungan)."), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Nama Client", "Nama Mill", "Tanggal SO Terakhir (Parts)", "Tanggal Visit Terakhir"],
+    rows: millFollowUpRows.map(r => [r.clientNama, r.millName, r.lastSODate ? fmtDateRev(r.lastSODate) : /*#__PURE__*/React.createElement(Badge, {
+      color: theme.red
+    }, "Kosong"), r.lastVisitDate ? fmtDateRev(r.lastVisitDate) : /*#__PURE__*/React.createElement(Badge, {
+      color: theme.red
+    }, "Kosong")]),
+    emptyMsg: "Semua mill sudah punya Tanggal SO & Tanggal Visit."
   })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari unit / client / no. SO / mekanik...",
     value: msSearch,
@@ -29763,18 +29993,32 @@ function MaintenanceScheduleModule({
       marginBottom: 12
     }
   }), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Unit", "Client", "No. SO", "Service Terakhir", "Jadwal Berikutnya", "Mekanik Ditugaskan", "Status"],
+    headers: ["Client", "Unit", "No. SO", "Service Terakhir", "Jadwal Berikutnya", "Mekanik Ditugaskan", "Status"],
     rows: msFiltered.map((m, i) => {
       const due = getDueBadge(m.nextDueDate, m.status);
-      return [m.unitName || m.unitCode, m.customerNama, m.soNomor, /*#__PURE__*/React.createElement("span", null, m.lastServiceDate, " ", m.autoSynced && /*#__PURE__*/React.createElement(Badge, {
+      return [m.customerNama, m.unitName || m.unitCode, m.soNomor, /*#__PURE__*/React.createElement("span", null, fmtDateRev(m.lastServiceDate), " ", m.autoSynced && /*#__PURE__*/React.createElement(Badge, {
         color: theme.cyan
-      }, "Auto")), m.nextDueDate, m.assignedMekanik || /*#__PURE__*/React.createElement("span", {
+      }, "Auto")), fmtDateRev(m.nextDueDate), m.assignedMekanik || /*#__PURE__*/React.createElement("span", {
         style: {
           color: theme.muted
         }
-      }, "Belum ditugaskan"), /*#__PURE__*/React.createElement(Badge, {
+      }, "Belum ditugaskan"), /*#__PURE__*/React.createElement("span", {
+        style: {
+          display: "flex",
+          alignItems: "center",
+          gap: 6
+        }
+      }, /*#__PURE__*/React.createElement(Badge, {
         color: due.color
-      }, due.label)];
+      }, due.label), due.label === "Terlambat" && /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "ghost",
+        onClick: e => {
+          e.stopPropagation();
+          setExtendModal(m);
+          setExtendReason("");
+        }
+      }, "Perpanjang 1 Bln"))];
     }),
     onEdit: isSepti || isOwnerLike ? i => {
       const m = msFiltered[i];
@@ -29872,7 +30116,79 @@ function MaintenanceScheduleModule({
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     variant: "success",
     onClick: completeService
-  }, "✓ Selesai & Buat Jadwal Berikutnya")))));
+  }, "✓ Selesai & Buat Jadwal Berikutnya")))), /*#__PURE__*/React.createElement(Modal, {
+    open: !!extendModal,
+    title: `Perpanjang Jadwal — ${extendModal?.unitName || extendModal?.unitCode}`,
+    onClose: () => setExtendModal(null)
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 13,
+      color: theme.muted
+    }
+  }, "Client: ", /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, extendModal?.customerNama), " · Jadwal saat ini: ", /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.red
+    }
+  }, fmtDateRev(extendModal?.nextDueDate))), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Jadwal akan diperpanjang 1 bulan menjadi ", /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, extendModal ? fmtDateRev(addMonths(extendModal.nextDueDate, 1)) : ""), "."), /*#__PURE__*/React.createElement("label", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      fontWeight: 600
+    }
+  }, "Alasan Perpanjangan (wajib diisi)"), /*#__PURE__*/React.createElement("textarea", {
+    value: extendReason,
+    onChange: e => setExtendReason(e.target.value),
+    rows: 3,
+    placeholder: "Mis. Unit belum bisa diakses karena mill sedang shutdown, menunggu part datang, dsb.",
+    style: {
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 6,
+      padding: "8px 10px",
+      color: theme.text,
+      fontSize: 13,
+      fontFamily: "inherit",
+      resize: "vertical"
+    }
+  }), extendModal?.extendHistory?.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: theme.muted
+    }
+  }, "Riwayat perpanjangan sebelumnya: ", extendModal.extendHistory.map((h, i) => `${fmtDateRev(h.tanggal)} (${h.oleh}): "${h.alasan}"`).join(" · ")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setExtendModal(null)
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    variant: "warning",
+    onClick: extendSchedule
+  }, "Perpanjang 1 Bulan")))));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
