@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-18.8";
+const APP_BUILD = "2026-08-19.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -2641,7 +2641,17 @@ function usePersisted(key, defaultVal) {
       let attempts = 0;
       let base = val;
       let baseUpdatedAt = updatedAtRef.current;
-      while (attempts < 5) {
+      // BUG FIX (2026-08-19): this loop used to only console.error on total failure — invisible to
+      // the user. Root-caused a real production incident: Goods Receipt confirmations updating
+      // erp_parts stock (a very high-contention CAS key — written from GR, Delivery Order, Parts
+      // Use, IR reservation, Master Part edit, stock revision, etc.) silently lost their write after
+      // exhausting retries during a busy period, leaving the optimistic local UI showing the
+      // incremented stock while the server (and every other browser/reload) never saw it — exactly
+      // the "diterima tapi stock tidak bertambah" symptom for GR-100/074/075/076-FRT-VIII-2026. Now:
+      // (a) small randomized backoff between conflict retries so two colliding writers don't retry in
+      // perfect lockstep forever, (b) on final failure, ALWAYS surface it via alert() so the user
+      // knows to retry/reload instead of trusting a UI that quietly diverged from the server.
+      while (attempts < 8) {
         attempts++;
         const next = typeof v === "function" ? v(base) : v;
         try {
@@ -2655,6 +2665,7 @@ function usePersisted(key, defaultVal) {
           });
           if (error) {
             console.error("Gagal menyimpan " + key + ":", error);
+            alert("Gagal menyimpan perubahan (" + key + "): " + error.message + "\n\nSilakan refresh halaman dan coba lagi. Jika perubahan penting (mis. stock, PO, invoice), screenshot pesan ini dan laporkan ke admin.");
             return;
           }
           const row = Array.isArray(data) ? data[0] : data;
@@ -2668,12 +2679,15 @@ function usePersisted(key, defaultVal) {
           // meaningful when v is an updater function; a plain value just overwrites on retry too).
           base = row ? row.current_data : base;
           baseUpdatedAt = row ? row.current_updated_at : baseUpdatedAt;
+          await new Promise(res => setTimeout(res, 60 + Math.random() * 120 * attempts));
         } catch (e) {
           console.error("Gagal menyimpan " + key + ":", e);
+          alert("Gagal menyimpan perubahan (" + key + "): " + (e?.message || e) + "\n\nSilakan refresh halaman dan coba lagi. Jika perubahan penting (mis. stock, PO, invoice), screenshot pesan ini dan laporkan ke admin.");
           return;
         }
       }
       console.error("Gagal menyimpan " + key + ": terlalu banyak konflik penulisan bersamaan, coba lagi.");
+      alert("Gagal menyimpan perubahan (" + key + "): terlalu banyak konflik penulisan bersamaan.\n\nPerubahan Anda BELUM tersimpan ke server. Silakan refresh halaman dan ulangi aksi terakhir Anda.");
     })();
   };
   // IMPORTANT — concurrent-write safety: when multiple users edit the same collection at the same
@@ -2711,12 +2725,14 @@ function usePersisted(key, defaultVal) {
         });
         if (error) {
           console.error("Gagal menyimpan " + key + ":", error);
+          alert("Gagal menyimpan perubahan (" + key + "): " + error.message + "\n\nSilakan refresh halaman dan coba lagi. Jika perubahan penting (mis. stock, PO, invoice), screenshot pesan ini dan laporkan ke admin.");
         } else {
           setValRaw(next);
           writeCache(cacheKey, next);
         }
       } catch (e) {
         console.error("Gagal menyimpan " + key + ":", e);
+        alert("Gagal menyimpan perubahan (" + key + "): " + (e?.message || e) + "\n\nSilakan refresh halaman dan coba lagi. Jika perubahan penting (mis. stock, PO, invoice), screenshot pesan ini dan laporkan ke admin.");
       }
     })();
   };
