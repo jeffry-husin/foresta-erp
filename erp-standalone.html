@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-18.4";
+const APP_BUILD = "2026-08-18.8";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -628,7 +628,12 @@ function loadXLSXLibrary() {
   if (_xlsxLoadPromise) return _xlsxLoadPromise;
   _xlsxLoadPromise = new Promise((resolve, reject) => {
     const script = document.createElement("script");
-    script.src = "https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js";
+    // xlsx-js-style is an API-compatible drop-in fork of SheetJS that also writes cell styling
+    // (bold, borders, fills, number formats) to .xlsx — the free/community "xlsx" build silently
+    // drops all of that on write. Needed so exported reports (Uang Makan, Workshop Ops, etc.) can
+    // come out already formatted (letterhead, bordered header, Rp number format, total/signature
+    // rows) instead of admins re-formatting every export by hand in Excel.
+    script.src = "https://unpkg.com/xlsx-js-style@1.2.0/dist/xlsx.min.js";
     script.onload = () => resolve(window.XLSX);
     script.onerror = () => reject(new Error("Gagal memuat library Excel. Pastikan ada koneksi internet."));
     document.head.appendChild(script);
@@ -641,6 +646,143 @@ async function exportToExcel(rows, filename, sheetName = "Sheet1") {
   try {
     const XLSX = await loadXLSXLibrary();
     const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+    XLSX.writeFile(wb, filename.endsWith(".xlsx") ? filename : filename + ".xlsx");
+  } catch (e) {
+    alert("Gagal export: " + e.message);
+  }
+}
+
+// Indonesian long-form date, e.g. "12 Agustus 2026" — used in report signature blocks (Tangerang,
+// [date] ... [name]) so exported reports don't need the date hand-typed in after the fact.
+const BULAN_INDO = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
+function fmtDateIndoLong(dateStr) {
+  if (!dateStr) return "-";
+  const d = new Date(dateStr + "T00:00:00");
+  if (isNaN(d.getTime())) return dateStr;
+  return `${d.getDate()} ${BULAN_INDO[d.getMonth()]} ${d.getFullYear()}`;
+}
+const RP_NUMFMT = '_-* #,##0_-;-* #,##0_-;_-* "-"_-;_-@_-';
+
+// Build a fully-formatted report worksheet — letterhead, bold bordered header row, Rp thousand-
+// separator on money columns, optional bold total row, optional "Tangerang, [date] ... [name]"
+// signature block — so an exported report is ready to send/print without the manual Excel
+// clean-up admins were doing after every export (add letterhead, format currency, total the
+// column, type the sign-off block). Requires xlsx-js-style (see loadXLSXLibrary) since the free
+// SheetJS core silently drops all cell styling on write.
+function buildStyledSheet(XLSX, {
+  titleRows = [],
+  headers,
+  rows,
+  moneyCols = [],
+  totalRow = null,
+  colWidths = [],
+  signature = null
+}) {
+  const aoa = [];
+  titleRows.forEach(t => aoa.push([t]));
+  if (titleRows.length) aoa.push([]);
+  const headerRowIdx = aoa.length;
+  aoa.push(headers);
+  rows.forEach(r => aoa.push(r));
+  let totalRowIdx = null;
+  if (totalRow) {
+    totalRowIdx = aoa.length;
+    aoa.push(totalRow);
+  }
+  if (signature) {
+    aoa.push([]);
+    const dateRow = [];
+    dateRow[signature.col] = signature.cityDate;
+    aoa.push(dateRow);
+    aoa.push([]);
+    aoa.push([]);
+    aoa.push([]);
+    const nameRow = [];
+    nameRow[signature.col] = signature.name;
+    aoa.push(nameRow);
+  }
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const thin = {
+    style: "thin",
+    color: {
+      rgb: "000000"
+    }
+  };
+  const border = {
+    top: thin,
+    bottom: thin,
+    left: thin,
+    right: thin
+  };
+  const setStyle = (r, c, style) => {
+    const addr = XLSX.utils.encode_cell({
+      r,
+      c
+    });
+    if (!ws[addr]) ws[addr] = {
+      t: "z",
+      v: undefined
+    };
+    ws[addr].s = style;
+  };
+  titleRows.forEach((_, i) => setStyle(i, 0, {
+    font: {
+      bold: true,
+      sz: i === 0 ? 10 : 12
+    }
+  }));
+  headers.forEach((_, c) => setStyle(headerRowIdx, c, {
+    font: {
+      bold: true
+    },
+    border,
+    alignment: {
+      horizontal: "center",
+      vertical: "center"
+    }
+  }));
+  rows.forEach((row, ri) => headers.forEach((_, c) => {
+    const r = headerRowIdx + 1 + ri;
+    if (moneyCols.includes(c)) {
+      const addr = XLSX.utils.encode_cell({
+        r,
+        c
+      });
+      if (ws[addr]) ws[addr].z = RP_NUMFMT;
+    }
+    setStyle(r, c, {
+      border
+    });
+  }));
+  if (totalRow && totalRowIdx !== null) {
+    headers.forEach((_, c) => {
+      if (moneyCols.includes(c)) {
+        const addr = XLSX.utils.encode_cell({
+          r: totalRowIdx,
+          c
+        });
+        if (ws[addr]) ws[addr].z = RP_NUMFMT;
+      }
+      setStyle(totalRowIdx, c, {
+        font: {
+          bold: true
+        },
+        border
+      });
+    });
+  }
+  ws["!cols"] = colWidths;
+  return ws;
+}
+
+// Export via a worksheet-building function (see buildStyledSheet) instead of a plain row-object
+// array — used wherever the exported report needs letterhead/total/signature formatting.
+async function exportToExcelStyled(buildFn, filename, sheetName = "Sheet1") {
+  try {
+    const XLSX = await loadXLSXLibrary();
+    const ws = buildFn(XLSX);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, sheetName);
     XLSX.writeFile(wb, filename.endsWith(".xlsx") ? filename : filename + ".xlsx");
@@ -867,6 +1009,11 @@ function hitungKoreksiAbsensi(karyawan, hariLibur, penyesuaian) {
     // for the legal overtime-pay multiplier table (see hitungLemburLegal). Defaults to 0 (all
     // overtime treated as regular working-day overtime), capped so it never exceeds the raw total.
     const lemburLiburEdit = Math.min(numOrNull(p.lemburLibur) || 0, k.lembur);
+    // ½ Hari (half-day attendance): manual-only correction, no machine column of its own — HRD
+    // marks it in Step 2 penyesuaian when an employee worked only half a shift. Counted separately
+    // from riilEdit (full-day presence) and folded into Uang Makan at 0.5x the daily rate wherever
+    // Uang Makan is computed (RekapMesinPanel.doSimpan, Payroll.calcUangMakan, UangMakanModule).
+    const setengahHariEdit = numOrNull(p.setengahHari) || 0;
     return {
       ...k,
       normalEdit,
@@ -878,7 +1025,8 @@ function hitungKoreksiAbsensi(karyawan, hariLibur, penyesuaian) {
       jmlIjinEdit,
       ijinEdit,
       sakitEdit,
-      lemburLiburEdit
+      lemburLiburEdit,
+      setengahHariEdit
     };
   });
 }
@@ -14123,7 +14271,9 @@ function QuotationUnit({
 // ════════════════════════════════════════════════════════════════════════════
 function QuotationPS({
   store,
-  session
+  session,
+  pendingSQClient,
+  clearPendingSQClient
 }) {
   const {
     quotationsPS,
@@ -14242,6 +14392,23 @@ function QuotationPS({
     });
     setModal(true);
   };
+  // Cross-module handoff: Maintenance Schedule's "Buat SQ" button sets App-level pendingSQClient to
+  // the client name and switches here. Pick it up, open the normal "+ Buat Quotation" form, and
+  // pre-select the matching Database Client so the user doesn't have to look it up again.
+  React.useEffect(() => {
+    if (!pendingSQClient) return;
+    const cust = (customers || []).find(c => c.nama === pendingSQClient);
+    openCreate();
+    if (cust) {
+      setForm(f => ({
+        ...f,
+        customerId: cust.id
+      }));
+    } else {
+      alert(`Client "${pendingSQClient}" tidak ditemukan di Database Client — pilih manual.`);
+    }
+    clearPendingSQClient();
+  }, [pendingSQClient]);
   const openRevision = q => {
     setEditingQ(null);
     setRevisionOf(q);
@@ -14346,6 +14513,19 @@ function QuotationPS({
       ...items[i],
       harga,
       subtotal: (items[i].qty || 0) * harga
+    };
+    return {
+      ...f,
+      items
+    };
+  });
+  const updateItemQty = (i, v) => setForm(f => {
+    const items = [...f.items];
+    const qty = parseFloat(v) || 0;
+    items[i] = {
+      ...items[i],
+      qty,
+      subtotal: qty * (items[i].harga || 0)
     };
     return {
       ...f,
@@ -15243,7 +15423,22 @@ function QuotationPS({
         color: theme.muted,
         fontSize: 12
       }
-    }, it.partDescription || "-"), it.qty, /*#__PURE__*/React.createElement("input", {
+    }, it.partDescription || "-"), /*#__PURE__*/React.createElement("input", {
+      type: "number",
+      value: it.qty ?? "",
+      onChange: e => updateItemQty(i, e.target.value),
+      placeholder: "Qty",
+      min: "0",
+      style: {
+        background: theme.surface,
+        border: `1px solid ${theme.border}`,
+        borderRadius: 6,
+        padding: "6px 8px",
+        color: theme.text,
+        fontSize: 13,
+        width: 70
+      }
+    }), /*#__PURE__*/React.createElement("input", {
       type: "number",
       value: it.harga ?? "",
       onChange: e => updateItemHarga(i, e.target.value),
@@ -26161,9 +26356,11 @@ function PayrollModule({
     const rows = (rekapAbsensi || []).filter(r => r.periodeMulai && r.periodeMulai.slice(0, 7) === bulanStr && String(r.namaKaryawan || "").toLowerCase().trim() === String(empNama || "").toLowerCase().trim());
     const rate = (employees.find(e => e.nama === empNama) || {}).uangHarianRate || 0;
     const totalRiil = rows.reduce((s, r) => s + (Number(r.riilHari) || 0), 0);
+    const totalSetengahHari = rows.reduce((s, r) => s + (Number(r.setengahHariHari) || 0), 0);
     return {
       totalRiil,
-      uangMakan: totalRiil * rate,
+      totalSetengahHari,
+      uangMakan: (totalRiil + 0.5 * totalSetengahHari) * rate,
       periodeCount: rows.length
     };
   };
@@ -28019,14 +28216,16 @@ function UangMakanModule({
     const emp = employees.find(e => e.nama === empNama) || {};
     const rate = emp.uangHarianRate || 0;
     const riilHari = rekap ? Number(rekap.riilHari) || 0 : 0;
+    const setengahHari = rekap ? Number(rekap.setengahHariHari) || 0 : 0;
     const absenHari = rekap ? Number(rekap.absenHari) || 0 : 0;
     const kerajinanRate = Number(emp.uangKerajinanRate) || 0;
     const kerajinanEligible = kerajinanRate > 0 && !!rekap && absenHari === 0;
     const uangKerajinan = kerajinanEligible ? kerajinanRate : 0;
-    const uangMakan = riilHari * rate;
+    const uangMakan = (riilHari + 0.5 * setengahHari) * rate;
     return {
       ada: !!rekap,
       riilHari,
+      setengahHari,
       absenHari,
       rate,
       uangMakan,
@@ -28059,17 +28258,34 @@ function UangMakanModule({
   const activeRows = rows;
   const totalSemua = activeRows.reduce((s, r) => s + r.total, 0);
   const periodeLabel = selMulai && selSelesai ? `${selMulai} s/d ${selSelesai}` : "-";
-  const exportRows = () => exportToExcel(activeRows.map(r => ({
-    nama: r.emp.nama,
-    jabatan: r.emp.jabatan || "-",
-    periode: periodeLabel,
-    riilHari: r.riilHari,
-    absenHari: r.absenHari,
-    rateHarian: r.rate,
-    uangMakan: r.uangMakan,
-    uangKerajinan: r.uangKerajinan,
-    total: r.total
-  })), `Uang_Makan_${selMulai || "periode"}_${selSelesai || ""}.xlsx`, "Uang Makan");
+  const exportRows = () => exportToExcelStyled(XLSX => buildStyledSheet(XLSX, {
+    titleRows: ["PT. FORESTA TRANSTEK", "Laporan Rekapitulasi Harian"],
+    headers: ["Nama", "Jabatan", "Periode", "Riil Hari", "½ Hari", "Absen Hari", "Rate Harian", "Uang Makan", "Uang Kerajinan", "Total"],
+    rows: activeRows.map(r => [r.emp.nama, r.emp.jabatan || "-", periodeLabel, r.riilHari, r.setengahHari || 0, r.absenHari, r.rate, r.uangMakan, r.uangKerajinan, r.total]),
+    moneyCols: [6, 7, 8, 9],
+    totalRow: [null, null, null, null, null, null, null, null, null, totalSemua],
+    colWidths: [{
+      wch: 22
+    }, {
+      wch: 22
+    }, {
+      wch: 22
+    }, {
+      wch: 9
+    }, {
+      wch: 7
+    }, {
+      wch: 10
+    }, {
+      wch: 12
+    }, {
+      wch: 13
+    }, {
+      wch: 15
+    }, {
+      wch: 13
+    }]
+  }), `Uang_Makan_${selMulai || "periode"}_${selSelesai || ""}.xlsx`, "Uang Makan");
   const printLaporan = () => {
     if (!selMulai || !selSelesai) return alert("Pilih periode terlebih dahulu.");
     printDocument({
@@ -28080,8 +28296,8 @@ function UangMakanModule({
       tanggalLabel: "Dicetak Tanggal",
       partyLabel: "Periode",
       partyName: periodeLabel,
-      itemHeaders: ["Nama", "Jabatan", "Riil Hari", "Absen Hari", "Uang Makan", "Uang Kerajinan", "Total"],
-      items: activeRows.map(r => [r.emp.nama, r.emp.jabatan || "-", r.riilHari, r.absenHari, fmt(r.uangMakan), fmt(r.uangKerajinan), fmt(r.total)]),
+      itemHeaders: ["Nama", "Jabatan", "Riil Hari", "½ Hari", "Absen Hari", "Uang Makan", "Uang Kerajinan", "Total"],
+      items: activeRows.map(r => [r.emp.nama, r.emp.jabatan || "-", r.riilHari, r.setengahHari || 0, r.absenHari, fmt(r.uangMakan), fmt(r.uangKerajinan), fmt(r.total)]),
       subtotal: totalSemua,
       total: totalSemua,
       extraInfoRows: [["Jumlah Karyawan", activeRows.length], ["Total Periode Ini", fmt(totalSemua)]],
@@ -28179,9 +28395,9 @@ function UangMakanModule({
       margin: 0
     }
   }, "Belum ada periode Rekap Absensi tersimpan.")) : /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
-    headers: isAdmin ? ["Nama", "Jabatan", "Riil Hari", "Absen Hari", "Uang Makan", "Uang Kerajinan", "Total", "Aksi"] : ["Nama", "Jabatan", "Riil Hari", "Absen Hari", "Uang Makan", "Uang Kerajinan", "Total"],
+    headers: isAdmin ? ["Nama", "Jabatan", "Riil Hari", "½ Hari", "Absen Hari", "Uang Makan", "Uang Kerajinan", "Total", "Aksi"] : ["Nama", "Jabatan", "Riil Hari", "½ Hari", "Absen Hari", "Uang Makan", "Uang Kerajinan", "Total"],
     rows: rows.map(r => {
-      const base = [r.emp.nama, r.emp.jabatan || "-", fmtNum(r.riilHari), fmtNum(r.absenHari), fmt(r.uangMakan), r.kerajinanEligible ? /*#__PURE__*/React.createElement(Badge, {
+      const base = [r.emp.nama, r.emp.jabatan || "-", fmtNum(r.riilHari), fmtNum(r.setengahHari || 0), fmtNum(r.absenHari), fmt(r.uangMakan), r.kerajinanEligible ? /*#__PURE__*/React.createElement(Badge, {
         color: theme.green
       }, fmt(r.uangKerajinan), " ✓ Hadir Penuh") : r.uangKerajinan > 0 ? fmt(r.uangKerajinan) : "-", /*#__PURE__*/React.createElement("strong", {
         style: {
@@ -29727,7 +29943,8 @@ function FinancialDashboardModule({
 // ════════════════════════════════════════════════════════════════════════════
 function MaintenanceScheduleModule({
   store,
-  session
+  session,
+  onRequestSQ
 }) {
   const {
     maintenanceSchedules,
@@ -29736,7 +29953,9 @@ function MaintenanceScheduleModule({
     statusReports,
     salesOrders,
     mills,
-    customers
+    customers,
+    quotationsPS,
+    suratTugas
   } = store;
   const isSepti = session.role === "workshop_manager";
   const isOwnerLike = session.role === "owner" || session.role === "gm";
@@ -29874,30 +30093,58 @@ function MaintenanceScheduleModule({
     const b = getDueBadge(m.nextDueDate, m.status);
     return b.label !== "Selesai" && b.label !== "Terjadwal";
   }).length;
-  // Per-Mill summary (Master Mill × latest Sales Order × latest Mekanik Report visit) — a
-  // client-level/mill-level view separate from the per-Unit service-due table below. Sales Order
-  // is only ever stored per CLIENT (not per specific mill), so "tanggal pembelian parts terakhir"
-  // is the latest SO date for the client that owns this mill — if one client ever has multiple
-  // mills, they'll currently show the same SO date; refine later if that becomes common. The visit
-  // date, by contrast, IS mill-specific (Kunjungan records which Master Mill was selected), so that
-  // one is accurate per mill already.
+  // Per-Mill summary (Master Mill × latest Quotation × latest Sales Order × latest Surat Tugas ×
+  // latest Mekanik Report visit) — a client-level/mill-level view separate from the per-Unit
+  // service-due table below. Quotation and Sales Order are only ever stored per CLIENT (not per
+  // specific mill), so their "latest" figures are the latest for the client that owns this mill —
+  // if one client ever has multiple mills, they'll currently show the same Quotation/SO; refine
+  // later if that becomes common. Surat Tugas (used here as "No. MR" — there's no separate MR
+  // document series, ST is the actual per-visit workshop job order) and Kunjungan visit dates, by
+  // contrast, ARE mill-specific since a Kunjungan records which Master Mill was selected.
   const [millSummarySearch, setMillSummarySearch] = useState("");
+  // Read-only preview for a Quotation/SO/Surat Tugas clicked from the table below — a full reuse of
+  // each module's own detail view isn't practical from here (different components, different print
+  // plumbing), so this is a compact summary instead. { type: "quotation"|"so"|"st", data } | null.
+  const [docPreview, setDocPreview] = useState(null);
   const millSummaryRows = (mills || []).map(m => {
     const clientNama = (customers || []).find(c => c.id === m.customerId)?.nama || m.companyName || "-";
-    const soDates = (salesOrders || []).filter(so => m.customerId ? so.customerId === m.customerId : so.customerNama === clientNama).map(so => so.tanggal).filter(Boolean).sort();
+    const soForClient = (salesOrders || []).filter(so => m.customerId ? so.customerId === m.customerId : so.customerNama === clientNama).slice().sort((a, b) => (a.tanggal || "").localeCompare(b.tanggal || ""));
+    const latestSO = soForClient[soForClient.length - 1] || null;
+    const quotForClient = (quotationsPS || []).filter(q => m.customerId ? q.customerId === m.customerId : q.customerNama === clientNama).slice().sort((a, b) => (a.tanggal || "").localeCompare(b.tanggal || ""));
+    const latestQuotation = quotForClient[quotForClient.length - 1] || null;
+    const millVisitIds = new Set((visits || []).filter(v => v.millId === m.millName).map(v => v.id));
     const visitDates = (visits || []).filter(v => v.millId === m.millName).map(v => v.tanggal).filter(Boolean).sort();
+    const stForMill = (suratTugas || []).filter(s => millVisitIds.has(s.visitId)).slice().sort((a, b) => (a.tanggalPembuatan || "").localeCompare(b.tanggalPembuatan || ""));
+    const latestST = stForMill[stForMill.length - 1] || null;
     return {
       clientNama,
       millName: m.millName,
-      lastSODate: soDates[soDates.length - 1] || null,
-      lastVisitDate: visitDates[visitDates.length - 1] || null
+      lastSODate: latestSO?.tanggal || null,
+      soData: latestSO,
+      lastQuotationDate: latestQuotation?.tanggal || null,
+      quotationData: latestQuotation,
+      lastVisitDate: visitDates[visitDates.length - 1] || null,
+      stData: latestST
     };
   });
   const millSummaryFiltered = millSummarySearch.trim() ? millSummaryRows.filter(r => [r.clientNama, r.millName].some(x => String(x).toLowerCase().includes(millSummarySearch.trim().toLowerCase()))) : millSummaryRows;
-  // Follow-up worklist: any mill row from RINGKASAN PER MILL missing either date needs someone to
-  // chase it down — no SO date means no parts activity was ever logged for that client, no visit
-  // date means the mill has never had a recorded Kunjungan.
-  const millFollowUpRows = millSummaryRows.filter(r => !r.lastSODate || !r.lastVisitDate);
+  // Renders a clickable doc-number cell (Quotation/SO/ST) that opens the compact preview modal, or
+  // an empty-state badge when there's no document on record yet.
+  const docCell = (nomor, type, data) => nomor ? /*#__PURE__*/React.createElement("a", {
+    href: "#",
+    onClick: e => {
+      e.preventDefault();
+      setDocPreview({
+        type,
+        data
+      });
+    },
+    style: {
+      color: theme.accentLight
+    }
+  }, nomor) : /*#__PURE__*/React.createElement(Badge, {
+    color: theme.red
+  }, "Kosong");
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -29962,30 +30209,22 @@ function MaintenanceScheduleModule({
       marginBottom: 12
     }
   }), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Nama Client", "Nama Mill", "Tanggal SO Terakhir (Parts)", "Tanggal Visit Terakhir"],
-    rows: millSummaryFiltered.map(r => [r.clientNama, r.millName, fmtDateRev(r.lastSODate), fmtDateRev(r.lastVisitDate)]),
+    headers: ["Nama Client", "Nama Mill", "Tanggal Visit Terakhir", "Tanggal Quotation Terakhir", "No. Quotation", "No. SO", "No. MR", "Aksi"],
+    rows: millSummaryFiltered.map(r => [r.clientNama, r.millName, r.lastVisitDate ? fmtDateRev(r.lastVisitDate) : /*#__PURE__*/React.createElement(Badge, {
+      color: theme.red
+    }, "Kosong"), r.lastQuotationDate ? fmtDateRev(r.lastQuotationDate) : /*#__PURE__*/React.createElement(Badge, {
+      color: theme.red
+    }, "Kosong"), docCell(r.quotationData?.nomor, "quotation", r.quotationData), docCell(r.soData?.nomor, "so", r.soData), docCell(r.stData?.nomor, "st", r.stData), onRequestSQ ? /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "warning",
+      onClick: () => onRequestSQ(r.clientNama)
+    }, "+ Buat Quotation") : null]),
     emptyMsg: "Belum ada data Master Mill"
-  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
-    title: "⚠️ PERLU FOLLOW UP — Tanggal SO / Visit Kosong",
-    count: millFollowUpRows.length,
-    badgeColor: theme.red,
-    storageKey: "ms_mill_followup",
-    defaultOpen: millFollowUpRows.length > 0
-  }, /*#__PURE__*/React.createElement("p", {
-    style: {
-      margin: "0 0 10px",
-      fontSize: 12,
-      color: theme.muted
-    }
-  }, "Mill/client di bawah ini belum punya Tanggal SO Terakhir dan/atau Tanggal Visit Terakhir — perlu di-follow up oleh Sales (untuk SO) dan/atau Workshop (untuk kunjungan)."), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Nama Client", "Nama Mill", "Tanggal SO Terakhir (Parts)", "Tanggal Visit Terakhir"],
-    rows: millFollowUpRows.map(r => [r.clientNama, r.millName, r.lastSODate ? fmtDateRev(r.lastSODate) : /*#__PURE__*/React.createElement(Badge, {
-      color: theme.red
-    }, "Kosong"), r.lastVisitDate ? fmtDateRev(r.lastVisitDate) : /*#__PURE__*/React.createElement(Badge, {
-      color: theme.red
-    }, "Kosong")]),
-    emptyMsg: "Semua mill sudah punya Tanggal SO & Tanggal Visit."
-  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
+  })), docPreview && /*#__PURE__*/React.createElement(Modal, {
+    open: true,
+    onClose: () => setDocPreview(null),
+    title: docPreview.type === "quotation" ? "Preview Quotation " + (docPreview.data?.nomor || "") : docPreview.type === "so" ? "Preview Sales Order " + (docPreview.data?.nomor || "") : "Preview Surat Tugas " + (docPreview.data?.nomor || "")
+  }, docPreview.type === "quotation" && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "No. Quotation: "), docPreview.data?.nomor), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Tanggal: "), fmtDateRev(docPreview.data?.tanggal)), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Client: "), docPreview.data?.customerNama), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Total: "), fmt(docPreview.data?.total)), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Status: "), docPreview.data?.status || "-")), docPreview.type === "so" && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "No. SO: "), docPreview.data?.nomor), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Tanggal: "), fmtDateRev(docPreview.data?.tanggal)), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Client: "), docPreview.data?.customerNama), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Total: "), fmt(docPreview.data?.total)), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Fulfillment: "), docPreview.data?.fulfillmentType || "-")), docPreview.type === "st" && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "No. Surat Tugas: "), docPreview.data?.nomor), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Tanggal: "), fmtDateRev(docPreview.data?.tanggalPembuatan)), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Client: "), docPreview.data?.namaClient), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Dibuat oleh: "), docPreview.data?.dibuatOlehNama, " (", docPreview.data?.dibuatOlehJabatan, ")"), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("strong", null, "Assignees: "), (docPreview.data?.assignees || []).map(a => a.nama || a).join(", ") || "-"))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari unit / client / no. SO / mekanik...",
     value: msSearch,
     onChange: setMsSearch,
@@ -32718,6 +32957,7 @@ function DashboardAbsensiPanel({
         ...r,
         normalHari: Number(edited.normalHari) || 0,
         riilHari: Number(edited.riilHari) || 0,
+        setengahHariHari: Number(edited.setengahHariHari) || 0,
         absenHari: Number(edited.absenHari) || 0,
         dLuarHari: Number(edited.dLuarHari) || 0,
         terlambatJam: Number(edited.terlambatJam) || 0,
@@ -33032,7 +33272,7 @@ function DashboardAbsensiPanel({
       gridTemplateColumns: "repeat(auto-fill,minmax(110px,1fr))",
       gap: 10
     }
-  }, [["normalHari", "Normal"], ["riilHari", "Riil"], ["dLuarHari", "Dinas Luar"], ["absenHari", "Absen"], ["terlambatJam", "Terlambat (j)"], ["lemburJam", "Lembur (j)"], ["cutiHari", "Cuti"], ["cutiKhususHari", "Cuti Khusus"], ["ijinHari", "Ijin"], ["sakitHari", "Sakit"]].map(([field, label]) => /*#__PURE__*/React.createElement(Input, {
+  }, [["normalHari", "Normal"], ["riilHari", "Riil"], ["setengahHariHari", "½ Hari"], ["dLuarHari", "Dinas Luar"], ["absenHari", "Absen"], ["terlambatJam", "Terlambat (j)"], ["lemburJam", "Lembur (j)"], ["cutiHari", "Cuti"], ["cutiKhususHari", "Cuti Khusus"], ["ijinHari", "Ijin"], ["sakitHari", "Sakit"]].map(([field, label]) => /*#__PURE__*/React.createElement(Input, {
     key: field,
     label: label,
     type: "number",
@@ -33104,13 +33344,14 @@ function RekapMesinPanel({
     cutiKhusus: "",
     sakit: "",
     absenManual: "",
-    lemburLibur: ""
+    lemburLibur: "",
+    setengahHari: ""
   });
-  // Uang Makan preview for a computed/saved row: riilHari x employee's uangHarianRate,
-  // matched by name (same convention as Payroll's calcUangMakan).
-  const uangMakanRow = (nama, riilHari) => {
+  // Uang Makan preview for a computed/saved row: (riilHari + 0.5 x setengahHariHari) x employee's
+  // uangHarianRate, matched by name (same convention as Payroll's calcUangMakan).
+  const uangMakanRow = (nama, riilHari, setengahHari) => {
     const rate = (employees.find(e => e.nama === nama) || {}).uangHarianRate || 0;
-    return (Number(riilHari) || 0) * rate;
+    return ((Number(riilHari) || 0) + 0.5 * (Number(setengahHari) || 0)) * rate;
   };
   const resetUpload = () => {
     setRawParsed(null);
@@ -33255,9 +33496,10 @@ function RekapMesinPanel({
       cutiHari: k.cutiEdit,
       cutiKhususHari: k.cutiKhususEdit,
       ijinHari: k.ijinEdit,
+      setengahHariHari: k.setengahHariEdit || 0,
       scanKali: k.scan,
       jamKerja: k.jamKerja,
-      uangMakan: (Number(k.riilEdit) || 0) * (emp.uangHarianRate || 0),
+      uangMakan: ((Number(k.riilEdit) || 0) + 0.5 * (Number(k.setengahHariEdit) || 0)) * (emp.uangHarianRate || 0),
       dibuatOleh: session.nama,
       createdAt: now
     }));
@@ -33327,6 +33569,7 @@ function RekapMesinPanel({
     "ID Karyawan": r.karyawanId,
     Normal: r.normalHari,
     Riil: r.riilHari,
+    "½ Hari": r.setengahHariHari || 0,
     Absen: r.absenHari,
     "D.Luar": r.dLuarHari,
     "Terlambat (jam)": r.terlambatJam,
@@ -33343,7 +33586,7 @@ function RekapMesinPanel({
   const printLaporanMingguan = (mulai, selesai) => {
     const rows = (rekapAbsensi || []).filter(r => r.periodeMulai === mulai && r.periodeSelesai === selesai).slice().sort((a, b) => String(a.namaKaryawan || "").localeCompare(String(b.namaKaryawan || "")));
     if (rows.length === 0) return;
-    const totalUangMakan = rows.reduce((s, r) => s + (r.uangMakan || uangMakanRow(r.namaKaryawan, r.riilHari)), 0);
+    const totalUangMakan = rows.reduce((s, r) => s + (r.uangMakan || uangMakanRow(r.namaKaryawan, r.riilHari, r.setengahHariHari)), 0);
     printDocument({
       docType: "laporan",
       docTitle: "Laporan Mingguan Absensi",
@@ -33352,8 +33595,8 @@ function RekapMesinPanel({
       tanggalLabel: "Dicetak Tanggal",
       partyLabel: "Periode",
       partyName: `${mulai} s/d ${selesai}`,
-      itemHeaders: ["Nama", "Normal", "Riil", "Absen", "D.Luar", "Trlmbt(j)", "Lembur(j)", "Cuti", "Cuti Khusus", "Ijin", "Sakit", "Jam Kerja", "Uang Makan"],
-      items: rows.map(r => [r.namaKaryawan, r.normalHari, r.riilHari, r.absenHari, r.dLuarHari, r.terlambatJam, r.lemburJam, r.cutiHari, r.cutiKhususHari, r.ijinHari, r.sakitHari, r.jamKerja, fmt(r.uangMakan || uangMakanRow(r.namaKaryawan, r.riilHari))]),
+      itemHeaders: ["Nama", "Normal", "Riil", "½ Hari", "Absen", "D.Luar", "Trlmbt(j)", "Lembur(j)", "Cuti", "Cuti Khusus", "Ijin", "Sakit", "Jam Kerja", "Uang Makan"],
+      items: rows.map(r => [r.namaKaryawan, r.normalHari, r.riilHari, r.setengahHariHari || 0, r.absenHari, r.dLuarHari, r.terlambatJam, r.lemburJam, r.cutiHari, r.cutiKhususHari, r.ijinHari, r.sakitHari, r.jamKerja, fmt(r.uangMakan || uangMakanRow(r.namaKaryawan, r.riilHari, r.setengahHariHari))]),
       subtotal: totalUangMakan,
       total: totalUangMakan,
       extraInfoRows: [["Jumlah Karyawan", rows.length], ["Total Uang Makan Periode", fmt(totalUangMakan)]],
@@ -33652,7 +33895,7 @@ function RekapMesinPanel({
     key: i,
     style: {
       display: "grid",
-      gridTemplateColumns: "2fr 0.7fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr auto",
+      gridTemplateColumns: "2fr 0.7fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr auto",
       gap: 8,
       alignItems: "end",
       marginBottom: 8,
@@ -33711,6 +33954,11 @@ function RekapMesinPanel({
     value: p.sakit,
     onChange: v => updatePenyesuaianRow(i, "sakit", v)
   }), /*#__PURE__*/React.createElement(Input, {
+    label: "½ Hari",
+    type: "number",
+    value: p.setengahHari,
+    onChange: v => updatePenyesuaianRow(i, "setengahHari", v)
+  }), /*#__PURE__*/React.createElement(Input, {
     label: "Lembur Libur (jam)",
     type: "number",
     value: p.lemburLibur,
@@ -33742,8 +33990,8 @@ function RekapMesinPanel({
       overflowX: "auto"
     }
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["Nama", "Normal", "Riil", "Absen", "D.Luar", "Trlmbt(j)", "Plg.Cpt(j)", "Lembur(j)", "Lmbr.Libur(j)", "Jml.Ijin", "Ijin", "Cuti", "Cuti Khusus", "Sakit", "Jam Kerja", "Uang Makan"],
-    rows: preview.map(k => [k.nama, k.normalEdit, k.riilEdit, k.absenEdit, k.dLuarEdit, k.terlambat, k.plgCpt, k.lembur, k.lemburLiburEdit || 0, k.jmlIjinEdit, k.ijinEdit, k.cutiEdit, k.cutiKhususEdit, k.sakitEdit, k.jamKerja, fmt(uangMakanRow(k.nama, k.riilEdit))]),
+    headers: ["Nama", "Normal", "Riil", "½ Hari", "Absen", "D.Luar", "Trlmbt(j)", "Plg.Cpt(j)", "Lembur(j)", "Lmbr.Libur(j)", "Jml.Ijin", "Ijin", "Cuti", "Cuti Khusus", "Sakit", "Jam Kerja", "Uang Makan"],
+    rows: preview.map(k => [k.nama, k.normalEdit, k.riilEdit, k.setengahHariEdit || 0, k.absenEdit, k.dLuarEdit, k.terlambat, k.plgCpt, k.lembur, k.lemburLiburEdit || 0, k.jmlIjinEdit, k.ijinEdit, k.cutiEdit, k.cutiKhususEdit, k.sakitEdit, k.jamKerja, fmt(uangMakanRow(k.nama, k.riilEdit, k.setengahHariEdit))]),
     emptyMsg: "-"
   })), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -33795,8 +34043,8 @@ function RekapMesinPanel({
       overflowX: "auto"
     }
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["Periode", "Nama", "Normal", "Riil", "Absen", "D.Luar", "Trlmbt(j)", "Lembur(j)", "Cuti", "Cuti Khusus", "Ijin", "Sakit", "Jam Kerja", "Uang Makan", "Aksi"],
-    rows: rekapFiltered.map(r => [`${r.periodeMulai} s/d ${r.periodeSelesai}`, r.namaKaryawan, r.normalHari, r.riilHari, r.absenHari, r.dLuarHari, r.terlambatJam, r.lemburJam, r.cutiHari, r.cutiKhususHari, r.ijinHari, r.sakitHari, r.jamKerja, fmt(r.uangMakan || uangMakanRow(r.namaKaryawan, r.riilHari)), /*#__PURE__*/React.createElement("div", {
+    headers: ["Periode", "Nama", "Normal", "Riil", "½ Hari", "Absen", "D.Luar", "Trlmbt(j)", "Lembur(j)", "Cuti", "Cuti Khusus", "Ijin", "Sakit", "Jam Kerja", "Uang Makan", "Aksi"],
+    rows: rekapFiltered.map(r => [`${r.periodeMulai} s/d ${r.periodeSelesai}`, r.namaKaryawan, r.normalHari, r.riilHari, r.setengahHariHari || 0, r.absenHari, r.dLuarHari, r.terlambatJam, r.lemburJam, r.cutiHari, r.cutiKhususHari, r.ijinHari, r.sakitHari, r.jamKerja, fmt(r.uangMakan || uangMakanRow(r.namaKaryawan, r.riilHari, r.setengahHariHari)), /*#__PURE__*/React.createElement("div", {
       style: {
         display: "flex",
         gap: 6
@@ -36910,6 +37158,27 @@ function WorkshopOpsModule({
   })();
   const [detailPeriod, setDetailPeriod] = useState(null);
   const periodItems = detailPeriod ? weekPeriods.find(p => p.key === detailPeriod)?.items || [] : [];
+  // Shared layout for both export buttons below (all-time + per-period) — matches the letterhead-
+  // free, TOTAL-row + "Tangerang, [date] / [signer]" sign-off layout that Finance was manually
+  // re-creating in Excel after every export.
+  const workshopOpsHeaders = ["Tanggal", "Kategori", "Jenis", "Nominal", "Catatan", "Input Oleh", "Status"];
+  const workshopOpsColWidths = [{
+    wch: 12
+  }, {
+    wch: 12
+  }, {
+    wch: 14
+  }, {
+    wch: 14
+  }, {
+    wch: 42
+  }, {
+    wch: 18
+  }, {
+    wch: 15
+  }];
+  const buildWorkshopOpsRows = items => items.map(e => [e.tanggal, e.kategoriLabel || e.kategori || "-", e.coaNama, e.nominal, e.catatan, e.inputBy, e.dibayar ? "Dibayar" : "Belum Dibayar"]);
+  const workshopOpsTotalRow = total => [null, null, "TOTAL", total, null, null, null];
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -36935,14 +37204,18 @@ function WorkshopOpsModule({
       gap: 10
     }
   }, /*#__PURE__*/React.createElement(ExportExcelBtn, {
-    onClick: () => exportToExcel(visibleExpenses.map(e => ({
-      tanggal: e.tanggal,
-      kategori: e.kategoriLabel || e.kategori || "-",
-      jenis: e.coaNama,
-      nominal: e.nominal,
-      catatan: e.catatan,
-      inputOleh: e.inputBy
-    })), "Workshop_Ops.xlsx", "Workshop Ops")
+    onClick: () => exportToExcelStyled(XLSX => buildStyledSheet(XLSX, {
+      headers: workshopOpsHeaders,
+      rows: buildWorkshopOpsRows(visibleExpenses),
+      moneyCols: [3],
+      totalRow: workshopOpsTotalRow(visibleExpenses.reduce((s, e) => s + e.nominal, 0)),
+      colWidths: workshopOpsColWidths,
+      signature: {
+        col: 4,
+        cityDate: `Tangerang, ${fmtDateIndoLong(today())}`,
+        name: session.nama
+      }
+    }), "Workshop_Ops.xlsx", "Workshop Ops")
   }), /*#__PURE__*/React.createElement(Btn, {
     onClick: () => setModal(true)
   }, "+ Catat Pengeluaran"))), /*#__PURE__*/React.createElement("p", {
@@ -37015,15 +37288,18 @@ function WorkshopOpsModule({
     color: periodPaidStatus(periodItems) === "paid" ? theme.green : periodPaidStatus(periodItems) === "partial" ? theme.cyan : theme.yellow
   }, periodPaidStatus(periodItems) === "paid" ? "Sudah Dibayar" : periodPaidStatus(periodItems) === "partial" ? "Sebagian Dibayar" : "Belum Dibayar"), /*#__PURE__*/React.createElement(ExportExcelBtn, {
     label: "📊 Export Periode Ini",
-    onClick: () => exportToExcel(periodItems.map(e => ({
-      tanggal: e.tanggal,
-      kategori: e.kategoriLabel || e.kategori || "-",
-      jenis: e.coaNama,
-      nominal: e.nominal,
-      catatan: e.catatan,
-      inputOleh: e.inputBy,
-      status: e.dibayar ? "Dibayar" : "Belum Dibayar"
-    })), `Workshop_Ops_${weekPeriods.find(p => p.key === detailPeriod)?.start || detailPeriod}_${weekPeriods.find(p => p.key === detailPeriod)?.end || ""}.xlsx`, "Workshop Ops")
+    onClick: () => exportToExcelStyled(XLSX => buildStyledSheet(XLSX, {
+      headers: workshopOpsHeaders,
+      rows: buildWorkshopOpsRows(periodItems),
+      moneyCols: [3],
+      totalRow: workshopOpsTotalRow(weekPeriods.find(p => p.key === detailPeriod)?.total || 0),
+      colWidths: workshopOpsColWidths,
+      signature: {
+        col: 4,
+        cityDate: `Tangerang, ${fmtDateIndoLong(weekPeriods.find(p => p.key === detailPeriod)?.end || today())}`,
+        name: session.nama
+      }
+    }), `Workshop_Ops_${weekPeriods.find(p => p.key === detailPeriod)?.start || detailPeriod}_${weekPeriods.find(p => p.key === detailPeriod)?.end || ""}.xlsx`, "Workshop Ops")
   }), (isOwnerLike || canSeeAll) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: periodPaidStatus(periodItems) === "paid" ? "ghost" : "success",
@@ -38528,6 +38804,11 @@ function App() {
   // switches to the Sales Order module, which picks it up in a useEffect and auto-opens its
   // existing item-pick flow, then clears this back to null.
   const [pendingSOQuot, setPendingSOQuot] = useState(null);
+  // Cross-module handoff: Maintenance Schedule's "Buat SQ" button (shown when a mill/client's last
+  // SO date is empty or stale >3 months) sets this to the client name and switches to Parts &
+  // Service Quotation, which picks it up in a useEffect, opens its own "+ Buat Quotation" form, and
+  // pre-selects the matching Database Client — same pattern as pendingSOQuot above.
+  const [pendingSQClient, setPendingSQClient] = useState(null);
   // Sidebar group collapse state (Max/Min per group) — persisted per-browser so a user's chosen
   // layout survives reloads. Keyed by SIDEBAR_GROUPS[].key; a group is expanded unless explicitly
   // marked true here.
@@ -38839,7 +39120,9 @@ function App() {
       case "quotation_ps":
         return /*#__PURE__*/React.createElement(QuotationPS, {
           store: store,
-          session: session
+          session: session,
+          pendingSQClient: pendingSQClient,
+          clearPendingSQClient: () => setPendingSQClient(null)
         });
       case "sales_order":
         return /*#__PURE__*/React.createElement(SalesOrderModule, {
@@ -38913,7 +39196,11 @@ function App() {
       case "maintenance_schedule":
         return /*#__PURE__*/React.createElement(MaintenanceScheduleModule, {
           store: store,
-          session: session
+          session: session,
+          onRequestSQ: clientNama => {
+            setPendingSQClient(clientNama);
+            setActive("quotation_ps");
+          }
         });
       case "master_coa":
         return /*#__PURE__*/React.createElement(MasterCOAModule, {
