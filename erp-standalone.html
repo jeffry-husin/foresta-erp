@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-19.1";
+const APP_BUILD = "2026-08-19.6";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -446,6 +446,20 @@ const invoiceDisplayFinancials = inv => {
   };
 };
 const today = () => new Date().toISOString().split("T")[0];
+// Annual Cuti quota is gated by tenure: 0 hari during the 12-month probation period (masa
+// percobaan, per Jef's confirmed policy 2026-08-19), then a flat 12 hari/tahun once an employee
+// has been employed 12 full months from tanggalMasuk. Falls back to the full 12 (rather than 0)
+// when tanggalMasuk is missing on a record, so legacy employees without a recorded hire date
+// aren't wrongly blocked from taking leave. Shared by Form Cuti and Rekap Absensi so both use the
+// identical tenure calculation instead of two independently-hardcoded "12".
+const cutiQuotaTahunan = emp => {
+  if (!emp || !emp.tanggalMasuk) return 12;
+  const masuk = new Date(emp.tanggalMasuk);
+  if (isNaN(masuk)) return 12;
+  const eligibleFrom = new Date(masuk);
+  eligibleFrom.setMonth(eligibleFrom.getMonth() + 12);
+  return new Date() >= eligibleFrom ? 12 : 0;
+};
 // Unified date display format requested app-wide: DD-MMM-YY with English 3-letter month
 // abbreviations, e.g. "01-JAN-26". Accepts a YYYY-MM-DD (or any Date-parseable) string; returns
 // "-" for empty/invalid input so callers can drop it straight into a table cell without extra
@@ -989,8 +1003,23 @@ function hitungKoreksiAbsensi(karyawan, hariLibur, penyesuaian) {
     // meninggal, dll) has no machine column of its own, so it's always manual (Step 2 penyesuaian)
     // with a 0 fallback. Counted in otherLeave like Cuti so it doesn't fall through into Absen.
     const cutiKhususEdit = numOrNull(p.cutiKhusus) ?? (k.cutiKhusus || 0);
-    const jmlIjinEdit = k.jmlIjin; // not exposed for manual override in the current UI (raw only)
-    const ijinEdit = numOrNull(p.ijin) ?? k.ijin;
+    // jmlIjinOverride lets HRD correct the machine's raw "Jumlah Izin" reading (column 18 of the
+    // export) directly when it's wrong/duplicates what's already counted elsewhere (e.g. the same
+    // days already recorded as Cuti) — before this fix there was no way to override jmlIjin at
+    // all, so the only workaround was typing a negative number into the separate "Ijin" field to
+    // cancel it out mathematically, which left permanent nonsensical negative Ijin values on
+    // records (root cause of Hermanto -6 / Stefanus -1, Jan 2026 — 2026-08-19).
+    const jmlIjinEdit = numOrNull(p.jmlIjinOverride) ?? k.jmlIjin;
+    // ½ Hari is folded directly into Ijin here (not left as a bare separate field) — it represents
+    // an employee who worked only half a shift and took Ijin/permission for the other half. Before
+    // this fix it was tracked ONLY in its own raw column (feeding just the Uang Makan 0.5x
+    // multiplier) and never reached ijinEdit, otherLeave, riilEdit/absenEdit, or the Rekap Absensi
+    // per-staff/YTD Ijin totals — so a half-day Ijin was invisible to annual Ijin-quota tracking and
+    // silently left that half-day counted as full Riil/Absen instead. Root cause of the "½ hari Ijin"
+    // undercount bug (2026-08-19). Moved above otherLeave so riilEdit/absenEdit's day-pool math
+    // naturally accounts for it too.
+    const setengahHariEdit = numOrNull(p.setengahHari) || 0;
+    const ijinEdit = (numOrNull(p.ijin) ?? k.ijin) + setengahHariEdit * 0.5;
     const sakitEdit = numOrNull(p.sakit) ?? k.sakit;
     const otherLeave = cutiEdit + cutiKhususEdit + jmlIjinEdit + ijinEdit + sakitEdit;
     const normalOverride = numOrNull(p.normalOverride);
@@ -1009,11 +1038,9 @@ function hitungKoreksiAbsensi(karyawan, hariLibur, penyesuaian) {
     // for the legal overtime-pay multiplier table (see hitungLemburLegal). Defaults to 0 (all
     // overtime treated as regular working-day overtime), capped so it never exceeds the raw total.
     const lemburLiburEdit = Math.min(numOrNull(p.lemburLibur) || 0, k.lembur);
-    // ½ Hari (half-day attendance): manual-only correction, no machine column of its own — HRD
-    // marks it in Step 2 penyesuaian when an employee worked only half a shift. Counted separately
-    // from riilEdit (full-day presence) and folded into Uang Makan at 0.5x the daily rate wherever
-    // Uang Makan is computed (RekapMesinPanel.doSimpan, Payroll.calcUangMakan, UangMakanModule).
-    const setengahHariEdit = numOrNull(p.setengahHari) || 0;
+    // setengahHariEdit is computed above (folded into ijinEdit) and still folded into Uang Makan at
+    // 0.5x the daily rate wherever Uang Makan is computed (RekapMesinPanel.doSimpan,
+    // Payroll.calcUangMakan, UangMakanModule) — kept as its own field for that purpose.
     return {
       ...k,
       normalEdit,
@@ -18870,12 +18897,15 @@ function PurchaseOrderModule({
   };
   const saveEditTanggalPO = () => {
     if (!editTanggalPO) return;
-    const arr = [...po];
-    arr[po.indexOf(editTanggalPO.po)] = {
-      ...editTanggalPO.po,
+    // Functional form (2026-08-19 fix): this used to snapshot `po` into a plain array and write it
+    // straight back, which silently overwrites the WHOLE collection with a possibly-stale local
+    // copy if anyone else created/edited a different PO in the meantime — root cause of PL-132
+    // (Duta Jaya Diesel) vanishing without any delete ever being logged. Updating by nomor inside
+    // the updater function means this can only ever touch the one record it means to.
+    setPo(prev => prev.map(p => p.nomor === editTanggalPO.po.nomor ? {
+      ...p,
       tanggal: editTanggalPO.tanggal
-    };
-    setPo(arr);
+    } : p));
     logAudit(store, session, {
       module: isLocal ? "Purchase Order Lokal" : "Purchase Order Overseas",
       docNomor: editTanggalPO.po.nomor,
@@ -18898,12 +18928,11 @@ function PurchaseOrderModule({
   };
   const saveEditCatatanPO = () => {
     if (!editCatatanPO) return;
-    const arr = [...po];
-    arr[po.indexOf(editCatatanPO.po)] = {
-      ...editCatatanPO.po,
+    // Functional form — see saveEditTanggalPO note above (same silent-overwrite fix).
+    setPo(prev => prev.map(p => p.nomor === editCatatanPO.po.nomor ? {
+      ...p,
       catatan: editCatatanPO.catatan
-    };
-    setPo(arr);
+    } : p));
     logAudit(store, session, {
       module: isLocal ? "Purchase Order Lokal" : "Purchase Order Overseas",
       docNomor: editCatatanPO.po.nomor,
@@ -19022,6 +19051,7 @@ function PurchaseOrderModule({
     }));
     const biayaTambahanTotalSave = biayaTambahan.reduce((s, b) => s + b.subtotal, 0);
     const ppnAmountSave = form.pakaiPpn ? itemsSubtotal * 0.11 : 0;
+    const newPoNomor = newNomor(po);
     setPo(prev => [...prev, {
       nomor: newNomor(prev),
       tanggal: today(),
@@ -19067,6 +19097,17 @@ function PurchaseOrderModule({
         status: newItems.every(it => it.sudahDiPO) ? "Sudah di-PO" : "Menunggu Purchasing"
       };
     }));
+    // BUG FIX (2026-08-19): PO creation was never logged to Audit Trail at all — the only entries
+    // ever written for a PO were Approve/Reject/Payment/Edit, so a PO that vanished before any of
+    // those happened left literally no trace of ever having existed. Logging creation closes that
+    // gap. (newPoNomor is computed from the local `po` snapshot for logging purposes only — the
+    // actual saved nomor above is always freshly recomputed against the server inside setPo.)
+    logAudit(store, session, {
+      module: `Purchase Order ${isLocal ? "Lokal" : "Overseas"}`,
+      docNomor: newPoNomor,
+      action: "Tambah",
+      detail: `${sup?.nama} — ${fmt(itemsSubtotal + biayaTambahanTotalSave + ppnAmountSave)}`
+    });
     setModal(false);
     setForm({
       irNomors: [],
@@ -19083,13 +19124,12 @@ function PurchaseOrderModule({
     });
   };
   const gmApprove = p => {
-    const arr = [...po];
-    arr[po.indexOf(p)] = {
-      ...p,
+    // Functional form — see saveEditTanggalPO note (silent-overwrite fix, 2026-08-19).
+    setPo(prev => prev.map(x => x.nomor === p.nomor ? {
+      ...x,
       approvedByNama: session.nama,
       status: "Disetujui GM - Kirim ke Supplier"
-    };
-    setPo(arr);
+    } : x));
     logAudit(store, session, {
       module: `Purchase Order ${isLocal ? "Lokal" : "Overseas"}`,
       docNomor: p.nomor,
@@ -19100,13 +19140,11 @@ function PurchaseOrderModule({
   const gmReject = async p => {
     const reason = await askPrompt("Alasan penolakan:");
     if (!reason) return;
-    const arr = [...po];
-    arr[po.indexOf(p)] = {
-      ...p,
+    setPo(prev => prev.map(x => x.nomor === p.nomor ? {
+      ...x,
       status: "Ditolak GM",
       rejectReason: reason
-    };
-    setPo(arr);
+    } : x));
     logAudit(store, session, {
       module: `Purchase Order ${isLocal ? "Lokal" : "Overseas"}`,
       docNomor: p.nomor,
@@ -19130,21 +19168,20 @@ function PurchaseOrderModule({
     setPayAmount(String(p.jumlahDibayar || 0));
   };
   const confirmMarkPaid = () => {
-    const arr = [...po];
     const jumlahInput = parseFloat(payAmount) || 0;
     if (payEditMode) {
       // Correcting an already-recorded payment: the entered amount REPLACES jumlahDibayar
       // (does not add on top), and metodeBayar/tanggalBayar are overwritten to the corrected values.
-      arr[po.indexOf(payMethodModal)] = {
-        ...payMethodModal,
+      // Functional form — see saveEditTanggalPO note (silent-overwrite fix, 2026-08-19).
+      setPo(prev => prev.map(x => x.nomor === payMethodModal.nomor ? {
+        ...x,
         statusBayar: jumlahInput <= 0 ? "Belum Dibayar" : (jumlahInput >= payMethodModal.total ? "Sudah Dibayar" : "Dibayar Sebagian"),
         paidBy: session.nama,
         paidDate: today(),
         tanggalBayar: payDate,
         jumlahDibayar: jumlahInput,
         metodeBayar: payMethod
-      };
-      setPo(arr);
+      } : x));
       logAudit(store, session, {
         module: `Purchase Order ${isLocal ? "Lokal" : "Overseas"}`,
         docNomor: payMethodModal.nomor,
@@ -19155,8 +19192,9 @@ function PurchaseOrderModule({
       return;
     }
     const totalDibayar = (payMethodModal.jumlahDibayar || 0) + jumlahInput;
-    arr[po.indexOf(payMethodModal)] = {
-      ...payMethodModal,
+    // Functional form — see saveEditTanggalPO note (silent-overwrite fix, 2026-08-19).
+    setPo(prev => prev.map(x => x.nomor === payMethodModal.nomor ? {
+      ...x,
       statusBayar: totalDibayar >= payMethodModal.total ? "Sudah Dibayar" : "Dibayar Sebagian",
       paidBy: session.nama,
       paidDate: today(),
@@ -19167,14 +19205,13 @@ function PurchaseOrderModule({
       // another) instead of only keeping the running cumulative total — jumlahDibayar/tanggalBayar
       // above still hold the latest snapshot for existing displays, but this array is the actual
       // payment-by-payment history.
-      riwayatPembayaran: [...(payMethodModal.riwayatPembayaran || []), {
+      riwayatPembayaran: [...(x.riwayatPembayaran || []), {
         tanggal: payDate,
         jumlah: jumlahInput,
         metode: payMethod,
         dicatatOleh: session.nama
       }]
-    };
-    setPo(arr);
+    } : x));
     logAudit(store, session, {
       module: `Purchase Order ${isLocal ? "Lokal" : "Overseas"}`,
       docNomor: payMethodModal.nomor,
@@ -19245,7 +19282,6 @@ function PurchaseOrderModule({
   const saveRevise = () => {
     if (!reviseSupplierId) return alert("Pilih supplier");
     if (reviseItems.length === 0) return alert("PO harus punya minimal 1 item");
-    const arr = [...po];
     const items = reviseItems.map(it => ({
       ...it,
       subtotal: it.qty * (it.harga || 0)
@@ -19253,8 +19289,9 @@ function PurchaseOrderModule({
     const wasApproved = reviseModal.status === "Disetujui GM - Kirim ke Supplier";
     const sup = suppliers.find(s => s.id === reviseSupplierId);
     const newIrNomors = [...new Set(items.filter(it => it.fromIR).map(it => it.fromIR))];
-    arr[po.indexOf(reviseModal)] = {
-      ...reviseModal,
+    // Functional form — see saveEditTanggalPO note (silent-overwrite fix, 2026-08-19).
+    setPo(prev => prev.map(x => x.nomor === reviseModal.nomor ? {
+      ...x,
       supplierId: reviseSupplierId,
       supplierNama: sup?.nama || reviseModal.supplierNama,
       irNomors: newIrNomors,
@@ -19271,8 +19308,7 @@ function PurchaseOrderModule({
         status: "Menunggu Approval GM",
         approvedByNama: null
       } : {})
-    };
-    setPo(arr);
+    } : x));
     // Reconcile IR item consumption: release items removed from the PO during this edit, and
     // mark newly-added items (pulled in via the IR picker while editing) as consumed.
     const oldKeys = new Set((reviseModal.items || []).filter(it => it.fromIR).map(it => `${it.fromIR}#${it.fromIRIdx}`));
@@ -19321,22 +19357,21 @@ function PurchaseOrderModule({
     });
   };
   const saveSupplierDoc = () => {
-    const arr = [...po];
     const wasClosed = isPoClosed(supplierDocModal);
-    arr[po.indexOf(supplierDocModal)] = {
-      ...supplierDocModal,
+    // Functional form — see saveEditTanggalPO note (silent-overwrite fix, 2026-08-19).
+    setPo(prev => prev.map(x => x.nomor === supplierDocModal.nomor ? {
+      ...x,
       noInvoiceSupplier: supplierDocForm.isCash ? "CASH" : supplierDocForm.noInvoiceSupplier,
       // PO yang sudah Closed hanya boleh edit No. Invoice Supplier — field lain (termasuk No.
       // Faktur Pajak) dikunci ke nilai lama agar tidak berubah tanpa sengaja.
-      noFakturPajak: wasClosed ? supplierDocModal.noFakturPajak : supplierDocForm.noFakturPajak
-    };
+      noFakturPajak: wasClosed ? x.noFakturPajak : supplierDocForm.noFakturPajak
+    } : x));
     logAudit(store, session, {
       module: `Purchase Order ${isLocal ? "Lokal" : "Overseas"}`,
       docNomor: supplierDocModal.nomor,
       action: "Edit No. Invoice Supplier",
       detail: `${supplierDocModal.noInvoiceSupplier || "-"} → ${supplierDocForm.isCash ? "CASH" : supplierDocForm.noInvoiceSupplier}${wasClosed ? " (PO Closed)" : ""}`
     });
-    setPo(arr);
     setSupplierDocModal(null);
   };
   const openImportCost = p => {
@@ -19368,22 +19403,21 @@ function PurchaseOrderModule({
       // Tanggal pembayaran khusus Ekspedisi — dipisah dari tanggal pembayaran PIB.
       tanggalPembayaranEkspedisi: importCostForm.tanggalPembayaranEkspedisi || ""
     };
-    const arr = [...po];
-    arr[po.indexOf(importCostModal)] = {
-      ...importCostModal,
+    // Functional form — see saveEditTanggalPO note (silent-overwrite fix, 2026-08-19).
+    setPo(prev => prev.map(x => x.nomor === importCostModal.nomor ? {
+      ...x,
       importCost: cost
-    };
-    setPo(arr);
+    } : x));
     setImportCostModal(null);
   };
   const deleteImportCost = async p => {
     const ok = await askConfirm(`Hapus data Import Cost untuk PO ${p.nomor}? Tindakan ini tidak bisa dibatalkan.`);
     if (!ok) return;
-    const arr = [...po];
-    const idx = po.indexOf(p);
-    const { importCost, ...rest } = arr[idx];
-    arr[idx] = rest;
-    setPo(arr);
+    setPo(prev => prev.map(x => {
+      if (x.nomor !== p.nomor) return x;
+      const { importCost, ...rest } = x;
+      return rest;
+    }));
   };
   const statusColor = {
     "Menunggu Approval GM": theme.yellow,
@@ -19658,7 +19692,11 @@ function PurchaseOrderModule({
         return alert("PO yang sudah diproses (disetujui/ditolak GM) hanya dapat dihapus oleh Owner/GM/Finance Director.");
       }
       if (!await askConfirm(`Hapus PO ${target.nomor}?`)) return;
-      setPo(po.filter(x => x !== target));
+      // Functional form, filtered by nomor — see saveEditTanggalPO note (silent-overwrite fix,
+      // 2026-08-19). The old `po.filter(x => x !== target)` both risked overwriting the whole
+      // collection with a stale local snapshot AND used reference equality, which only worked by
+      // coincidence since `target` came from the same render's `po` array.
+      setPo(prev => prev.filter(x => x.nomor !== target.nomor));
       // Release any IR items this PO had consumed so they become pickable again in a future PO.
       if (target.irNomors && target.irNomors.length) {
         const consumedByIR = {};
@@ -19737,7 +19775,9 @@ function PurchaseOrderModule({
     onDelete: isOwnerLike ? async i => {
       const target = poFiltered.filter(p => isPoClosed(p))[i];
       if (!await askConfirm(`Hapus PO ${target.nomor}?`)) return;
-      setPo(po.filter(x => x !== target));
+      // Functional form, filtered by nomor — see saveEditTanggalPO note (silent-overwrite fix,
+      // 2026-08-19).
+      setPo(prev => prev.filter(x => x.nomor !== target.nomor));
       logAudit(store, session, {
         module: isLocal ? "Purchase Order Lokal" : "Purchase Order Overseas",
         docNomor: target.nomor,
@@ -19837,7 +19877,8 @@ function PurchaseOrderModule({
     size: "sm",
     variant: "ghost",
     onClick: () => {
-      setPo(po.map(p => p.nomor === detail.nomor ? {
+      // Functional form — see saveEditTanggalPO note (silent-overwrite fix, 2026-08-19).
+      setPo(prev => prev.map(p => p.nomor === detail.nomor ? {
         ...p,
         cascadeAlert: null
       } : p));
@@ -21159,7 +21200,8 @@ function GoodsReceiptModule({
     });
   };
   const saveEditIDO = () => {
-    setInternalDOs(internalDOs.map(x => x === editIDO ? {
+    // Functional form — see saveEditTanggalPO note (silent-overwrite fix, 2026-08-19).
+    setInternalDOs(prev => prev.map(x => x.nomor === editIDO.nomor ? {
       ...x,
       mekanikNama: editIDOForm.mekanikNama,
       items: editIDOForm.items
@@ -21299,8 +21341,9 @@ function GoodsReceiptModule({
         return newParts;
       });
     }
-    setGoodsReceipts(goodsReceipts.map(x => x === g ? {
-      ...g,
+    // Functional form — see saveEditTanggalPO note (silent-overwrite fix, 2026-08-19).
+    setGoodsReceipts(prev => prev.map(x => x.nomor === g.nomor ? {
+      ...x,
       mekanikNama: payload.mekanikNama,
       items: payload.items
     } : x));
@@ -21460,22 +21503,46 @@ function GoodsReceiptModule({
         });
         return newParts;
       });
-      if (idx >= 0) arr[idx] = {
-        ...poRec,
-        receivedMap: newReceivedMap,
-        status: fullyReceived ? "Sudah Diterima" : "Diterima Sebagian"
-      };
-      setPoList(arr);
+      // Functional form (2026-08-19 fix, same class of bug as the PO Lokal/Overseas silent-overwrite
+      // issue that caused PL-132 to vanish): recomputes receivedMap/status against the FRESH record
+      // instead of the `arr` snapshot taken when this form was opened, so this can't clobber a
+      // partial-receipt update someone else made to the same PO in the meantime, and can't silently
+      // overwrite the whole poLocal/poOverseas collection with a stale local copy.
+      setPoList(prev => prev.map(p => {
+        if (p.nomor !== form.poNomor) return p;
+        const rm = {
+          ...(p.receivedMap || {})
+        };
+        pickedItems.forEach(it => {
+          rm[it.partNumber] = (rm[it.partNumber] || 0) + it.qtyDiterima;
+        });
+        const fr = p.items.every(it => (rm[it.partNumber] || 0) >= it.qty);
+        return {
+          ...p,
+          receivedMap: rm,
+          status: fr ? "Sudah Diterima" : "Diterima Sebagian"
+        };
+      }));
     } else {
       // Head Office receipt: no stock change, PO marked as pending Workshop confirmation
       const idoNomor = "IDO-" + uid();
       docNomor = idoNomor;
-      if (idx >= 0) arr[idx] = {
-        ...poRec,
-        receivedMap: newReceivedMap,
-        status: fullyReceived ? "Diterima HO - Menunggu Konfirmasi Workshop" : "Diterima Sebagian"
-      };
-      setPoList(arr);
+      // Functional form — see note above.
+      setPoList(prev => prev.map(p => {
+        if (p.nomor !== form.poNomor) return p;
+        const rm = {
+          ...(p.receivedMap || {})
+        };
+        pickedItems.forEach(it => {
+          rm[it.partNumber] = (rm[it.partNumber] || 0) + it.qtyDiterima;
+        });
+        const fr = p.items.every(it => (rm[it.partNumber] || 0) >= it.qty);
+        return {
+          ...p,
+          receivedMap: rm,
+          status: fr ? "Diterima HO - Menunggu Konfirmasi Workshop" : "Diterima Sebagian"
+        };
+      }));
       // Auto-create Internal Delivery Order: Office -> Workshop
       setInternalDOs([...internalDOs, {
         nomor: idoNomor,
@@ -21584,28 +21651,26 @@ function GoodsReceiptModule({
       };
     }).filter(it => it.qty > 0);
     const fullyDone = remainingItems.length === 0;
-    const arrDO = [...internalDOs];
-    arrDO[internalDOs.indexOf(confirmModal)] = {
+    const updatedDO = {
       ...confirmModal,
       items: fullyDone ? confirmModal.items : remainingItems,
       statusKonfirmasi: fullyDone ? "Diterima Workshop" : "Menunggu Diterima Workshop",
       confirmedBy: session.nama,
       confirmedDate: today()
     };
-    setInternalDOs(arrDO);
+    // Functional form (2026-08-19 fix) — same silent-overwrite class as PL-132's disappearance.
+    setInternalDOs(prev => prev.map(d => d.nomor === confirmModal.nomor ? updatedDO : d));
     // PO only counts as fully/finally received once every Internal DO tied to it has nothing left
-    // pending (checked against the just-updated array, not the stale pre-update value) — otherwise a
-    // partial confirmation here would incorrectly close out the whole PO.
+    // pending. Recomputed against a fresh re-read of internalDOs state (via the closure `internalDOs`
+    // with this one DO's update applied) rather than trusting a stale poList/internalDOs snapshot.
     const poList = poType === "Lokal" ? poLocal : poOverseas;
     const setPoList = poType === "Lokal" ? store.setPoLocal : store.setPoOverseas;
-    const arrPO = [...poList];
-    const poIdx = arrPO.findIndex(p => p.nomor === confirmModal.poNomor);
-    const stillPendingElsewhere = arrDO.some(d => d.poNomor === confirmModal.poNomor && d.statusKonfirmasi !== "Diterima Workshop");
-    if (poIdx >= 0) arrPO[poIdx] = {
-      ...arrPO[poIdx],
+    const arrDOApprox = internalDOs.map(d => d.nomor === confirmModal.nomor ? updatedDO : d);
+    const stillPendingElsewhere = arrDOApprox.some(d => d.poNomor === confirmModal.poNomor && d.statusKonfirmasi !== "Diterima Workshop");
+    setPoList(prev => prev.map(p => p.nomor === confirmModal.poNomor ? {
+      ...p,
       status: stillPendingElsewhere ? "Diterima HO - Menunggu Konfirmasi Workshop" : "Sudah Diterima"
-    };
-    setPoList(arrPO);
+    } : p));
     logAudit(store, session, {
       module: "Internal Delivery Order",
       docNomor: confirmModal.nomor,
@@ -21622,7 +21687,8 @@ function GoodsReceiptModule({
     const isConfirmed = d.statusKonfirmasi === "Diterima Workshop";
     const msg = isConfirmed ? `Hapus Internal DO ${d.nomor}? Catatan: stock yang sudah ditambahkan saat konfirmasi Workshop TIDAK otomatis dikurangi — sesuaikan stock secara manual di Master Part bila perlu.` : `Hapus Internal DO ${d.nomor}?`;
     if (!await askConfirm(msg)) return;
-    setInternalDOs(internalDOs.filter(x => x !== d));
+    // Functional form — see confirmWorkshopReceipt note above (silent-overwrite fix, 2026-08-19).
+    setInternalDOs(prev => prev.filter(x => x.nomor !== d.nomor));
     logAudit(store, session, {
       module: "Internal Delivery Order",
       docNomor: d.nomor,
@@ -21764,7 +21830,7 @@ function GoodsReceiptModule({
     storageKey: "gr_list",
     defaultOpen: true
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. Penerimaan", "Tanggal", "No. PO", "Nama Customer", "No. PO Customer", "Diterima Oleh", "Jumlah Item", "Status"],
+    headers: ["No. Penerimaan", "Tanggal", "No. PO", "Nama Customer", "No. PO Customer", "Diterima Oleh", "Jumlah Item", "Status", "Cetak"],
     rows: goodsReceiptsFiltered.map(g => {
       const ref = grRefInfo(g);
       return [/*#__PURE__*/React.createElement("span", {
@@ -21778,56 +21844,69 @@ function GoodsReceiptModule({
         color: theme.green
       }, g.items.length, " part"), /*#__PURE__*/React.createElement(Badge, {
         color: g.statusFinal?.startsWith("Final") ? theme.green : theme.yellow
-      }, g.statusFinal)];
+      }, g.statusFinal), /*#__PURE__*/React.createElement(PrintBtn, {
+        // Penerimaan Barang print — includes Nama Client/No SO/No IR/No PO Client per user request (2026-08-19).
+        onClick: () => printDocument({
+          company: store.companySettings,
+          docTitle: "PENERIMAAN BARANG",
+          nomor: g.nomor,
+          tanggal: g.tanggal,
+          partyLabel: "No. PO:",
+          partyName: g.poNomor,
+          itemHeaders: ["Part Number", "Part Name", "Qty"],
+          items: g.items.map(it => [it.partNumber, it.partName, fmtNum(it.qtyDiterima)]),
+          showPrice: false,
+          extraInfoRows: [["Nama Client", ref.customerNamas.join(", ") || "-"], ["No. SO", ref.soNomors.join(", ") || "-"], ["No. IR", ref.irNomors.join(", ") || "-"], ["No. PO Client", ref.noPoCustomers.join(", ") || "-"], ["Diterima Oleh", g.diterimaOleh]]
+        })
+      })];
     }),
     onEdit: isJhon || isOwnerLike ? i => openEditGR(goodsReceiptsFiltered[i]) : undefined,
     onDelete: isOwnerLike ? async i => {
       const g = goodsReceiptsFiltered[i];
       if (!await askConfirm(`Hapus data penerimaan ${g.nomor}? Catatan: stock yang sudah masuk dari penerimaan ini TIDAK otomatis dikurangi — sesuaikan stock secara manual di Master Part bila perlu.`)) return;
-      const remainingGRs = goodsReceipts.filter(x => x !== g);
-      setGoodsReceipts(remainingGRs);
+      const remainingGRs = goodsReceipts.filter(x => x.nomor !== g.nomor);
+      // Functional form — see saveEditTanggalPO note (silent-overwrite fix, 2026-08-19).
+      setGoodsReceipts(prev => prev.filter(x => x.nomor !== g.nomor));
       // Recompute the linked PO's receivedMap/status from the remaining receipts (rather than just
       // subtracting this one) — this is what keeps "sisa qty yang bisa diterima" and the received-status
       // badges (IR/PO detail) accurate after a Goods Receipt is deleted, instead of leaving the PO
       // permanently stuck at "Sudah Diterima"/"Diterima Sebagian" even after its receipt is gone.
-      const poList = g.poType === "Lokal" ? poLocal : poOverseas;
       const setPoList = g.poType === "Lokal" ? store.setPoLocal : store.setPoOverseas;
-      const poIdx = poList.findIndex(p => p.nomor === g.poNomor);
-      if (poIdx >= 0) {
-        const poRec = poList[poIdx];
-        const relatedGRs = remainingGRs.filter(gr => gr.poNomor === g.poNomor && gr.poType === g.poType);
-        const newReceivedMap = {};
-        relatedGRs.forEach(gr => {
-          (gr.items || []).forEach(it => {
-            newReceivedMap[it.partNumber] = (newReceivedMap[it.partNumber] || 0) + (it.qtyDiterima || 0);
-          });
+      const relatedGRs = remainingGRs.filter(gr => gr.poNomor === g.poNomor && gr.poType === g.poType);
+      const newReceivedMap = {};
+      relatedGRs.forEach(gr => {
+        (gr.items || []).forEach(it => {
+          newReceivedMap[it.partNumber] = (newReceivedMap[it.partNumber] || 0) + (it.qtyDiterima || 0);
         });
-        // Also count qty still sitting in a not-yet-confirmed Internal DO for this PO — under the
-        // 3-section model, "received so far" = Final receipts + whatever Workshop hasn't confirmed
-        // yet, not just Final receipts alone, so deleting one Final record doesn't wipe out tracking
-        // of a still-pending Internal DO for the same PO.
-        internalDOs.filter(d => d.poNomor === g.poNomor && d.statusKonfirmasi !== "Diterima Workshop").forEach(d => {
-          (d.items || []).forEach(it => {
-            newReceivedMap[it.partNumber] = (newReceivedMap[it.partNumber] || 0) + (it.qty || 0);
-          });
+      });
+      // Also count qty still sitting in a not-yet-confirmed Internal DO for this PO — under the
+      // 3-section model, "received so far" = Final receipts + whatever Workshop hasn't confirmed
+      // yet, not just Final receipts alone, so deleting one Final record doesn't wipe out tracking
+      // of a still-pending Internal DO for the same PO.
+      internalDOs.filter(d => d.poNomor === g.poNomor && d.statusKonfirmasi !== "Diterima Workshop").forEach(d => {
+        (d.items || []).forEach(it => {
+          newReceivedMap[it.partNumber] = (newReceivedMap[it.partNumber] || 0) + (it.qty || 0);
         });
-        const fullyReceived = (poRec.items || []).every(it => (newReceivedMap[it.partNumber] || 0) >= it.qty);
+      });
+      // Functional form — see saveEditTanggalPO note (silent-overwrite fix, 2026-08-19).
+      setPoList(prev => prev.map(p => {
+        if (p.nomor !== g.poNomor) return p;
+        const fullyReceived = (p.items || []).every(it => (newReceivedMap[it.partNumber] || 0) >= it.qty);
         const anyReceived = Object.keys(newReceivedMap).length > 0;
-        const arr = [...poList];
-        arr[poIdx] = {
-          ...poRec,
+        return {
+          ...p,
           receivedMap: newReceivedMap,
           status: fullyReceived ? "Sudah Diterima" : anyReceived ? "Diterima Sebagian" : "Disetujui GM - Kirim ke Supplier"
         };
-        setPoList(arr);
-      }
+      }));
       // Any Internal DO (Office -> Workshop transfer) created by this receipt that Workshop hasn't
       // confirmed yet has nothing to confirm anymore — drop it so nobody can later confirm receiving
       // stock for a receipt that no longer exists. Already-confirmed transfers are left alone since
       // that stock movement already happened (consistent with not auto-touching Master Part stock here).
       const pendingIDO = internalDOs.filter(d => d.grNomor === g.nomor && d.statusKonfirmasi !== "Diterima Workshop");
       if (pendingIDO.length > 0) {
-        setInternalDOs(internalDOs.filter(d => !(d.grNomor === g.nomor && d.statusKonfirmasi !== "Diterima Workshop")));
+        // Functional form — see saveEditTanggalPO note (silent-overwrite fix, 2026-08-19).
+        setInternalDOs(prev => prev.filter(d => !(d.grNomor === g.nomor && d.statusKonfirmasi !== "Diterima Workshop")));
       }
       logAudit(store, session, {
         module: "Penerimaan Barang",
@@ -22089,18 +22168,23 @@ function GoodsReceiptModule({
         gap: 6
       }
     }, /*#__PURE__*/React.createElement(PrintBtn, {
-      onClick: () => printDocument({
-        company: store.companySettings,
-        docTitle: "INTERNAL DELIVERY ORDER",
-        nomor: d.nomor,
-        tanggal: d.tanggal,
-        partyLabel: "Dari → Ke:",
-        partyName: `${d.dari} → ${d.ke}`,
-        itemHeaders: ["Part Number", "Part Name", "Qty"],
-        items: d.items.map(it => [it.partNumber, it.partName, fmtNum(it.qty)]),
-        showPrice: false,
-        extraInfoRows: [["No. PO Sumber", d.poNomor], ["Dibuat oleh", d.createdBy]]
-      })
+      onClick: () => {
+        // Include client/SO/IR/PO-Client on the printed Penerimaan Barang document — requested
+        // by the user so printed copies carry the full downstream reference chain (2026-08-19).
+        const linked = idoLinkedInfo(d);
+        return printDocument({
+          company: store.companySettings,
+          docTitle: "INTERNAL DELIVERY ORDER",
+          nomor: d.nomor,
+          tanggal: d.tanggal,
+          partyLabel: "Dari → Ke:",
+          partyName: `${d.dari} → ${d.ke}`,
+          itemHeaders: ["Part Number", "Part Name", "Qty"],
+          items: d.items.map(it => [it.partNumber, it.partName, fmtNum(it.qty)]),
+          showPrice: false,
+          extraInfoRows: [["No. PO Sumber", d.poNomor], ["Nama Client", linked.customerNamas.join(", ") || "-"], ["No. SO", linked.soNomors.join(", ") || "-"], ["No. IR", linked.irNomors.join(", ") || "-"], ["No. PO Client", linked.noPoClients.join(", ") || "-"], ["Dibuat oleh", d.createdBy]]
+        });
+      }
     }), d.statusKonfirmasi === "Menunggu Diterima Workshop" && (isJhon || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "ghost",
@@ -32939,11 +33023,14 @@ function DashboardAbsensiPanel({
   // per 1 Jan 2026) — same convention already used by Form Cuti's own sisaCuti() calculation, just
   // surfaced here too so HRD/management can see it without opening Form Cuti.
   const currentYear = today().slice(0, 4);
-  const cutiTerpakaiFor = username => (attendance || []).filter(a => a.username === username && a.status === "Cuti" && (a.tanggal || "").startsWith(currentYear)).length;
+  // ½ Hari rows count as 0.5 — kept consistent with Form Cuti's own cutiTerpakai() (2026-08-19).
+  const cutiTerpakaiFor = username => (attendance || []).filter(a => a.username === username && a.status === "Cuti" && (a.tanggal || "").startsWith(currentYear)).reduce((s, a) => s + (a.setengahHari ? 0.5 : 1), 0);
   const sisaCutiForNama = nama => {
     const emp = (employees || []).find(e => e.nama === nama);
     if (!emp) return null;
-    return Math.max(0, 12 - cutiTerpakaiFor(emp.username));
+    // Quota is tenure-gated (0 during 12-month probation, flat 12 after — see cutiQuotaTahunan,
+    // Jef's confirmed policy 2026-08-19), not a flat 12 for everyone.
+    return Math.max(0, cutiQuotaTahunan(emp) - cutiTerpakaiFor(emp.username));
   };
   const [bulanFilter, setBulanFilter] = useState(today().slice(0, 7));
   const [editStaffNama, setEditStaffNama] = useState(null);
@@ -33356,6 +33443,7 @@ function RekapMesinPanel({
     dLuar: "",
     normalOverride: "",
     ijin: "",
+    jmlIjinOverride: "",
     cuti: "",
     cutiKhusus: "",
     sakit: "",
@@ -33954,7 +34042,19 @@ function RekapMesinPanel({
     type: "number",
     value: p.ijin,
     onChange: v => updatePenyesuaianRow(i, "ijin", v)
-  }), /*#__PURE__*/React.createElement(Input, {
+  }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "block",
+      fontSize: 12,
+      color: theme.muted,
+      marginBottom: 6
+    }
+  }, "Jml. Izin Mesin (raw) Override"), /*#__PURE__*/React.createElement(Input, {
+    type: "number",
+    placeholder: String((rawParsed.karyawan.find(k => k.nama === p.nama) || {}).jmlIjin ?? "-"),
+    value: p.jmlIjinOverride,
+    onChange: v => updatePenyesuaianRow(i, "jmlIjinOverride", v)
+  })), /*#__PURE__*/React.createElement(Input, {
     label: "Cuti (hari)",
     type: "number",
     value: p.cuti,
@@ -34186,18 +34286,24 @@ function FormCutiModule({
       sampaiTanggal: r.sampaiTanggal,
       // HRD-selected at approval time: "Cuti" (Cuti Biasa, potong kuota 12 hari/tahun) atau
       // "Cuti Khusus" (di luar kuota — menikah, keluarga meninggal, dll). Defaults to Cuti Biasa.
-      jenisCuti: r.jenisCuti || "Cuti"
+      jenisCuti: r.jenisCuti || "Cuti",
+      setengahHari: !!r.setengahHari
     });
   };
   const emptyForm = {
     alasan: "",
     dariTanggal: today(),
     sampaiTanggal: today(),
+    setengahHari: false,
     targetUsername: session.username
   };
   const [form, setForm] = useState(emptyForm);
-  const countDays = (dari, sampai) => {
+  const countDays = (dari, sampai, half) => {
     if (!dari || !sampai) return 0;
+    // ½ Hari only makes sense for a single-day request — a multi-day range with the half-day
+    // flag set is treated as a normal full-day range (the checkbox is hidden in the UI once the
+    // dates diverge, but this guards the calc too in case of a stale form value).
+    if (half && dari === sampai) return 0.5;
     const diff = Math.round((new Date(sampai) - new Date(dari)) / 86400000) + 1;
     return diff > 0 ? diff : 0;
   };
@@ -34217,10 +34323,17 @@ function FormCutiModule({
   // kuota cuti).
   const resolveJenisCuti = v => v === "Cuti Khusus" ? "Cuti Khusus" : v === "Ijin" ? "Izin" : "Cuti";
   const currentYear = today().slice(0, 4);
-  const cutiTerpakai = username => attendance.filter(a => a.username === username && a.status === "Cuti" && a.tanggal.startsWith(currentYear)).length;
-  const sisaCuti = username => Math.max(0, 12 - cutiTerpakai(username));
+  // ½ Hari rows count as 0.5 toward the annual quota instead of a full day — see setengahHari
+  // note on the attendance rows written in approve()/reviseApproved().
+  const cutiTerpakai = username => attendance.filter(a => a.username === username && a.status === "Cuti" && a.tanggal.startsWith(currentYear)).reduce((s, a) => s + (a.setengahHari ? 0.5 : 1), 0);
+  // Quota is tenure-gated (0 during 12-month probation, flat 12 after — see cutiQuotaTahunan,
+  // Jef's confirmed policy 2026-08-19), not a flat 12 for everyone.
+  const sisaCuti = username => {
+    const emp = (employees || []).find(e => e.username === username);
+    return Math.max(0, cutiQuotaTahunan(emp) - cutiTerpakai(username));
+  };
   const mySisaCuti = sisaCuti(session.username);
-  const jumlahHariForm = countDays(form.dariTanggal, form.sampaiTanggal);
+  const jumlahHariForm = countDays(form.dariTanggal, form.sampaiTanggal, form.setengahHari);
   const newNomor = (arr = leaveRequests) => genDocNumber(arr, "CT", "id");
   const myRequests = leaveRequests.filter(r => r.username === session.username);
   const listRequests = isApprover ? leaveRequests : myRequests;
@@ -34233,13 +34346,15 @@ function FormCutiModule({
     const isOnBehalf = isApprover && targetUsername !== session.username;
     const targetEmp = employees.find(e => e.username === targetUsername);
     const targetNama = isOnBehalf ? targetEmp?.nama || targetUsername : session.nama;
+    const setengahHari = !!form.setengahHari && form.dariTanggal === form.sampaiTanggal;
     const reqBase = {
       username: targetUsername,
       nama: targetNama,
       alasan: form.alasan,
       dariTanggal: form.dariTanggal,
       sampaiTanggal: form.sampaiTanggal,
-      jumlahHari: countDays(form.dariTanggal, form.sampaiTanggal),
+      setengahHari,
+      jumlahHari: countDays(form.dariTanggal, form.sampaiTanggal, setengahHari),
       status: isOnBehalf ? "Menunggu Konfirmasi Staff" : "Menunggu Approval HRD",
       diajukanTanggal: today(),
       createdOnBehalf: isOnBehalf,
@@ -34307,8 +34422,12 @@ function FormCutiModule({
     const merged = formOverride ? {
       ...req,
       ...formOverride,
-      jumlahHari: countDays(formOverride.dariTanggal || req.dariTanggal, formOverride.sampaiTanggal || req.sampaiTanggal)
+      jumlahHari: countDays(formOverride.dariTanggal || req.dariTanggal, formOverride.sampaiTanggal || req.sampaiTanggal, formOverride.setengahHari ?? req.setengahHari)
     } : req;
+    // ½ Hari only ever applies to a genuine single-day request — dates.length is checked below
+    // right before it's written onto the attendance row(s), so a stale flag on a since-extended
+    // multi-day request can't silently count as a half day across the whole range.
+    const isHalfDay = !!merged.setengahHari;
     // HRD chooses at approval time: Cuti Biasa (potong kuota 12 hari/tahun), Cuti Khusus (di luar
     // kuota — menikah, keluarga meninggal, dll), atau Ijin (bukan cuti, tidak potong kuota).
     // reqJenis is what's saved/displayed on the request itself; attendanceStatus is what's
@@ -34326,9 +34445,16 @@ function FormCutiModule({
     const matchDates = new Set(attendance.filter(a => a.username === merged.username && a.status === jenisCuti).map(a => a.tanggal));
     const datesToWrite = dates.filter(d => !matchDates.has(d));
     const overwriteDates = new Set(datesToWrite.filter(d => attendance.some(a => a.username === merged.username && a.tanggal === d)));
+    // Overwrite also refreshes `catatan` — otherwise a row auto-generated by another mechanism
+    // (e.g. Rekap Mesin's "Auto-potong cuti dari akumulasi absen/terlambat") keeps its OLD note
+    // after this approval flips its status, leaving a record that visually claims a Cuti deduction
+    // that no longer applies (root cause of the Ruswanto "Absen counted as Cuti" confusion —
+    // 2026-06-10 record still said "Auto-potong cuti..." after being overwritten to Izin here).
     const updatedAttendance = attendance.map(a => overwriteDates.has(a.tanggal) && a.username === merged.username ? {
       ...a,
-      status: jenisCuti
+      status: jenisCuti,
+      setengahHari: isHalfDay && dates.length === 1,
+      catatan: `Form Cuti ${merged.id} disetujui (${reqJenis}${isHalfDay && dates.length === 1 ? ", ½ hari" : ""}) oleh ${session.nama} — menggantikan status sebelumnya "${a.status}"${a.catatan ? ` (catatan lama: ${a.catatan})` : ""}`
     } : a);
     const newAttendance = datesToWrite.filter(d => !overwriteDates.has(d)).map(d => ({
       id: "ABS-" + uid(),
@@ -34338,7 +34464,9 @@ function FormCutiModule({
       jamKeluar: "",
       lembur: 0,
       uangHarian: 0,
-      status: jenisCuti
+      status: jenisCuti,
+      setengahHari: isHalfDay && dates.length === 1,
+      catatan: `Form Cuti ${merged.id} disetujui (${reqJenis}${isHalfDay && dates.length === 1 ? ", ½ hari" : ""}) oleh ${session.nama}`
     }));
     if (newAttendance.length > 0 || overwriteDates.size > 0) setAttendance([...updatedAttendance, ...newAttendance]);
     // Functional-update form — see staffDispute's note above; this is the call site that most
@@ -34377,11 +34505,12 @@ function FormCutiModule({
     const merged = {
       ...req,
       ...formOverride,
-      jumlahHari: countDays(formOverride.dariTanggal || req.dariTanggal, formOverride.sampaiTanggal || req.sampaiTanggal)
+      jumlahHari: countDays(formOverride.dariTanggal || req.dariTanggal, formOverride.sampaiTanggal || req.sampaiTanggal, formOverride.setengahHari ?? req.setengahHari)
     };
     const newReqJenis = merged.jenisCuti === "Cuti Khusus" ? "Cuti Khusus" : merged.jenisCuti === "Ijin" ? "Ijin" : "Cuti";
     const newJenis = resolveJenisCuti(newReqJenis);
     const newDates = dateRange(merged.dariTanggal, merged.sampaiTanggal);
+    const isHalfDay = !!merged.setengahHari && newDates.length === 1;
     const newDateSet = new Set(newDates);
     // Dates dropped from the range: remove the attendance row this leave originally wrote, but only
     // if it still holds the status this leave set (status === oldJenis) — never touch a row someone
@@ -34392,9 +34521,12 @@ function FormCutiModule({
     const matchDates = new Set(nextAttendance.filter(a => a.username === merged.username && a.status === newJenis).map(a => a.tanggal));
     const datesToWrite = newDates.filter(d => !matchDates.has(d));
     const overwriteDates = new Set(datesToWrite.filter(d => nextAttendance.some(a => a.username === merged.username && a.tanggal === d)));
+    // Same catatan refresh as approve() — see note there (Ruswanto stale-note root cause, 2026-08-19).
     nextAttendance = nextAttendance.map(a => overwriteDates.has(a.tanggal) && a.username === merged.username ? {
       ...a,
-      status: newJenis
+      status: newJenis,
+      setengahHari: isHalfDay,
+      catatan: `Form Cuti ${merged.id} direvisi (${newReqJenis}${isHalfDay ? ", ½ hari" : ""}) oleh ${session.nama} — menggantikan status sebelumnya "${a.status}"${a.catatan ? ` (catatan lama: ${a.catatan})` : ""}`
     } : a);
     const newRows = datesToWrite.filter(d => !overwriteDates.has(d)).map(d => ({
       id: "ABS-" + uid(),
@@ -34404,7 +34536,9 @@ function FormCutiModule({
       jamKeluar: "",
       lembur: 0,
       uangHarian: 0,
-      status: newJenis
+      status: newJenis,
+      setengahHari: isHalfDay,
+      catatan: `Form Cuti ${merged.id} direvisi (${newReqJenis}${isHalfDay ? ", ½ hari" : ""}) oleh ${session.nama}`
     }));
     setAttendance([...nextAttendance, ...newRows]);
     // Functional-update form — see staffDispute's note above.
@@ -34434,7 +34568,7 @@ function FormCutiModule({
     if (!detail || !detailForm) return;
     const patch = {
       ...detailForm,
-      jumlahHari: countDays(detailForm.dariTanggal, detailForm.sampaiTanggal)
+      jumlahHari: countDays(detailForm.dariTanggal, detailForm.sampaiTanggal, detailForm.setengahHari)
     };
     // Functional-update form — see staffDispute's note above.
     setLeaveRequests(prev => {
@@ -34790,7 +34924,23 @@ function FormCutiModule({
     }),
     type: "date",
     required: true
-  })), jumlahHariForm > 0 && /*#__PURE__*/React.createElement("div", {
+  })), form.dariTanggal && form.dariTanggal === form.sampaiTanggal && /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      cursor: "pointer",
+      fontSize: 13,
+      color: theme.text
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: !!form.setengahHari,
+    onChange: e => setForm({
+      ...form,
+      setengahHari: e.target.checked
+    })
+  }), "½ Hari (hanya untuk permohonan 1 hari)"), jumlahHariForm > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       color: theme.text,
       fontSize: 13
@@ -34882,12 +35032,28 @@ function FormCutiModule({
       value: "Ijin",
       label: "Ijin (bukan cuti, tidak potong kuota)"
     }]
-  }), /*#__PURE__*/React.createElement("div", {
+  }), detailForm.dariTanggal && detailForm.dariTanggal === detailForm.sampaiTanggal && /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      cursor: "pointer",
+      fontSize: 13,
+      color: theme.text
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: !!detailForm.setengahHari,
+    onChange: e => setDetailForm({
+      ...detailForm,
+      setengahHari: e.target.checked
+    })
+  }), "½ Hari (hanya untuk 1 hari)"), /*#__PURE__*/React.createElement("div", {
     style: {
       color: theme.text,
       fontSize: 13
     }
-  }, "Jumlah hari: ", /*#__PURE__*/React.createElement("strong", null, countDays(detailForm.dariTanggal, detailForm.sampaiTanggal))), /*#__PURE__*/React.createElement(Btn, {
+  }, "Jumlah hari: ", /*#__PURE__*/React.createElement("strong", null, countDays(detailForm.dariTanggal, detailForm.sampaiTanggal, detailForm.setengahHari))), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
     onClick: detail.status === "Disetujui" ? () => reviseApproved(detail, detailForm) : saveDetailEdits
