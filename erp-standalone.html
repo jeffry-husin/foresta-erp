@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-21.1";
+const APP_BUILD = "2026-08-21.2";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -2639,8 +2639,22 @@ function usePersisted(key, defaultVal) {
   // a background overwrite here could race with an in-flight CAS retry for no benefit.
   useEffect(() => {
     if (CAS_PILOT_KEYS.has(key)) return;
+    // PERF FIX (2026-08-21): this used to call setValRaw(map[key]) unconditionally on every
+    // revalidate tick (every 3 minutes AND on every tab focus — see revalidateStore()'s callers),
+    // even when the server data for this key hadn't actually changed since we last saw it. Since
+    // map[key] is a freshly-parsed JSON object every time, its reference always differs from the
+    // current state even when the CONTENT is identical, so this forced a state update — and
+    // therefore a re-render of every component reading this key — on ~40 keys simultaneously,
+    // every single revalidate tick, regardless of whether anything changed. That's a very
+    // plausible contributor to the "lag when accessing/switching modules" that was reported,
+    // especially right after refocusing the tab. Fix: skip the update when this key's
+    // updated_at hasn't moved since we last applied it — updatedAtRef is already tracked for
+    // every key (not just CAS_PILOT_KEYS, despite the name), it just wasn't consulted here before.
     const onRevalidate = map => {
       if (Object.prototype.hasOwnProperty.call(map, key)) {
+        const newUpdatedAt = _preloadedUpdatedAtMap[key] || null;
+        if (newUpdatedAt && updatedAtRef.current && newUpdatedAt === updatedAtRef.current) return;
+        updatedAtRef.current = newUpdatedAt;
         setValRaw(map[key]);
         writeCache(cacheKey, map[key]);
       }
@@ -3538,48 +3552,51 @@ function cascadeQuotationRevision(store, session, {
     toNomor: newNomor,
     flaggedAt: new Date().toISOString()
   });
-  const soArr = [...store.salesOrders];
-  const irArr = [...store.itemRequisitions];
-  const poLocalArr = [...store.poLocal];
-  const poOverseasArr = [...store.poOverseas];
+  // BUG FIX (2026-08-21): this used to build soArr/irArr/poLocalArr/poOverseasArr snapshots and
+  // write them back via plain-value setX(arr) calls. erp_sales_orders/erp_item_req/erp_po_local/
+  // erp_po_overseas are NOT in CAS_PILOT_KEYS, so a plain-value write skips usePersisted's
+  // safety re-fetch and silently overwrites the WHOLE collection with this stale snapshot —
+  // the same bug class that caused PO-132 to vanish (task #302). Since we only ever need to
+  // patch a handful of specific docs by nomor here (never touch unrelated fields), compute the
+  // patch maps below from the snapshot (fine — we're only deciding WHICH docs are affected, not
+  // mutating shared fields), then apply via functional updaters that merge against the latest
+  // `prev` array so no concurrent edit from another user gets clobbered.
+  const soPatches = new Map();
+  const irPatches = new Map();
+  const poLocalPatches = new Map();
+  const poOverseasPatches = new Map();
   const auditEntries = [];
+  const irArrSnapshot = store.itemRequisitions;
+  const poLocalSnapshot = store.poLocal;
+  const poOverseasSnapshot = store.poOverseas;
   affectedSOs.forEach(so => {
     const locked = soIsLocked(so);
-    const idx = soArr.findIndex(s => s.nomor === so.nomor);
-    if (idx >= 0) {
-      soArr[idx] = {
-        ...soArr[idx],
-        cascadeAlert: mkAlert(locked)
-      };
-      auditEntries.push({
-        module: "Sales Order",
-        docNomor: so.nomor,
-        action: "Cascade: Perlu Review Manual",
-        detail: `Quotation ${oldNomor} -> ${newNomor}${locked ? " (SO sudah berjalan)" : ""}`
-      });
-    }
-    const linkedIRs = irArr.filter(ir => ir.soNomor === so.nomor);
+    soPatches.set(so.nomor, {
+      cascadeAlert: mkAlert(locked)
+    });
+    auditEntries.push({
+      module: "Sales Order",
+      docNomor: so.nomor,
+      action: "Cascade: Perlu Review Manual",
+      detail: `Quotation ${oldNomor} -> ${newNomor}${locked ? " (SO sudah berjalan)" : ""}`
+    });
+    const linkedIRs = irArrSnapshot.filter(ir => ir.soNomor === so.nomor);
     linkedIRs.forEach(ir => {
-      const irIdx = irArr.findIndex(x => x.nomor === ir.nomor);
-      if (irIdx >= 0) {
-        irArr[irIdx] = {
-          ...irArr[irIdx],
-          cascadeAlert: mkAlert(locked)
-        };
-        auditEntries.push({
-          module: "Item Requisition",
-          docNomor: ir.nomor,
-          action: "Cascade: Perlu Review Manual",
-          detail: `Terkait revisi Quotation ${oldNomor} -> ${newNomor} via SO ${so.nomor}`
-        });
-      }
-      [["Purchase Order Lokal", poLocalArr], ["Purchase Order Overseas", poOverseasArr]].forEach(([label, arr]) => {
-        arr.forEach((po, pIdx) => {
+      irPatches.set(ir.nomor, {
+        cascadeAlert: mkAlert(locked)
+      });
+      auditEntries.push({
+        module: "Item Requisition",
+        docNomor: ir.nomor,
+        action: "Cascade: Perlu Review Manual",
+        detail: `Terkait revisi Quotation ${oldNomor} -> ${newNomor} via SO ${so.nomor}`
+      });
+      [["Purchase Order Lokal", poLocalSnapshot, poLocalPatches], ["Purchase Order Overseas", poOverseasSnapshot, poOverseasPatches]].forEach(([label, arr, patches]) => {
+        arr.forEach(po => {
           if ((po.irNomors || []).includes(ir.nomor) && po.status !== "Sudah Diterima") {
-            arr[pIdx] = {
-              ...arr[pIdx],
+            patches.set(po.nomor, {
               cascadeAlert: mkAlert(locked)
-            };
+            });
             auditEntries.push({
               module: label,
               docNomor: po.nomor,
@@ -3591,10 +3608,22 @@ function cascadeQuotationRevision(store, session, {
       });
     });
   });
-  store.setSalesOrders(soArr);
-  store.setItemRequisitions(irArr);
-  store.setPoLocal(poLocalArr);
-  store.setPoOverseas(poOverseasArr);
+  if (soPatches.size) store.setSalesOrders(prev => prev.map(s => soPatches.has(s.nomor) ? {
+    ...s,
+    ...soPatches.get(s.nomor)
+  } : s));
+  if (irPatches.size) store.setItemRequisitions(prev => prev.map(ir => irPatches.has(ir.nomor) ? {
+    ...ir,
+    ...irPatches.get(ir.nomor)
+  } : ir));
+  if (poLocalPatches.size) store.setPoLocal(prev => prev.map(po => poLocalPatches.has(po.nomor) ? {
+    ...po,
+    ...poLocalPatches.get(po.nomor)
+  } : po));
+  if (poOverseasPatches.size) store.setPoOverseas(prev => prev.map(po => poOverseasPatches.has(po.nomor) ? {
+    ...po,
+    ...poOverseasPatches.get(po.nomor)
+  } : po));
   auditEntries.forEach(e => logAudit(store, session, e));
 }
 
@@ -3626,50 +3655,49 @@ function flagDownstreamForDirectEdit(store, session, {
     toNomor: quotNomor,
     flaggedAt: new Date().toISOString()
   });
-  const soArr = [...store.salesOrders];
-  const irArr = [...store.itemRequisitions];
-  const poLocalArr = [...store.poLocal];
-  const poOverseasArr = [...store.poOverseas];
+  // BUG FIX (2026-08-21): see cascadeQuotationRevision above for the full explanation — this used
+  // plain-value setX(arr) writes on non-CAS keys, which can silently overwrite the whole collection
+  // under concurrent edits. Now computes patch maps from the snapshot (only to decide WHICH docs
+  // are affected) and applies them via functional updaters merged against the latest `prev`.
+  const soPatches = new Map();
+  const irPatches = new Map();
+  const poLocalPatches = new Map();
+  const poOverseasPatches = new Map();
   const auditEntries = [];
+  const irArrSnapshot = store.itemRequisitions;
+  const poLocalSnapshot = store.poLocal;
+  const poOverseasSnapshot = store.poOverseas;
   affectedSOs.forEach(so => {
     const locked = soIsLocked(so);
-    const idx = soArr.findIndex(s => s.nomor === so.nomor);
-    if (idx >= 0) {
-      const applyNote = !!appendNote && !locked;
-      soArr[idx] = {
-        ...soArr[idx],
-        cascadeAlert: mkAlert(locked),
-        catatan: applyNote ? `${soArr[idx].catatan ? soArr[idx].catatan + "\n" : ""}[Update dari revisi Quotation ${quotNomor} oleh ${session.nama}]: ${appendNote}` : soArr[idx].catatan
-      };
-      auditEntries.push({
-        module: "Sales Order",
-        docNomor: so.nomor,
-        action: applyNote ? "Cascade: Catatan Quotation Diterapkan" : "Cascade: Perlu Review Manual",
-        detail: `Quotation ${quotNomor} diedit langsung${locked ? " (SO sudah berjalan)" : ""}`
-      });
-    }
-    const linkedIRs = irArr.filter(ir => ir.soNomor === so.nomor);
+    const applyNote = !!appendNote && !locked;
+    soPatches.set(so.nomor, {
+      cascadeAlert: mkAlert(locked),
+      applyNote,
+      noteText: appendNote
+    });
+    auditEntries.push({
+      module: "Sales Order",
+      docNomor: so.nomor,
+      action: applyNote ? "Cascade: Catatan Quotation Diterapkan" : "Cascade: Perlu Review Manual",
+      detail: `Quotation ${quotNomor} diedit langsung${locked ? " (SO sudah berjalan)" : ""}`
+    });
+    const linkedIRs = irArrSnapshot.filter(ir => ir.soNomor === so.nomor);
     linkedIRs.forEach(ir => {
-      const irIdx = irArr.findIndex(x => x.nomor === ir.nomor);
-      if (irIdx >= 0) {
-        irArr[irIdx] = {
-          ...irArr[irIdx],
-          cascadeAlert: mkAlert(locked)
-        };
-        auditEntries.push({
-          module: "Item Requisition",
-          docNomor: ir.nomor,
-          action: "Cascade: Perlu Review Manual",
-          detail: `Terkait edit langsung Quotation ${quotNomor} via SO ${so.nomor}`
-        });
-      }
-      [["Purchase Order Lokal", poLocalArr], ["Purchase Order Overseas", poOverseasArr]].forEach(([label, arr]) => {
-        arr.forEach((po, pIdx) => {
+      irPatches.set(ir.nomor, {
+        cascadeAlert: mkAlert(locked)
+      });
+      auditEntries.push({
+        module: "Item Requisition",
+        docNomor: ir.nomor,
+        action: "Cascade: Perlu Review Manual",
+        detail: `Terkait edit langsung Quotation ${quotNomor} via SO ${so.nomor}`
+      });
+      [["Purchase Order Lokal", poLocalSnapshot, poLocalPatches], ["Purchase Order Overseas", poOverseasSnapshot, poOverseasPatches]].forEach(([label, arr, patches]) => {
+        arr.forEach(po => {
           if ((po.irNomors || []).includes(ir.nomor) && po.status !== "Sudah Diterima") {
-            arr[pIdx] = {
-              ...arr[pIdx],
+            patches.set(po.nomor, {
               cascadeAlert: mkAlert(locked)
-            };
+            });
             auditEntries.push({
               module: label,
               docNomor: po.nomor,
@@ -3681,10 +3709,31 @@ function flagDownstreamForDirectEdit(store, session, {
       });
     });
   });
-  store.setSalesOrders(soArr);
-  store.setItemRequisitions(irArr);
-  store.setPoLocal(poLocalArr);
-  store.setPoOverseas(poOverseasArr);
+  if (soPatches.size) store.setSalesOrders(prev => prev.map(s => {
+    if (!soPatches.has(s.nomor)) return s;
+    const {
+      applyNote,
+      noteText,
+      ...rest
+    } = soPatches.get(s.nomor);
+    return {
+      ...s,
+      ...rest,
+      catatan: applyNote ? `${s.catatan ? s.catatan + "\n" : ""}[Update dari revisi Quotation ${quotNomor} oleh ${session.nama}]: ${noteText}` : s.catatan
+    };
+  }));
+  if (irPatches.size) store.setItemRequisitions(prev => prev.map(ir => irPatches.has(ir.nomor) ? {
+    ...ir,
+    ...irPatches.get(ir.nomor)
+  } : ir));
+  if (poLocalPatches.size) store.setPoLocal(prev => prev.map(po => poLocalPatches.has(po.nomor) ? {
+    ...po,
+    ...poLocalPatches.get(po.nomor)
+  } : po));
+  if (poOverseasPatches.size) store.setPoOverseas(prev => prev.map(po => poOverseasPatches.has(po.nomor) ? {
+    ...po,
+    ...poOverseasPatches.get(po.nomor)
+  } : po));
   auditEntries.forEach(e => logAudit(store, session, e));
 }
 
@@ -21907,7 +21956,7 @@ function GoodsReceiptModule({
     let docNomor;
     if (isFinalAtWorkshop) {
       docNomor = genDocNumber(goodsReceipts, "GR");
-      setGoodsReceipts([...goodsReceipts, {
+      setGoodsReceipts(prev => [...prev, {
         nomor: docNomor,
         tanggal: today(),
         ...form,
@@ -21970,7 +22019,7 @@ function GoodsReceiptModule({
         };
       }));
       // Auto-create Internal Delivery Order: Office -> Workshop
-      setInternalDOs([...internalDOs, {
+      setInternalDOs(prev => [...prev, {
         nomor: idoNomor,
         tanggal: today(),
         poNomor: form.poNomor,
@@ -22050,7 +22099,7 @@ function GoodsReceiptModule({
     // Internal DO it was confirmed from.
     const grNomor = genDocNumber(goodsReceipts, "GR");
     const poType = poLocal.find(p => p.nomor === confirmModal.poNomor) ? "Lokal" : "Overseas";
-    setGoodsReceipts([...goodsReceipts, {
+    setGoodsReceipts(prev => [...prev, {
       nomor: grNomor,
       tanggal: today(),
       poNomor: confirmModal.poNomor,
@@ -25109,12 +25158,15 @@ function InvoiceModule({
     });
   };
   const gmApprove = inv => {
-    const arr = [...invoices];
-    arr[invoices.indexOf(inv)] = {
-      ...inv,
+    // BUG FIX (2026-08-21): erp_invoices isn't a CAS_PILOT_KEYS key, so a plain-array setInvoices(arr)
+    // write skips usePersisted's safety re-fetch and can silently overwrite the whole collection if
+    // another finance user saved a different invoice around the same time — same bug class as the
+    // PO-132 incident (task #302). Every Invoice write below is now a functional updater matched by
+    // `nomor` against the latest `prev`, so concurrent writes to other invoices are never clobbered.
+    setInvoices(prev => prev.map(x => x.nomor === inv.nomor ? {
+      ...x,
       statusApproval: "Disetujui GM"
-    };
-    setInvoices(arr);
+    } : x));
     logAudit(store, session, {
       module: "Invoice",
       docNomor: inv.nomor,
@@ -25125,13 +25177,11 @@ function InvoiceModule({
   const gmReject = async inv => {
     const reason = await askPrompt("Alasan penolakan:");
     if (!reason) return;
-    const arr = [...invoices];
-    arr[invoices.indexOf(inv)] = {
-      ...inv,
+    setInvoices(prev => prev.map(x => x.nomor === inv.nomor ? {
+      ...x,
       statusApproval: "Ditolak GM",
       rejectReason: reason
-    };
-    setInvoices(arr);
+    } : x));
     logAudit(store, session, {
       module: "Invoice",
       docNomor: inv.nomor,
@@ -25152,27 +25202,29 @@ function InvoiceModule({
     });
   };
   const saveReviewNewInv = () => {
-    const idx = invoices.indexOf(reviewNewInv);
-    if (idx < 0) return;
-    const arr = [...invoices];
-    arr[idx] = {
-      ...arr[idx],
+    if (!reviewNewInv) return;
+    const updated = {
+      ...reviewNewInv,
       ...reviewNewInvForm
     };
-    setInvoices(arr);
-    setReviewNewInv(arr[idx]);
+    setInvoices(prev => prev.map(x => x.nomor === reviewNewInv.nomor ? {
+      ...x,
+      ...reviewNewInvForm
+    } : x));
+    setReviewNewInv(updated);
   };
   const reviewNewInvApprove = () => {
-    const idx = invoices.indexOf(reviewNewInv);
-    if (idx < 0) return;
+    if (!reviewNewInv) return;
     const merged = {
-      ...invoices[idx],
+      ...reviewNewInv,
       ...reviewNewInvForm,
       statusApproval: "Disetujui GM"
     };
-    const arr = [...invoices];
-    arr[idx] = merged;
-    setInvoices(arr);
+    setInvoices(prev => prev.map(x => x.nomor === reviewNewInv.nomor ? {
+      ...x,
+      ...reviewNewInvForm,
+      statusApproval: "Disetujui GM"
+    } : x));
     logAudit(store, session, {
       module: "Invoice",
       docNomor: merged.nomor,
@@ -25184,17 +25236,19 @@ function InvoiceModule({
   const reviewNewInvReject = async () => {
     const reason = await askPrompt("Alasan penolakan:");
     if (!reason) return;
-    const idx = invoices.indexOf(reviewNewInv);
-    if (idx < 0) return;
+    if (!reviewNewInv) return;
     const merged = {
-      ...invoices[idx],
+      ...reviewNewInv,
       ...reviewNewInvForm,
       statusApproval: "Ditolak GM",
       rejectReason: reason
     };
-    const arr = [...invoices];
-    arr[idx] = merged;
-    setInvoices(arr);
+    setInvoices(prev => prev.map(x => x.nomor === reviewNewInv.nomor ? {
+      ...x,
+      ...reviewNewInvForm,
+      statusApproval: "Ditolak GM",
+      rejectReason: reason
+    } : x));
     logAudit(store, session, {
       module: "Invoice",
       docNomor: merged.nomor,
@@ -25242,8 +25296,6 @@ function InvoiceModule({
     const jml = parseFloat(bayarForm.jumlah);
     if (!jml || isNaN(jml) || jml <= 0) return alert("Jumlah pembayaran wajib diisi");
     const inv = bayarModal;
-    const arr = [...invoices];
-    const idx = invoices.indexOf(inv);
     const pphAmount = bayarForm.potonganPph ? pphAmountFor(inv) : 0;
     const biayaAdminAmount = parseFloat(bayarForm.biayaAdmin) || 0;
     // "jumlah" is cash actually received; PPh 2% and Biaya Admin never hit our bank account but both
@@ -25263,13 +25315,12 @@ function InvoiceModule({
     // terbayar is always re-derived as the sum of every entry's totalSettlement (not incrementally
     // added) so revising one entry recomputes the running total correctly instead of drifting.
     const terbayar = riwayatPembayaran.reduce((s, r) => s + (r.totalSettlement ?? r.jumlah ?? 0), 0);
-    arr[idx] = {
-      ...inv,
+    setInvoices(prev => prev.map(x => x.nomor === inv.nomor ? {
+      ...x,
       terbayar,
       riwayatPembayaran,
       statusBayar: terbayar >= inv.total ? "Lunas" : "Sebagian"
-    };
-    setInvoices(arr);
+    } : x));
     logAudit(store, session, {
       module: "Invoice",
       docNomor: inv.nomor,
@@ -25284,12 +25335,11 @@ function InvoiceModule({
     setFakturInput(inv.noFakturPajak || "");
   };
   const saveFaktur = () => {
-    const arr = [...invoices];
-    arr[invoices.indexOf(fakturModal)] = {
-      ...fakturModal,
+    if (!fakturModal) return;
+    setInvoices(prev => prev.map(x => x.nomor === fakturModal.nomor ? {
+      ...x,
       noFakturPajak: fakturInput
-    };
-    setInvoices(arr);
+    } : x));
     setFakturModal(null);
   };
   const filteredByStatus = filter === "Semua" ? invoices : invoices.filter(i => i.statusBayar === filter);
@@ -27399,7 +27449,7 @@ function PayrollModule({
         totalGaji
       };
     });
-    setPayrollRuns([...payrollRuns.filter(r => r.bulan !== bulan), {
+    setPayrollRuns(prev => [...prev.filter(r => r.bulan !== bulan), {
       bulan,
       generatedBy: session.nama,
       generatedAt: new Date().toISOString(),
@@ -32434,9 +32484,9 @@ function KomisiModule({ store, session }) {
     };
     const existing = overrideFor(editSO);
     if (existing) {
-      setKomisiOverrides(komisiOverrides.map(o => o.soNomor === soNomor ? { ...o, ...patch } : o));
+      setKomisiOverrides(prev => prev.map(o => o.soNomor === soNomor ? { ...o, ...patch } : o));
     } else {
-      setKomisiOverrides([...komisiOverrides, { soNomor, dibayar: false, dibayarTanggal: null, dibayarOleh: null, ...patch }]);
+      setKomisiOverrides(prev => [...prev, { soNomor, dibayar: false, dibayarTanggal: null, dibayarOleh: null, ...patch }]);
     }
     setEditSO(null);
   };
@@ -32461,9 +32511,9 @@ function KomisiModule({ store, session }) {
     const lunas = newSudah >= payRow.nilaiKomisi - 0.5;
     const patch = { riwayatPembayaran: newRiwayat, dibayar: lunas, dibayarTanggal: lunas ? payForm.tanggal : null, dibayarOleh: lunas ? session.nama : null };
     if (existing) {
-      setKomisiOverrides(komisiOverrides.map(o => o.soNomor === payRow.so.nomor ? { ...o, ...patch } : o));
+      setKomisiOverrides(prev => prev.map(o => o.soNomor === payRow.so.nomor ? { ...o, ...patch } : o));
     } else {
-      setKomisiOverrides([...komisiOverrides, { soNomor: payRow.so.nomor, salesDiscountOverride: null, rateOverride: null, ...patch }]);
+      setKomisiOverrides(prev => [...prev, { soNomor: payRow.so.nomor, salesDiscountOverride: null, rateOverride: null, ...patch }]);
     }
     setPayRow(null);
   };
@@ -32478,7 +32528,7 @@ function KomisiModule({ store, session }) {
     const lunas = newSudah >= r.nilaiKomisi - 0.5;
     const patch = { riwayatPembayaran: newRiwayat, dibayar: lunas, dibayarTanggal: lunas ? existing?.dibayarTanggal : null, dibayarOleh: lunas ? existing?.dibayarOleh : null };
     if (existing) {
-      setKomisiOverrides(komisiOverrides.map(o => o.soNomor === r.so.nomor ? { ...o, ...patch } : o));
+      setKomisiOverrides(prev => prev.map(o => o.soNomor === r.so.nomor ? { ...o, ...patch } : o));
     }
   };
 
@@ -33251,7 +33301,7 @@ function AttendanceModule({
   };
   const save = () => {
     if (editingId) {
-      setAttendance(attendance.map(a => a.id === editingId ? {
+      setAttendance(prev => prev.map(a => a.id === editingId ? {
         ...a,
         ...form
       } : a));
@@ -33262,7 +33312,7 @@ function AttendanceModule({
         detail: `${form.tanggal} — ${form.status}`
       });
     } else {
-      setAttendance([...attendance, {
+      setAttendance(prev => [...prev, {
         id: "ABS-" + uid(),
         ...form
       }]);
@@ -33311,7 +33361,7 @@ function AttendanceModule({
       uangHarian: parseFloat(r.uangHarian) || 0,
       status: r.status || "Hadir"
     }));
-    setAttendance([...attendance, ...newRecords]);
+    setAttendance(prev => [...prev, ...newRecords]);
     alert(`${newRecords.length} record absensi berhasil diimport.`);
   };
   const [attSearch, setAttSearch] = useState("");
@@ -35052,33 +35102,39 @@ function FormCutiModule({
     // against the 12-day/year quota (Sisa Cuti stayed at 12 even though leave was taken). Fix:
     // only skip dates that ALREADY have a row matching the chosen jenisCuti (true duplicate); for
     // dates with some other status, overwrite that row's status since an approved leave takes precedence.
-    const matchDates = new Set(attendance.filter(a => a.username === merged.username && a.status === jenisCuti).map(a => a.tanggal));
-    const datesToWrite = dates.filter(d => !matchDates.has(d));
-    const overwriteDates = new Set(datesToWrite.filter(d => attendance.some(a => a.username === merged.username && a.tanggal === d)));
-    // Overwrite also refreshes `catatan` — otherwise a row auto-generated by another mechanism
-    // (e.g. Rekap Mesin's "Auto-potong cuti dari akumulasi absen/terlambat") keeps its OLD note
-    // after this approval flips its status, leaving a record that visually claims a Cuti deduction
-    // that no longer applies (root cause of the Ruswanto "Absen counted as Cuti" confusion —
-    // 2026-06-10 record still said "Auto-potong cuti..." after being overwritten to Izin here).
-    const updatedAttendance = attendance.map(a => overwriteDates.has(a.tanggal) && a.username === merged.username ? {
-      ...a,
-      status: jenisCuti,
-      setengahHari: isHalfDay && dates.length === 1,
-      catatan: `Form Cuti ${merged.id} disetujui (${reqJenis}${isHalfDay && dates.length === 1 ? ", ½ hari" : ""}) oleh ${session.nama} — menggantikan status sebelumnya "${a.status}"${a.catatan ? ` (catatan lama: ${a.catatan})` : ""}`
-    } : a);
-    const newAttendance = datesToWrite.filter(d => !overwriteDates.has(d)).map(d => ({
-      id: "ABS-" + uid(),
-      tanggal: d,
-      username: merged.username,
-      jamMasuk: "",
-      jamKeluar: "",
-      lembur: 0,
-      uangHarian: 0,
-      status: jenisCuti,
-      setengahHari: isHalfDay && dates.length === 1,
-      catatan: `Form Cuti ${merged.id} disetujui (${reqJenis}${isHalfDay && dates.length === 1 ? ", ½ hari" : ""}) oleh ${session.nama}`
-    }));
-    if (newAttendance.length > 0 || overwriteDates.size > 0) setAttendance([...updatedAttendance, ...newAttendance]);
+    // Functional form: overwriteDates/newAttendance are computed against the fresh `prev` snapshot
+    // inside the updater (not the closure's `attendance` variable), so this can't silently discard
+    // an attendance row someone else wrote to the same collection in the meantime.
+    setAttendance(prev => {
+      const matchDates = new Set(prev.filter(a => a.username === merged.username && a.status === jenisCuti).map(a => a.tanggal));
+      const datesToWrite = dates.filter(d => !matchDates.has(d));
+      const overwriteDates = new Set(datesToWrite.filter(d => prev.some(a => a.username === merged.username && a.tanggal === d)));
+      // Overwrite also refreshes `catatan` — otherwise a row auto-generated by another mechanism
+      // (e.g. Rekap Mesin's "Auto-potong cuti dari akumulasi absen/terlambat") keeps its OLD note
+      // after this approval flips its status, leaving a record that visually claims a Cuti deduction
+      // that no longer applies (root cause of the Ruswanto "Absen counted as Cuti" confusion —
+      // 2026-06-10 record still said "Auto-potong cuti..." after being overwritten to Izin here).
+      const updatedAttendance = prev.map(a => overwriteDates.has(a.tanggal) && a.username === merged.username ? {
+        ...a,
+        status: jenisCuti,
+        setengahHari: isHalfDay && dates.length === 1,
+        catatan: `Form Cuti ${merged.id} disetujui (${reqJenis}${isHalfDay && dates.length === 1 ? ", ½ hari" : ""}) oleh ${session.nama} — menggantikan status sebelumnya "${a.status}"${a.catatan ? ` (catatan lama: ${a.catatan})` : ""}`
+      } : a);
+      const newAttendance = datesToWrite.filter(d => !overwriteDates.has(d)).map(d => ({
+        id: "ABS-" + uid(),
+        tanggal: d,
+        username: merged.username,
+        jamMasuk: "",
+        jamKeluar: "",
+        lembur: 0,
+        uangHarian: 0,
+        status: jenisCuti,
+        setengahHari: isHalfDay && dates.length === 1,
+        catatan: `Form Cuti ${merged.id} disetujui (${reqJenis}${isHalfDay && dates.length === 1 ? ", ½ hari" : ""}) oleh ${session.nama}`
+      }));
+      if (newAttendance.length === 0 && overwriteDates.size === 0) return prev;
+      return [...updatedAttendance, ...newAttendance];
+    });
     // Functional-update form — see staffDispute's note above; this is the call site that most
     // directly explains a leave request vanishing right after submission (HRD approving one
     // request from a stale local copy that predates someone else's just-submitted request).
@@ -35122,35 +35178,40 @@ function FormCutiModule({
     const newDates = dateRange(merged.dariTanggal, merged.sampaiTanggal);
     const isHalfDay = !!merged.setengahHari && newDates.length === 1;
     const newDateSet = new Set(newDates);
-    // Dates dropped from the range: remove the attendance row this leave originally wrote, but only
-    // if it still holds the status this leave set (status === oldJenis) — never touch a row someone
-    // else has since edited to something else.
-    let nextAttendance = attendance.filter(a => !(a.username === merged.username && oldDates.includes(a.tanggal) && !newDateSet.has(a.tanggal) && a.status === oldJenis));
-    // Dates still in range (or newly added): write/overwrite to the (possibly changed) jenisCuti,
-    // same dedupe/overwrite logic as approve().
-    const matchDates = new Set(nextAttendance.filter(a => a.username === merged.username && a.status === newJenis).map(a => a.tanggal));
-    const datesToWrite = newDates.filter(d => !matchDates.has(d));
-    const overwriteDates = new Set(datesToWrite.filter(d => nextAttendance.some(a => a.username === merged.username && a.tanggal === d)));
-    // Same catatan refresh as approve() — see note there (Ruswanto stale-note root cause, 2026-08-19).
-    nextAttendance = nextAttendance.map(a => overwriteDates.has(a.tanggal) && a.username === merged.username ? {
-      ...a,
-      status: newJenis,
-      setengahHari: isHalfDay,
-      catatan: `Form Cuti ${merged.id} direvisi (${newReqJenis}${isHalfDay ? ", ½ hari" : ""}) oleh ${session.nama} — menggantikan status sebelumnya "${a.status}"${a.catatan ? ` (catatan lama: ${a.catatan})` : ""}`
-    } : a);
-    const newRows = datesToWrite.filter(d => !overwriteDates.has(d)).map(d => ({
-      id: "ABS-" + uid(),
-      tanggal: d,
-      username: merged.username,
-      jamMasuk: "",
-      jamKeluar: "",
-      lembur: 0,
-      uangHarian: 0,
-      status: newJenis,
-      setengahHari: isHalfDay,
-      catatan: `Form Cuti ${merged.id} direvisi (${newReqJenis}${isHalfDay ? ", ½ hari" : ""}) oleh ${session.nama}`
-    }));
-    setAttendance([...nextAttendance, ...newRows]);
+    // Functional form: all the below is recomputed against the fresh `prev` snapshot inside the
+    // updater (not the closure's `attendance` variable) — see approve()'s note above for the same
+    // silent-overwrite class of bug this avoids.
+    setAttendance(prev => {
+      // Dates dropped from the range: remove the attendance row this leave originally wrote, but only
+      // if it still holds the status this leave set (status === oldJenis) — never touch a row someone
+      // else has since edited to something else.
+      let nextAttendance = prev.filter(a => !(a.username === merged.username && oldDates.includes(a.tanggal) && !newDateSet.has(a.tanggal) && a.status === oldJenis));
+      // Dates still in range (or newly added): write/overwrite to the (possibly changed) jenisCuti,
+      // same dedupe/overwrite logic as approve().
+      const matchDates = new Set(nextAttendance.filter(a => a.username === merged.username && a.status === newJenis).map(a => a.tanggal));
+      const datesToWrite = newDates.filter(d => !matchDates.has(d));
+      const overwriteDates = new Set(datesToWrite.filter(d => nextAttendance.some(a => a.username === merged.username && a.tanggal === d)));
+      // Same catatan refresh as approve() — see note there (Ruswanto stale-note root cause, 2026-08-19).
+      nextAttendance = nextAttendance.map(a => overwriteDates.has(a.tanggal) && a.username === merged.username ? {
+        ...a,
+        status: newJenis,
+        setengahHari: isHalfDay,
+        catatan: `Form Cuti ${merged.id} direvisi (${newReqJenis}${isHalfDay ? ", ½ hari" : ""}) oleh ${session.nama} — menggantikan status sebelumnya "${a.status}"${a.catatan ? ` (catatan lama: ${a.catatan})` : ""}`
+      } : a);
+      const newRows = datesToWrite.filter(d => !overwriteDates.has(d)).map(d => ({
+        id: "ABS-" + uid(),
+        tanggal: d,
+        username: merged.username,
+        jamMasuk: "",
+        jamKeluar: "",
+        lembur: 0,
+        uangHarian: 0,
+        status: newJenis,
+        setengahHari: isHalfDay,
+        catatan: `Form Cuti ${merged.id} direvisi (${newReqJenis}${isHalfDay ? ", ½ hari" : ""}) oleh ${session.nama}`
+      }));
+      return [...nextAttendance, ...newRows];
+    });
     // Functional-update form — see staffDispute's note above.
     setLeaveRequests(prev => {
       const idx = prev.findIndex(r => r.id === req.id);
@@ -36578,7 +36639,7 @@ function BankReconModule({
   const save = () => {
     if (!form.keterangan || !form.nominal) return alert("Keterangan dan nominal wajib diisi");
     if (editingId) {
-      setBankRecon(bankRecon.map(e => e.id === editingId ? {
+      setBankRecon(prev => prev.map(e => e.id === editingId ? {
         ...e,
         ...form,
         nominal: parseFloat(form.nominal) || 0
@@ -36596,7 +36657,7 @@ function BankReconModule({
         nominal: parseFloat(form.nominal) || 0,
         createdBy: session.nama
       };
-      setBankRecon([...bankRecon, entry]);
+      setBankRecon(prev => [...prev, entry]);
       logAudit(store, session, {
         module: "Rekonsiliasi Bank",
         docNomor: entry.id,
@@ -37031,7 +37092,7 @@ function JurnalModule({
   }, [coa]);
   const save = () => {
     if (!form.keterangan || !form.nominal) return alert("Keterangan dan nominal wajib diisi");
-    setJurnal([...jurnal, {
+    setJurnal(prev => [...prev, {
       id: "JRN-" + uid(),
       ...form,
       nominal: parseFloat(form.nominal) || 0,
@@ -37162,8 +37223,6 @@ function JurnalModule({
           selisihKurs: newRiwayat.reduce((s, r) => s + (r.selisihKurs || 0), 0)
         } : {})
       };
-      const arr = [...jurnal];
-      arr[jurnal.indexOf(entry)] = updated;
       // Selisih kurs is posted as its OWN Jurnal entry under the "Selisih Kurs" COA account — a
       // real, auditable gain/loss transaction, not just a number on the PO's entry — per explicit
       // request. It's a paper recognition of what already happened at time of payment, not a fresh
@@ -37185,7 +37244,15 @@ function JurnalModule({
         paidDate: tanggal,
         autoGenerated: true
       }] : [];
-      setJurnal([...arr, ...kursEntries]);
+      // Functional form — finds `entry` by id against the fresh `prev` snapshot instead of the
+      // closure's `jurnal` array/indexOf (reference-equality lookup), so this can't silently
+      // overwrite the whole Jurnal collection with a stale local copy.
+      setJurnal(prev => {
+        const arr = [...prev];
+        const idx = arr.findIndex(j => j.id === entry.id);
+        if (idx >= 0) arr[idx] = updated;
+        return [...arr, ...kursEntries];
+      });
       syncBankRecon(updated, metode, tanggal, nominalIDR);
       logAudit(store, session, {
         module: "Jurnal",
@@ -37197,8 +37264,6 @@ function JurnalModule({
       return;
     }
 
-    const arr = [...jurnal];
-    const idx = jurnal.indexOf(entry);
     // A foreign entry with riwayatPembayaran already has its correct AGGREGATE nominalIDR/selisihKurs
     // (sum of each installment's own kurs — see confirmPayModal's isForeign&&mode==='lunas' branch
     // above). This generic edit path predates installments and would otherwise recompute those from
@@ -37223,8 +37288,13 @@ function JurnalModule({
         } : {})
       })
     };
-    arr[idx] = updated;
-    setJurnal(arr);
+    // Functional form — finds `entry` by id against the fresh `prev` snapshot, see note above.
+    setJurnal(prev => {
+      const arr = [...prev];
+      const idx = arr.findIndex(j => j.id === entry.id);
+      if (idx >= 0) arr[idx] = updated;
+      return arr;
+    });
     syncBankRecon(updated, metode, tanggal, nominalIDR);
     logAudit(store, session, {
       module: "Jurnal",
@@ -37244,14 +37314,17 @@ function JurnalModule({
       nominal,
       keterangan
     } = payModal;
-    const arr = [...jurnal];
-    const idx = jurnal.indexOf(entry);
-    arr[idx] = {
-      ...entry,
-      keterangan,
-      nominal: parseFloat(nominal) || 0
-    };
-    setJurnal(arr);
+    // Functional form — finds `entry` by id against the fresh `prev` snapshot, see note above.
+    setJurnal(prev => {
+      const arr = [...prev];
+      const idx = arr.findIndex(j => j.id === entry.id);
+      if (idx >= 0) arr[idx] = {
+        ...entry,
+        keterangan,
+        nominal: parseFloat(nominal) || 0
+      };
+      return arr;
+    });
     logAudit(store, session, {
       module: "Jurnal",
       docNomor: entry.id,
@@ -37885,9 +37958,12 @@ function WorkshopOpsModule({
     if (!c || !form.nominal) return alert("Pilih jenis biaya dan isi nominal");
     if (form.kategori === "Other" && !form.kategoriLainnya.trim()) return alert("Isi kategori (Other) secara manual");
     if (editingExpenseId) {
-      const idx = workshopOpsExpenses.findIndex(e => e.id === editingExpenseId);
-      if (idx >= 0) {
-        const arr = [...workshopOpsExpenses];
+      // Functional form — findIndex re-run against the fresh `prev` snapshot, so this can't
+      // silently overwrite the whole Pengeluaran Workshop collection with a stale local copy.
+      setWorkshopOpsExpenses(prev => {
+        const idx = prev.findIndex(e => e.id === editingExpenseId);
+        if (idx < 0) return prev;
+        const arr = [...prev];
         arr[idx] = {
           ...arr[idx],
           ...form,
@@ -37895,10 +37971,10 @@ function WorkshopOpsModule({
           coaNama: c.nama,
           nominal: parseFloat(form.nominal) || 0
         };
-        setWorkshopOpsExpenses(arr);
-      }
+        return arr;
+      });
     } else {
-      setWorkshopOpsExpenses([...workshopOpsExpenses, {
+      setWorkshopOpsExpenses(prev => [...prev, {
         id: "WOPS-" + uid(),
         ...form,
         kategoriLabel: form.kategori === "Other" ? form.kategoriLainnya.trim() : form.kategori,
