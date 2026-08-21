@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-21.3";
+const APP_BUILD = "2026-08-21.4";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -5411,7 +5411,11 @@ function MasterPart({
   const [editIdx, setEditIdx] = useState(null);
   const [search, setSearch] = useState("");
   const canSeePrice = session.role === "owner" || session.role === "gm"; // price restriction rule
-  const isOwnerLike = session.role === "owner" || session.role === "gm";
+  // STANDARDIZED (2026-08-21): isOwnerLike now consistently = owner/gm/finance_director across the
+  // whole app (per Jef's explicit decision) — this module previously omitted finance_director,
+  // which meant a Finance Director's Master Part deletes went through GM approval here while
+  // everywhere else they bypassed it. See code review notes for the full list of affected modules.
+  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   const [conflicts, setConflicts] = useState(null); // { rows: [...], idx: 0 } during import conflict resolution
   const [importSummary, setImportSummary] = useState(null);
   const [subKatFilter, setSubKatFilter] = useState("Semua");
@@ -6463,7 +6467,7 @@ function MasterUnit({
     qty: 1
   });
   const canSeePrice = session.role === "owner" || session.role === "gm";
-  const isOwnerLike = session.role === "owner" || session.role === "gm";
+  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director"; // standardized 2026-08-21
   const [conflicts, setConflicts] = useState(null);
   const [importSummary, setImportSummary] = useState(null);
   const [search, setSearch] = useState("");
@@ -27110,7 +27114,7 @@ function PayrollModule({
   const activeEmployees = employees.filter(e => e.aktif !== false);
   const inactiveEmployeeCount = employees.length - activeEmployees.length;
   const empFiltered = empSearch.trim() ? activeEmployees.filter(e => [e.nama, e.jabatan].filter(Boolean).some(x => String(x).toLowerCase().includes(empSearch.trim().toLowerCase()))) : activeEmployees;
-  const isOwnerLike = session.role === "owner" || session.role === "gm";
+  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director"; // standardized 2026-08-21
   // Uang Makan Harian / Sisa Lembur / overtime-legal-estimate figures below are joined against
   // Rekap Absensi (mesin fingerprint import) by matching employee NAMA, because the machine export
   // only carries a free-text name column — not username. Two active employees sharing the exact
@@ -29273,7 +29277,7 @@ function MekanikKPIModule({
     statusReports
   } = store;
   const partRecs = normalizePartRecs(partRecsRaw);
-  const isOwnerLike = session.role === "owner" || session.role === "gm";
+  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director"; // standardized 2026-08-21
   const isMekanik = session.role === "mekanik" || session.role === "freelance";
   const mekanikNames = [...new Set(visits.map(v => v.mekanikNama))];
   const targetNames = isMekanik ? [session.nama] : mekanikNames;
@@ -29363,7 +29367,7 @@ function TicketingModule({
     employees
   } = store;
   const isEpy = session.role === "sales_admin";
-  const isOwnerLike = session.role === "owner" || session.role === "gm";
+  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director"; // standardized 2026-08-21
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState(null);
   const [editIdx, setEditIdx] = useState(null);
@@ -30674,7 +30678,7 @@ function MaintenanceScheduleModule({
     suratTugas
   } = store;
   const isSepti = session.role === "workshop_manager";
-  const isOwnerLike = session.role === "owner" || session.role === "gm";
+  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director"; // standardized 2026-08-21
   const [assignModal, setAssignModal] = useState(null);
   const [mekanikNama, setMekanikNama] = useState("");
   const [completeModal, setCompleteModal] = useState(null);
@@ -31782,7 +31786,7 @@ function MasterCOAModule({
     coa,
     setCoa
   } = store;
-  const isOwnerLike = session.role === "owner" || session.role === "gm";
+  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director"; // standardized 2026-08-21
   const [modal, setModal] = useState(false);
   const [form, setForm] = useState({
     kode: "",
@@ -36632,7 +36636,7 @@ function BankReconModule({
     bankRecon,
     setBankRecon
   } = store;
-  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director" || session.role === "finance";
+  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   const [modal, setModal] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState({
@@ -36926,7 +36930,7 @@ function JurnalModule({
     setCoa
   } = store;
   const SELISIH_KURS_COA_KODE = "OPS-013";
-  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director" || session.role === "finance";
+  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState(null);
   const [form, setForm] = useState({
