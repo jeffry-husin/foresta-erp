@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-21.4";
+const APP_BUILD = "2026-08-21.5";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -35319,6 +35319,44 @@ function FormCutiModule({
     // Functional-update form — see staffDispute's note above.
     setLeaveRequests(prev => prev.filter(r => r.id !== req.id));
   };
+  // Pure data mutation shared by both delete paths (GM-immediate and GM-approved-after-request) —
+  // no logAudit here, callers log their own action (see deleteCutiRequest/PendingHapusCard below),
+  // matching the convention every other module's gatedDelete/applyDelete pair already follows.
+  // If the request was already Disetujui, this also reverts the Absensi (attendance) rows that
+  // approve()/reviseApproved() wrote for it — using the same safety guard as reviseApproved's
+  // "dates dropped" cleanup: only remove rows that still hold the exact status this leave set,
+  // so a row someone has since edited/overwritten by another mechanism is never touched.
+  const revertAndRemoveCuti = payload => {
+    if (payload.status === "Disetujui") {
+      const oldReqJenis = payload.jenisCuti === "Cuti Khusus" ? "Cuti Khusus" : payload.jenisCuti === "Ijin" ? "Ijin" : "Cuti";
+      const oldJenis = resolveJenisCuti(oldReqJenis);
+      const oldDates = dateRange(payload.dariTanggal, payload.sampaiTanggal);
+      setAttendance(prev => prev.filter(a => !(a.username === payload.username && oldDates.includes(a.tanggal) && a.status === oldJenis && (a.catatan || "").includes(payload.id))));
+    }
+    setLeaveRequests(prev => prev.filter(r => r.id !== payload.id));
+  };
+  const deleteCutiRequest = async req => {
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
+      module: "Form Cuti",
+      targetId: req.id,
+      targetLabel: `${req.id} - ${req.nama}`,
+      payload: req,
+      confirmMsg: `Hapus pengajuan cuti ${req.nama} (${req.id})?${req.status === "Disetujui" ? " Baris Absensi yang sudah ditulis oleh cuti ini akan dikembalikan ke status semula." : ""}`,
+      onDeleteNow: () => {
+        revertAndRemoveCuti(req);
+        logAudit(store, session, {
+          module: "Form Cuti",
+          docNomor: req.id,
+          action: "Hapus",
+          detail: `${req.nama}: ${req.jumlahHari} hari (${req.dariTanggal} s/d ${req.sampaiTanggal}) — status sebelum dihapus: ${req.status}`
+        });
+      }
+    });
+    setDetail(null);
+  };
   const statusColor = {
     "Menunggu Approval HRD": theme.yellow,
     "Menunggu Konfirmasi Staff": theme.cyan,
@@ -35340,7 +35378,13 @@ function FormCutiModule({
       flexDirection: "column",
       gap: 20
     }
-  }, /*#__PURE__*/React.createElement("div", {
+  }, isApprover && /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Form Cuti",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: revertAndRemoveCuti
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
@@ -35544,7 +35588,7 @@ function FormCutiModule({
     variant: "danger",
     onClick: () => reject(r)
   }, "✗ Tolak")))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
-    headers: isApprover ? ["No.", "Nama", "Alasan", "Dari", "Sampai", "Jumlah Hari", "Status"] : ["No.", "Alasan", "Dari", "Sampai", "Jumlah Hari", "Status"],
+    headers: isApprover ? ["No.", "Nama", "Alasan", "Dari", "Sampai", "Jumlah Hari", "Status", "Aksi"] : ["No.", "Alasan", "Dari", "Sampai", "Jumlah Hari", "Status"],
     rows: sortedRequests.map(r => {
       const base = isApprover ? [r.id, r.nama] : [r.id];
       const nomorCell = /*#__PURE__*/React.createElement("span", {
@@ -35555,9 +35599,21 @@ function FormCutiModule({
         },
         onClick: () => openDetail(r)
       }, r.id);
-      return [nomorCell, ...base.slice(1), r.alasan, r.dariTanggal, r.sampaiTanggal, r.jumlahHari, /*#__PURE__*/React.createElement(Badge, {
+      const row = [nomorCell, ...base.slice(1), r.alasan, r.dariTanggal, r.sampaiTanggal, r.jumlahHari, /*#__PURE__*/React.createElement(Badge, {
         color: statusColor[r.status]
       }, r.status)];
+      // Delete is available to any approver (HRD/HO) regardless of status — including already
+      // Disetujui leave, per Jef's explicit ask (2026-08-21). gatedDelete still gates it: only
+      // GM/Owner/Finance Director delete immediately, anyone else's click submits a Hapus request
+      // that waits for GM approval via the PendingHapusCard above — same universal pattern as
+      // every other module's delete.
+      if (isApprover) row.push(/*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "danger",
+        title: "Hapus",
+        onClick: () => deleteCutiRequest(r)
+      }, "🗑️"));
+      return row;
     }),
     emptyMsg: "Belum ada pengajuan cuti"
   })), /*#__PURE__*/React.createElement(Modal, {
@@ -35806,7 +35862,17 @@ function FormCutiModule({
   }, "✓ Konfirmasi"), /*#__PURE__*/React.createElement(Btn, {
     variant: "danger",
     onClick: () => staffDispute(detail)
-  }, "✗ Tidak Sesuai")))));
+  }, "✗ Tidak Sesuai")), isApprover && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 8,
+      paddingTop: 12,
+      borderTop: `1px solid ${theme.border}`
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "danger",
+    size: "sm",
+    onClick: () => deleteCutiRequest(detail)
+  }, "🗑️ Hapus Cuti Ini")))));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
