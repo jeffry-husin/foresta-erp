@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-19.6";
+const APP_BUILD = "2026-08-21.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -3131,6 +3131,132 @@ function submitEditRequest(store, session, {
     detail: "Menunggu approval GM"
   });
   return req;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// UNIVERSAL 2-GATEWAY DELETE (2026-08-20) — applies app-wide to every "hapus" action.
+// Gateway 1: warning confirm ("Yakin untuk hapus item ini?", OK/Batal) via askConfirm.
+// Gateway 2: GM approval — the delete does NOT happen immediately; it's submitted as a
+// pending "Hapus" request (via submitEditRequest) that only takes effect once GM approves
+// it (via PendingHapusCard below). Owner/GM themselves are exempt from gateway 2 (they ARE
+// the approver, so a second self-approval step would be pure friction) — this mirrors the
+// existing Master Part pattern already in use before this date.
+// Usage: await gatedDelete({ isOwnerLike, store, session, module, targetId, targetLabel, payload, confirmMsg, onDeleteNow })
+async function gatedDelete({
+  isOwnerLike,
+  store,
+  session,
+  module,
+  targetId,
+  targetLabel,
+  payload,
+  confirmMsg,
+  onDeleteNow
+}) {
+  if (!(await askConfirm(confirmMsg || "Yakin untuk hapus item ini?", {
+    danger: true,
+    confirmLabel: "Hapus"
+  }))) return false;
+  if (isOwnerLike) {
+    onDeleteNow();
+    return true;
+  }
+  submitEditRequest(store, session, {
+    module,
+    action: "Hapus",
+    targetId,
+    targetLabel,
+    payload
+  });
+  alert(`Pengajuan hapus diajukan dan menunggu approval GM.`);
+  return true;
+}
+
+// Generic "pending Hapus request" approval card — reused by every module so we don't have to
+// hand-roll the same approve/reject UI 25+ times. `applyDelete(payload, req)` must perform the
+// actual deletion for that module's own data (e.g. setX(prev => prev.filter(...))); this
+// component takes care of marking the request Disetujui/Ditolak and writing the audit log.
+// Only rendered for isOwnerLike users (everyone else just sees "menunggu approval GM" after
+// submitting, same as the existing Master Part / Database Client pattern).
+function PendingHapusCard({
+  module,
+  editRequests,
+  store,
+  session,
+  applyDelete
+}) {
+  const pending = (editRequests || []).filter(r => r.module === module && r.action === "Hapus" && r.status === "Menunggu Approval GM");
+  if (pending.length === 0) return null;
+  const approve = req => {
+    applyDelete(req.payload, req);
+    store.setEditRequests(prev => prev.map(r => r.id === req.id ? {
+      ...r,
+      status: "Disetujui GM"
+    } : r));
+    logAudit(store, session, {
+      module,
+      docNomor: req.targetLabel,
+      action: "Approve Hapus",
+      detail: ""
+    });
+  };
+  const reject = req => {
+    store.setEditRequests(prev => prev.map(r => r.id === req.id ? {
+      ...r,
+      status: "Ditolak GM"
+    } : r));
+    logAudit(store, session, {
+      module,
+      docNomor: req.targetLabel,
+      action: "Reject Hapus",
+      detail: ""
+    });
+  };
+  return /*#__PURE__*/React.createElement(Card, {
+    style: {
+      marginBottom: 16,
+      border: `1px solid #f59e0b`
+    }
+  }, /*#__PURE__*/React.createElement("h4", {
+    style: {
+      margin: "0 0 10px",
+      color: theme.text
+    }
+  }, `⏳ Pengajuan Hapus ${module} — Menunggu Approval GM (${pending.length})`), pending.map(req => /*#__PURE__*/React.createElement("div", {
+    key: req.id,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      padding: "8px 0",
+      borderBottom: `1px solid ${theme.border}`,
+      gap: 8,
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: theme.text,
+      fontWeight: 600
+    }
+  }, req.targetLabel), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: theme.muted,
+      fontSize: 12
+    }
+  }, `Diajukan oleh ${req.requestedBy} — ${req.tanggal}`)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "danger",
+    onClick: () => approve(req)
+  }, "Approve"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => reject(req)
+  }, "Reject")))));
 }
 
 // Global audit log helper — call this whenever an approval/rejection decision happens.
@@ -6366,15 +6492,25 @@ function MasterUnit({
   const onDelete = async i => {
     const target = filtered[i];
     if (!target) return;
-    if (await askConfirm("Hapus unit ini?")) {
-      setUnits(prev => prev.filter(u => u.unitCode !== target.unitCode));
-      logAudit(store, session, {
-        module: "Master Unit (BOM)",
-        docNomor: target.unitCode,
-        action: "Hapus",
-        detail: `${target.unitName} — ${target.bom.length} part`
-      });
-    }
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
+      module: "Master Unit (BOM)",
+      targetId: target.unitCode,
+      targetLabel: `${target.unitCode} - ${target.unitName}`,
+      payload: target,
+      confirmMsg: "Hapus unit ini?",
+      onDeleteNow: () => {
+        setUnits(prev => prev.filter(u => u.unitCode !== target.unitCode));
+        logAudit(store, session, {
+          module: "Master Unit (BOM)",
+          docNomor: target.unitCode,
+          action: "Hapus",
+          detail: `${target.unitName} — ${target.bom.length} part`
+        });
+      }
+    });
   };
 
   // Export: flatten BOM array into 1 row per part line
@@ -6571,7 +6707,13 @@ function MasterUnit({
       flexDirection: "column",
       gap: 20
     }
-  }, /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Master Unit (BOM)",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setUnits(prev => prev.filter(u => u.unitCode !== payload.unitCode))
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
@@ -6674,8 +6816,8 @@ function MasterUnit({
       fontSize: 13
     }
   }, detail.description), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Part Number", "Part Name", "Satuan", "Qty Dibutuhkan"],
-    rows: detail.bom.map(b => [b.partNumber, b.partName, b.satuan || parts.find(p => p.partNumber === b.partNumber)?.satuan || "-", fmtNum(b.qty)])
+    headers: ["Part Number", "Part Name", "Deskripsi", "Satuan", "Qty Dibutuhkan"],
+    rows: detail.bom.map(b => [b.partNumber, b.partName, b.description || parts.find(p => p.partNumber === b.partNumber)?.description || "-", b.satuan || parts.find(p => p.partNumber === b.partNumber)?.satuan || "-", fmtNum(b.qty)])
   }), canSeePrice && /*#__PURE__*/React.createElement("div", {
     style: {
       textAlign: "right",
@@ -6711,8 +6853,8 @@ function MasterUnit({
       tanggal: today(),
       partyLabel: "Unit:",
       partyName: detail.unitName,
-      itemHeaders: ["Part Number", "Part Name", "Satuan", "Qty"],
-      items: detail.bom.map(b => [b.partNumber, b.partName, b.satuan || parts.find(p => p.partNumber === b.partNumber)?.satuan || "-", fmtNum(b.qty)]),
+      itemHeaders: ["Part Number", "Part Name", "Deskripsi", "Satuan", "Qty"],
+      items: detail.bom.map(b => [b.partNumber, b.partName, b.description || parts.find(p => p.partNumber === b.partNumber)?.description || "-", b.satuan || parts.find(p => p.partNumber === b.partNumber)?.satuan || "-", fmtNum(b.qty)]),
       showPrice: canSeePrice,
       subtotal: detail.bom.reduce((s, b) => {
         const p = parts.find(x => x.partNumber === b.partNumber);
@@ -7232,11 +7374,23 @@ function CustomerDB({
   const deleteGroup = async g => {
     const inUse = customers.filter(c => c.groupId === g.id).length;
     if (inUse > 0 && !await askConfirm(`Group "${g.nama}" masih dipakai oleh ${inUse} client. Hapus tetap? Client yang memakainya akan kehilangan Group.`)) return;
-    setClientGroups(prev => (prev || []).filter(x => x.id !== g.id));
-    if (inUse > 0) setCustomers(prev => prev.map(c => c.groupId === g.id ? {
-      ...c,
-      groupId: ""
-    } : c));
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
+      module: "Master Group",
+      targetId: g.id,
+      targetLabel: g.nama,
+      payload: g,
+      confirmMsg: "Hapus group ini?",
+      onDeleteNow: () => {
+        setClientGroups(prev => (prev || []).filter(x => x.id !== g.id));
+        if (inUse > 0) setCustomers(prev => prev.map(c => c.groupId === g.id ? {
+          ...c,
+          groupId: ""
+        } : c));
+      }
+    });
   };
   const addPic = () => {
     if (!picForm.nama) return alert("Nama PIC wajib diisi");
@@ -7333,14 +7487,24 @@ function CustomerDB({
     setModal(true);
   };
   const onDelete = async i => {
-    if (!isOwnerLike) {
-      alert("Hanya Owner/GM yang dapat menghapus data client.");
+    const target = filtered[i];
+    if (!isOwnerLike && !customerAccessibleBy(target, session)) {
+      alert("Anda belum memiliki akses ke client ini. Gunakan tombol \"Request Akses\" untuk mengajukan akses ke HO1/HO2/HO3.");
       return;
     }
-    if (await askConfirm("Hapus client?")) {
-      const targetId = filtered[i].id;
-      setCustomers(prev => prev.filter(c => c.id !== targetId));
-    }
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
+      module: "Database Client",
+      targetId: target.id,
+      targetLabel: target.nama,
+      payload: target,
+      confirmMsg: "Hapus client?",
+      onDeleteNow: () => {
+        setCustomers(prev => prev.filter(c => c.id !== target.id));
+      }
+    });
   };
   // Quick-revise Category directly from the list — deliberately bypasses the normal GM-approval
   // edit-request flow used for other client fields (see save()), since Category is just a
@@ -7589,7 +7753,25 @@ function CustomerDB({
       color: theme.green,
       cursor: "pointer"
     }
-  }, "×")), isOwnerLike && editRequests.filter(r => r.module === "Database Client" && r.status === "Menunggu Approval GM").length > 0 && /*#__PURE__*/React.createElement(Card, {
+  }, "×")), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Database Client",
+    editRequests,
+    store,
+    session,
+    applyDelete: payload => setCustomers(prev => prev.filter(c => c.id !== payload.id))
+  }), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Master Group",
+    editRequests,
+    store,
+    session,
+    applyDelete: payload => {
+      setClientGroups(prev => (prev || []).filter(x => x.id !== payload.id));
+      setCustomers(prev => prev.map(c => c.groupId === payload.id ? {
+        ...c,
+        groupId: ""
+      } : c));
+    }
+  }), isOwnerLike && editRequests.filter(r => r.module === "Database Client" && r.status === "Menunggu Approval GM").length > 0 && /*#__PURE__*/React.createElement(Card, {
     style: {
       background: theme.yellow + "11",
       border: `1px solid ${theme.yellow}44`
@@ -8471,12 +8653,24 @@ function SupplierDB({
     setModal(true);
   };
   const onDelete = async i => {
-    if (await askConfirm("Hapus supplier?")) {
-      const realIdx = list.indexOf(filtered[i]);
-      const a = [...list];
-      a.splice(realIdx, 1);
-      setList(a);
-    }
+    const target = filtered[i];
+    const moduleName = tab === "local" ? "Supplier Lokal" : "Supplier Overseas";
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
+      module: moduleName,
+      targetId: target.id,
+      targetLabel: `${target.id} - ${target.nama}`,
+      payload: target,
+      confirmMsg: "Hapus supplier?",
+      onDeleteNow: () => {
+        const realIdx = list.indexOf(target);
+        const a = [...list];
+        a.splice(realIdx, 1);
+        setList(a);
+      }
+    });
   };
   // Move a supplier record between the Lokal and Overseas databases (keeps all its data, just switches list + "jenis").
   const moveSupplier = async i => {
@@ -8668,7 +8862,19 @@ function SupplierDB({
     }
   }, t === "local" ? "🇮🇩 Lokal" : "🌍 Overseas"))), !isOwnerLike && /*#__PURE__*/React.createElement(Badge, {
     color: tab === "local" ? theme.green : theme.yellow
-  }, tab === "local" ? "🇮🇩 Supplier Lokal" : "🌍 Supplier Overseas"), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
+  }, tab === "local" ? "🇮🇩 Supplier Lokal" : "🌍 Supplier Overseas"), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Supplier Lokal",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setSuppliersLocal(prev => prev.filter(s => s.id !== payload.id))
+  }), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Supplier Overseas",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setSuppliersOverseas(prev => prev.filter(s => s.id !== payload.id))
+  }), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
     headers: ["ID", "Nama Supplier", "Kontak Person", "Jabatan", "No. HP", "Telepon", "Email", "Lokasi"],
     rows: filtered.map((s, i) => [s.id, s.nama, s.kontak, s.jabatan || "-", s.noHp || "-", s.telepon, s.email, /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
@@ -9662,20 +9868,32 @@ function MekanikReport({
   const visitInspections = id => inspectionReports.filter(r => r.visitId === id);
   const visitSuratTugas = id => suratTugas.filter(s => s.visitId === id);
   // Delete a whole visit and cascade-delete every DAR/Part Rec/Status/BAPP/Inspection/Surat Tugas tied to it.
-  const deleteVisit = async v => {
-    if (!await askConfirm(`Hapus kunjungan ${v.id} beserta seluruh DAR, Part Recommendation, Status Report, BAPP, Inspection Report, dan Surat Tugas di dalamnya? Tindakan ini tidak bisa dibatalkan.`)) return;
-    setVisits(visits.filter(x => x.id !== v.id));
-    setDars(dars.filter(x => x.visitId !== v.id));
-    setPartRecs(partRecs.filter(x => x.visitId !== v.id));
-    setStatusReports(statusReports.filter(x => x.visitId !== v.id));
-    setBasts(basts.filter(x => x.visitId !== v.id));
-    setInspectionReports(inspectionReports.filter(x => x.visitId !== v.id));
-    setSuratTugas(suratTugas.filter(x => x.visitId !== v.id));
+  const cascadeDeleteVisit = v => {
+    setVisits(prev => prev.filter(x => x.id !== v.id));
+    setDars(prev => prev.filter(x => x.visitId !== v.id));
+    setPartRecs(prev => prev.filter(x => x.visitId !== v.id));
+    setStatusReports(prev => prev.filter(x => x.visitId !== v.id));
+    setBasts(prev => prev.filter(x => x.visitId !== v.id));
+    setInspectionReports(prev => prev.filter(x => x.visitId !== v.id));
+    setSuratTugas(prev => prev.filter(x => x.visitId !== v.id));
     logAudit(store, session, {
       module: "Mekanik Report",
       docNomor: v.id,
       action: "Hapus",
       detail: `Kunjungan ${v.customerNama} (${v.tanggal})`
+    });
+  };
+  const deleteVisit = async v => {
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
+      module: "Kunjungan Mekanik",
+      targetId: v.id,
+      targetLabel: `${v.id} - ${v.customerNama} (${v.tanggal})`,
+      payload: v,
+      confirmMsg: `Hapus kunjungan ${v.id} beserta seluruh DAR, Part Recommendation, Status Report, BAPP, Inspection Report, dan Surat Tugas di dalamnya? Tindakan ini tidak bisa dibatalkan.`,
+      onDeleteNow: () => cascadeDeleteVisit(v)
     });
   };
   // Tandai Selesai: closes out a Kunjungan's field-work window and, per Jef's request, auto-feeds
@@ -9753,43 +9971,87 @@ function MekanikReport({
     });
   };
   const deleteDar = async d => {
-    if (!await askConfirm("Hapus DAR ini?")) return;
-    setDars(dars.filter(x => x.id !== d.id));
-    logAudit(store, session, {
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
       module: "DAR",
-      docNomor: d.id,
-      action: "Hapus",
-      detail: `${d.mekanikNama}: ${d.pekerjaan}`
+      targetId: d.id,
+      targetLabel: d.id,
+      payload: d,
+      confirmMsg: "Hapus DAR ini?",
+      onDeleteNow: () => {
+        setDars(prev => prev.filter(x => x.id !== d.id));
+        logAudit(store, session, {
+          module: "DAR",
+          docNomor: d.id,
+          action: "Hapus",
+          detail: `${d.mekanikNama}: ${d.pekerjaan}`
+        });
+      }
     });
   };
   const deleteBast = async b => {
-    if (!await askConfirm("Hapus BAPP ini?")) return;
-    setBasts(basts.filter(x => x.id !== b.id));
-    logAudit(store, session, {
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
       module: "BAPP",
-      docNomor: b.id,
-      action: "Hapus",
-      detail: b.soNomor || ""
+      targetId: b.id,
+      targetLabel: b.id,
+      payload: b,
+      confirmMsg: "Hapus BAPP ini?",
+      onDeleteNow: () => {
+        setBasts(prev => prev.filter(x => x.id !== b.id));
+        logAudit(store, session, {
+          module: "BAPP",
+          docNomor: b.id,
+          action: "Hapus",
+          detail: b.soNomor || ""
+        });
+      }
     });
   };
   const deleteInspection = async r => {
-    if (!await askConfirm("Hapus Inspection Report ini?")) return;
-    setInspectionReports(inspectionReports.filter(x => x.id !== r.id));
-    logAudit(store, session, {
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
       module: "Inspection Report",
-      docNomor: r.id,
-      action: "Hapus",
-      detail: r.mekanikNama || ""
+      targetId: r.id,
+      targetLabel: r.id,
+      payload: r,
+      confirmMsg: "Hapus Inspection Report ini?",
+      onDeleteNow: () => {
+        setInspectionReports(prev => prev.filter(x => x.id !== r.id));
+        logAudit(store, session, {
+          module: "Inspection Report",
+          docNomor: r.id,
+          action: "Hapus",
+          detail: r.mekanikNama || ""
+        });
+      }
     });
   };
   const deletePartRec = async rec => {
-    if (!await askConfirm("Hapus Part Recommendation ini?")) return;
-    setPartRecs(partRecs.filter(x => x.id !== rec.id));
-    logAudit(store, session, {
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
       module: "Part Recommendation",
-      docNomor: rec.id,
-      action: "Hapus",
-      detail: `${rec.items.length} item oleh ${rec.mekanikNama}`
+      targetId: rec.id,
+      targetLabel: rec.id,
+      payload: rec,
+      confirmMsg: "Hapus Part Recommendation ini?",
+      onDeleteNow: () => {
+        setPartRecs(prev => prev.filter(x => x.id !== rec.id));
+        logAudit(store, session, {
+          module: "Part Recommendation",
+          docNomor: rec.id,
+          action: "Hapus",
+          detail: `${rec.items.length} item oleh ${rec.mekanikNama}`
+        });
+      }
     });
   };
   const saveInspection = () => {
@@ -9897,14 +10159,24 @@ function MekanikReport({
     setSTAssigneeCart([]);
   };
   const deleteST = async s => {
-    if (!isOwnerLike) return alert("Hanya Owner/GM/Finance Director yang dapat menghapus Surat Tugas.");
-    if (!await askConfirm("Hapus Surat Tugas ini?")) return;
-    setSuratTugas(suratTugas.filter(x => x.id !== s.id));
-    logAudit(store, session, {
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
       module: "Surat Tugas",
-      docNomor: s.nomor,
-      action: "Hapus",
-      detail: `${s.assignees.length} orang ditugaskan`
+      targetId: s.id,
+      targetLabel: s.nomor,
+      payload: s,
+      confirmMsg: "Hapus Surat Tugas ini?",
+      onDeleteNow: () => {
+        setSuratTugas(prev => prev.filter(x => x.id !== s.id));
+        logAudit(store, session, {
+          module: "Surat Tugas",
+          docNomor: s.nomor,
+          action: "Hapus",
+          detail: `${s.assignees.length} orang ditugaskan`
+        });
+      }
     });
   };
   const printSuratTugas = s => {
@@ -11273,7 +11545,43 @@ function MekanikReport({
     })), "Mekanik_Report.xlsx", "Mekanik Report")
   }), (isMekanik || isOwnerLike || isSepti) && /*#__PURE__*/React.createElement(Btn, {
     onClick: () => setVisitModal(true)
-  }, "+ Kunjungan Baru"))), /*#__PURE__*/React.createElement(Input, {
+  }, "+ Kunjungan Baru"))), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Kunjungan Mekanik",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => cascadeDeleteVisit(payload)
+  }), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "DAR",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setDars(prev => prev.filter(x => x.id !== payload.id))
+  }), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "BAPP",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setBasts(prev => prev.filter(x => x.id !== payload.id))
+  }), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Inspection Report",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setInspectionReports(prev => prev.filter(x => x.id !== payload.id))
+  }), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Part Recommendation",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setPartRecs(prev => prev.filter(x => x.id !== payload.id))
+  }), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Surat Tugas",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setSuratTugas(prev => prev.filter(x => x.id !== payload.id))
+  }), /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari no. kunjungan / no. SO / client / unit / lokasi / mekanik...",
     value: search,
     onChange: setSearch
@@ -13298,14 +13606,24 @@ function QuotationUnit({
     });
   };
   const deleteQuotation = async q => {
-    if (!isOwnerLike) return alert("Hanya Owner/GM/Finance Director yang dapat menghapus quotation.");
-    if (!await askConfirm(`Hapus quotation ${q.nomor}?`)) return;
-    setQuotationsUnit(quotationsUnit.filter(x => x !== q));
-    logAudit(store, session, {
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
       module: "Unit Quotation",
-      docNomor: q.nomor,
-      action: "Hapus",
-      detail: `${q.customerNama} — ${fmt(q.total)}`
+      targetId: q.nomor,
+      targetLabel: q.nomor,
+      payload: q,
+      confirmMsg: `Hapus quotation ${q.nomor}?`,
+      onDeleteNow: () => {
+        setQuotationsUnit(prev => prev.filter(x => x.nomor !== q.nomor));
+        logAudit(store, session, {
+          module: "Unit Quotation",
+          docNomor: q.nomor,
+          action: "Hapus",
+          detail: `${q.customerNama} — ${fmt(q.total)}`
+        });
+      }
     });
   };
   const statusColor = {
@@ -13505,7 +13823,13 @@ function QuotationUnit({
     })), "Unit_Quotation.xlsx", "Unit Quotation")
   }), /*#__PURE__*/React.createElement(Btn, {
     onClick: openCreate
-  }, "+ Buat Quotation Unit"))), isApprover && /*#__PURE__*/React.createElement(Card, {
+  }, "+ Buat Quotation Unit"))), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Unit Quotation",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setQuotationsUnit(prev => prev.filter(x => x.nomor !== payload.nomor))
+  }), isApprover && /*#__PURE__*/React.createElement(Card, {
     style: {
       background: theme.yellow + "11",
       border: `1px solid ${theme.yellow}44`
@@ -14833,14 +15157,24 @@ function QuotationPS({
     });
   };
   const deleteQuotationPS = async q => {
-    if (!isOwnerLike) return alert("Hanya Owner/GM/Finance Director yang dapat menghapus quotation.");
-    if (!await askConfirm(`Hapus quotation ${q.nomor}?`)) return;
-    setQuotationsPS(quotationsPS.filter(x => x !== q));
-    logAudit(store, session, {
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
       module: "Parts & Service Quotation",
-      docNomor: q.nomor,
-      action: "Hapus",
-      detail: `${q.customerNama} — ${fmt(q.total)}`
+      targetId: q.nomor,
+      targetLabel: q.nomor,
+      payload: q,
+      confirmMsg: `Hapus quotation ${q.nomor}?`,
+      onDeleteNow: () => {
+        setQuotationsPS(prev => prev.filter(x => x.nomor !== q.nomor));
+        logAudit(store, session, {
+          module: "Parts & Service Quotation",
+          docNomor: q.nomor,
+          action: "Hapus",
+          detail: `${q.customerNama} — ${fmt(q.total)}`
+        });
+      }
     });
   };
   const needsFollowUp = q => q.status === "Disetujui GM" && daysSince(q.followUpExtendedAt || q.approvedDate || q.tanggal) >= 14;
@@ -15060,6 +15394,12 @@ function QuotationPS({
       total: q.total,
       status: q.status
     })), "Parts_Service_Quotation.xlsx", "PS Quotation")
+  }), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Parts & Service Quotation",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setQuotationsPS(prev => prev.filter(x => x.nomor !== payload.nomor))
   }), (isAsil || isOwnerLike) && /*#__PURE__*/React.createElement(React.Fragment, null, pendingRecs.length > 0 && /*#__PURE__*/React.createElement(Btn, {
     variant: "success",
     onClick: () => setPullModal(true)
@@ -16150,19 +16490,8 @@ function SalesOrderModule({
     });
     setSelesaiModal(null);
   };
-  const deleteSO = async so => {
-    if (!isOwnerLike) return alert("Hanya Owner/GM/Finance Director yang dapat menghapus Sales Order.");
-    // Warn before deleting an SO that already has an Item Requisition (and possibly a Purchase
-    // Order) built from it — deleting it here does NOT touch those downstream documents, so
-    // without this warning they're silently left pointing at an SO that no longer exists.
-    const linkedIRs = (itemRequisitions || []).filter(r => r.soNomor === so.nomor);
-    if (linkedIRs.length > 0) {
-      const linkedPOs = [...(poLocal || []), ...(poOverseas || [])].filter(p => (p.irNomors || []).some(n => linkedIRs.some(r => r.nomor === n)));
-      const warnMsg = linkedPOs.length > 0 ? `Sales Order ${so.nomor} sudah punya Item Requisition (${linkedIRs.map(r => r.nomor).join(", ")}) DAN sudah lanjut jadi Purchase Order (${linkedPOs.map(p => p.nomor).join(", ")}) ke supplier. Menghapus SO ini TIDAK akan menghapus/mengubah IR/PO tersebut — mereka akan tertinggal menunjuk ke SO yang sudah tidak ada. Lanjutkan hapus?` : `Sales Order ${so.nomor} sudah punya Item Requisition (${linkedIRs.map(r => r.nomor).join(", ")}). Menghapus SO ini TIDAK akan menghapus/mengubah IR tersebut — IR akan tertinggal menunjuk ke SO yang sudah tidak ada. Lanjutkan hapus?`;
-      if (!await askConfirm(warnMsg)) return;
-    }
-    if (!await askConfirm(`Hapus Sales Order ${so.nomor}?`)) return;
-    setSalesOrders(salesOrders.filter(x => x !== so));
+  const cascadeDeleteSO = so => {
+    setSalesOrders(prev => prev.filter(x => x.nomor !== so.nomor));
     // Revert the source Quotation back to "Disetujui GM" so it reappears in the Buat SO list and
     // a new Sales Order can be created from it again — otherwise it stays permanently stuck at
     // "Sudah jadi SO" even though the SO that made it so no longer exists.
@@ -16194,6 +16523,28 @@ function SalesOrderModule({
       docNomor: so.nomor,
       action: "Hapus",
       detail: `${so.customerNama} — ${fmt(so.total)}${so.sourceNomor ? ` — Quotation ${so.sourceNomor} dibuka kembali untuk SO baru` : ""}`
+    });
+  };
+  const deleteSO = async so => {
+    // Warn before deleting an SO that already has an Item Requisition (and possibly a Purchase
+    // Order) built from it — deleting it here does NOT touch those downstream documents, so
+    // without this warning they're silently left pointing at an SO that no longer exists.
+    const linkedIRs = (itemRequisitions || []).filter(r => r.soNomor === so.nomor);
+    if (linkedIRs.length > 0) {
+      const linkedPOs = [...(poLocal || []), ...(poOverseas || [])].filter(p => (p.irNomors || []).some(n => linkedIRs.some(r => r.nomor === n)));
+      const warnMsg = linkedPOs.length > 0 ? `Sales Order ${so.nomor} sudah punya Item Requisition (${linkedIRs.map(r => r.nomor).join(", ")}) DAN sudah lanjut jadi Purchase Order (${linkedPOs.map(p => p.nomor).join(", ")}) ke supplier. Menghapus SO ini TIDAK akan menghapus/mengubah IR/PO tersebut — mereka akan tertinggal menunjuk ke SO yang sudah tidak ada. Lanjutkan hapus?` : `Sales Order ${so.nomor} sudah punya Item Requisition (${linkedIRs.map(r => r.nomor).join(", ")}). Menghapus SO ini TIDAK akan menghapus/mengubah IR tersebut — IR akan tertinggal menunjuk ke SO yang sudah tidak ada. Lanjutkan hapus?`;
+      if (!await askConfirm(warnMsg)) return;
+    }
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
+      module: "Sales Order",
+      targetId: so.nomor,
+      targetLabel: so.nomor,
+      payload: so,
+      confirmMsg: `Hapus Sales Order ${so.nomor}?`,
+      onDeleteNow: () => cascadeDeleteSO(so)
     });
   };
   // Defensive double-check on top of the status filter: a quotation is only eligible to pull into
@@ -16495,7 +16846,13 @@ function SalesOrderModule({
       total: so.total,
       status: so.status
     })), "Sales_Order.xlsx", "Sales Order")
-  }))), /*#__PURE__*/React.createElement(Input, {
+  }))), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Sales Order",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => cascadeDeleteSO(payload)
+  }), /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari no. quotation / no. SO / client / sales manager / sumber quotation...",
     value: search,
     onChange: setSearch
@@ -17576,13 +17933,24 @@ function ItemRequisitionModule({
   const deleteIR = async r => {
     if (!canManage) return alert("Hanya Purchasing/Workshop Manager/Owner/GM/Finance Director yang dapat menghapus Item Requisition.");
     if (r.status === "Sudah di-PO" && !await askConfirm(`Item Requisition ${r.nomor} sudah menjadi Purchase Order. Purchase Order terkait TIDAK akan otomatis terhapus/berubah — perlu dicek manual bila perlu. Lanjutkan hapus?`)) return;
-    if (!await askConfirm(`Hapus Item Requisition ${r.nomor}?`)) return;
-    setItemRequisitions(prev => prev.filter(x => x.nomor !== r.nomor));
-    logAudit(store, session, {
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
       module: "Item Requisition",
-      docNomor: r.nomor,
-      action: "Hapus",
-      detail: r.soNomor
+      targetId: r.nomor,
+      targetLabel: r.nomor,
+      payload: r,
+      confirmMsg: `Hapus Item Requisition ${r.nomor}?`,
+      onDeleteNow: () => {
+        setItemRequisitions(prev => prev.filter(x => x.nomor !== r.nomor));
+        logAudit(store, session, {
+          module: "Item Requisition",
+          docNomor: r.nomor,
+          action: "Hapus",
+          detail: r.soNomor
+        });
+      }
     });
   };
   // BOM Explosion: for SO items sourced from Master Unit (sumber === "Master Unit"),
@@ -18071,7 +18439,13 @@ function ItemRequisitionModule({
       setManualItemForm(blankManualItem());
       setManualModal(true);
     }
-  }, "+ Tambahan Part untuk SO / Non-SO"))), React.createElement(Input, {
+  }, "+ Tambahan Part untuk SO / Non-SO"))), React.createElement(PendingHapusCard, {
+    module: "Item Requisition",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setItemRequisitions(prev => prev.filter(x => x.nomor !== payload.nomor))
+  }), React.createElement(Input, {
     placeholder: "Cari no. requisition / no. SO / nama client / part number / nama part / deskripsi...",
     value: search,
     onChange: setSearch
@@ -19411,13 +19785,23 @@ function PurchaseOrderModule({
     setImportCostModal(null);
   };
   const deleteImportCost = async p => {
-    const ok = await askConfirm(`Hapus data Import Cost untuk PO ${p.nomor}? Tindakan ini tidak bisa dibatalkan.`);
-    if (!ok) return;
-    setPo(prev => prev.map(x => {
-      if (x.nomor !== p.nomor) return x;
-      const { importCost, ...rest } = x;
-      return rest;
-    }));
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
+      module: "Import Cost",
+      targetId: p.nomor,
+      targetLabel: p.nomor,
+      payload: p,
+      confirmMsg: `Hapus data Import Cost untuk PO ${p.nomor}? Tindakan ini tidak bisa dibatalkan.`,
+      onDeleteNow: () => {
+        setPo(prev => prev.map(x => {
+          if (x.nomor !== p.nomor) return x;
+          const { importCost, ...rest } = x;
+          return rest;
+        }));
+      }
+    });
   };
   const statusColor = {
     "Menunggu Approval GM": theme.yellow,
@@ -19467,7 +19851,26 @@ function PurchaseOrderModule({
   }), (isHandler || isMaria || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
     onClick: openCreate
-  }, "+ Buat PO Manual (multi-IR)"))), /*#__PURE__*/React.createElement(Input, {
+  }, "+ Buat PO Manual (multi-IR)"))), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: isLocal ? "Purchase Order Lokal" : "Purchase Order Overseas",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setPo(prev => prev.filter(x => x.nomor !== payload.nomor))
+  }), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Import Cost",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setPo(prev => prev.map(x => {
+      if (x.nomor !== payload.nomor) return x;
+      const {
+        importCost,
+        ...rest
+      } = x;
+      return rest;
+    }))
+  }), /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari no. IR / no. PO / no. SO / supplier / client / part number / nama part / deskripsi...",
     value: search,
     onChange: setSearch
@@ -19691,40 +20094,52 @@ function PurchaseOrderModule({
       if (!isOwnerLike && target.status !== "Menunggu Approval GM") {
         return alert("PO yang sudah diproses (disetujui/ditolak GM) hanya dapat dihapus oleh Owner/GM/Finance Director.");
       }
-      if (!await askConfirm(`Hapus PO ${target.nomor}?`)) return;
-      // Functional form, filtered by nomor — see saveEditTanggalPO note (silent-overwrite fix,
-      // 2026-08-19). The old `po.filter(x => x !== target)` both risked overwriting the whole
-      // collection with a stale local snapshot AND used reference equality, which only worked by
-      // coincidence since `target` came from the same render's `po` array.
-      setPo(prev => prev.filter(x => x.nomor !== target.nomor));
-      // Release any IR items this PO had consumed so they become pickable again in a future PO.
-      if (target.irNomors && target.irNomors.length) {
-        const consumedByIR = {};
-        (target.items || []).forEach(it => {
-          if (it.fromIR == null || it.fromIRIdx == null) return;
-          (consumedByIR[it.fromIR] = consumedByIR[it.fromIR] || []).push(it.fromIRIdx);
-        });
-        // Functional form — re-fetches latest IR data before releasing items, so this can't
-        // silently revert sudahDiPO flags set by another PO/user in the meantime.
-        store.setItemRequisitions(prev => prev.map(ir => {
-          const idxList = consumedByIR[ir.nomor];
-          if (!idxList) return ir;
-          const newItems = ir.items.map((it, i2) => idxList.includes(i2) ? {
-            ...it,
-            sudahDiPO: false
-          } : it);
-          return {
-            ...ir,
-            items: newItems,
-            status: "Menunggu Purchasing"
-          };
-        }));
-      }
-      logAudit(store, session, {
-        module: isLocal ? "Purchase Order Lokal" : "Purchase Order Overseas",
-        docNomor: target.nomor,
-        action: "Hapus",
-        detail: target.supplierNama
+      const moduleName = isLocal ? "Purchase Order Lokal" : "Purchase Order Overseas";
+      await gatedDelete({
+        isOwnerLike,
+        store,
+        session,
+        module: moduleName,
+        targetId: target.nomor,
+        targetLabel: target.nomor,
+        payload: target,
+        confirmMsg: `Hapus PO ${target.nomor}?`,
+        onDeleteNow: () => {
+          // Functional form, filtered by nomor — see saveEditTanggalPO note (silent-overwrite fix,
+          // 2026-08-19). The old `po.filter(x => x !== target)` both risked overwriting the whole
+          // collection with a stale local snapshot AND used reference equality, which only worked by
+          // coincidence since `target` came from the same render's `po` array.
+          setPo(prev => prev.filter(x => x.nomor !== target.nomor));
+          // Release any IR items this PO had consumed so they become pickable again in a future PO.
+          if (target.irNomors && target.irNomors.length) {
+            const consumedByIR = {};
+            (target.items || []).forEach(it => {
+              if (it.fromIR == null || it.fromIRIdx == null) return;
+              (consumedByIR[it.fromIR] = consumedByIR[it.fromIR] || []).push(it.fromIRIdx);
+            });
+            // Functional form — re-fetches latest IR data before releasing items, so this can't
+            // silently revert sudahDiPO flags set by another PO/user in the meantime.
+            store.setItemRequisitions(prev => prev.map(ir => {
+              const idxList = consumedByIR[ir.nomor];
+              if (!idxList) return ir;
+              const newItems = ir.items.map((it, i2) => idxList.includes(i2) ? {
+                ...it,
+                sudahDiPO: false
+              } : it);
+              return {
+                ...ir,
+                items: newItems,
+                status: "Menunggu Purchasing"
+              };
+            }));
+          }
+          logAudit(store, session, {
+            module: moduleName,
+            docNomor: target.nomor,
+            action: "Hapus",
+            detail: target.supplierNama
+          });
+        }
       });
     } : undefined,
     emptyMsg: `Belum ada PO ${isLocal ? "Lokal" : "Overseas"} on going`
@@ -19774,15 +20189,26 @@ function PurchaseOrderModule({
     }, "📝"))]),
     onDelete: isOwnerLike ? async i => {
       const target = poFiltered.filter(p => isPoClosed(p))[i];
-      if (!await askConfirm(`Hapus PO ${target.nomor}?`)) return;
-      // Functional form, filtered by nomor — see saveEditTanggalPO note (silent-overwrite fix,
-      // 2026-08-19).
-      setPo(prev => prev.filter(x => x.nomor !== target.nomor));
-      logAudit(store, session, {
+      await gatedDelete({
+        isOwnerLike,
+        store,
+        session,
         module: isLocal ? "Purchase Order Lokal" : "Purchase Order Overseas",
-        docNomor: target.nomor,
-        action: "Hapus",
-        detail: target.supplierNama
+        targetId: target.nomor,
+        targetLabel: target.nomor,
+        payload: target,
+        confirmMsg: `Hapus PO ${target.nomor}?`,
+        onDeleteNow: () => {
+          // Functional form, filtered by nomor — see saveEditTanggalPO note (silent-overwrite fix,
+          // 2026-08-19).
+          setPo(prev => prev.filter(x => x.nomor !== target.nomor));
+          logAudit(store, session, {
+            module: isLocal ? "Purchase Order Lokal" : "Purchase Order Overseas",
+            docNomor: target.nomor,
+            action: "Hapus",
+            detail: target.supplierNama
+          });
+        }
       });
     } : undefined,
     emptyMsg: `Belum ada PO ${isLocal ? "Lokal" : "Overseas"} yang closed`
@@ -21683,17 +22109,29 @@ function GoodsReceiptModule({
   // pattern used by the Goods Receipt row delete above: if the DO was already confirmed at Workshop
   // (stock already incremented), deleting the record does NOT automatically reverse that stock
   // change, so the confirming message says so explicitly rather than silently going out of sync.
+  const deleteInternalDOByNomor = nomor => {
+    // Functional form — see confirmWorkshopReceipt note above (silent-overwrite fix, 2026-08-19).
+    setInternalDOs(prev => prev.filter(x => x.nomor !== nomor));
+    logAudit(store, session, {
+      module: "Internal Delivery Order",
+      docNomor: nomor,
+      action: "Hapus",
+      detail: `Dihapus oleh ${session.nama}`
+    });
+  };
   const deleteInternalDO = async d => {
     const isConfirmed = d.statusKonfirmasi === "Diterima Workshop";
     const msg = isConfirmed ? `Hapus Internal DO ${d.nomor}? Catatan: stock yang sudah ditambahkan saat konfirmasi Workshop TIDAK otomatis dikurangi — sesuaikan stock secara manual di Master Part bila perlu.` : `Hapus Internal DO ${d.nomor}?`;
-    if (!await askConfirm(msg)) return;
-    // Functional form — see confirmWorkshopReceipt note above (silent-overwrite fix, 2026-08-19).
-    setInternalDOs(prev => prev.filter(x => x.nomor !== d.nomor));
-    logAudit(store, session, {
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
       module: "Internal Delivery Order",
-      docNomor: d.nomor,
-      action: "Hapus",
-      detail: `Dihapus oleh ${session.nama}`
+      targetId: d.nomor,
+      targetLabel: d.nomor,
+      payload: d,
+      confirmMsg: msg,
+      onDeleteNow: () => deleteInternalDOByNomor(d.nomor)
     });
   };
   return /*#__PURE__*/React.createElement("div", {
@@ -21725,7 +22163,19 @@ function GoodsReceiptModule({
       fontSize: 12,
       color: theme.muted
     }
-  }, "Alur 3 tahap: (1) PO SIAP DITERIMA — pilih barang yang diterima di Head Office atau langsung di Workshop; (2) INTERNAL DELIVERY ORDER — Workshop pilih & konfirmasi barang yang benar-benar sudah sampai (bisa bertahap/sebagian); (3) DAFTAR PENERIMAAN BARANG FINAL — data final yang mengisi stock Master Part."), /*#__PURE__*/React.createElement(Input, {
+  }, "Alur 3 tahap: (1) PO SIAP DITERIMA — pilih barang yang diterima di Head Office atau langsung di Workshop; (2) INTERNAL DELIVERY ORDER — Workshop pilih & konfirmasi barang yang benar-benar sudah sampai (bisa bertahap/sebagian); (3) DAFTAR PENERIMAAN BARANG FINAL — data final yang mengisi stock Master Part."), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Penerimaan Barang",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setGoodsReceipts(prev => prev.filter(x => x.nomor !== payload.nomor))
+  }), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Internal Delivery Order",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => deleteInternalDOByNomor(payload.nomor)
+  }), /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari no. PO / no. penerimaan / supplier / part number / nama part / mekanik...",
     value: search,
     onChange: setSearch
@@ -21863,56 +22313,67 @@ function GoodsReceiptModule({
     onEdit: isJhon || isOwnerLike ? i => openEditGR(goodsReceiptsFiltered[i]) : undefined,
     onDelete: isOwnerLike ? async i => {
       const g = goodsReceiptsFiltered[i];
-      if (!await askConfirm(`Hapus data penerimaan ${g.nomor}? Catatan: stock yang sudah masuk dari penerimaan ini TIDAK otomatis dikurangi — sesuaikan stock secara manual di Master Part bila perlu.`)) return;
-      const remainingGRs = goodsReceipts.filter(x => x.nomor !== g.nomor);
-      // Functional form — see saveEditTanggalPO note (silent-overwrite fix, 2026-08-19).
-      setGoodsReceipts(prev => prev.filter(x => x.nomor !== g.nomor));
-      // Recompute the linked PO's receivedMap/status from the remaining receipts (rather than just
-      // subtracting this one) — this is what keeps "sisa qty yang bisa diterima" and the received-status
-      // badges (IR/PO detail) accurate after a Goods Receipt is deleted, instead of leaving the PO
-      // permanently stuck at "Sudah Diterima"/"Diterima Sebagian" even after its receipt is gone.
-      const setPoList = g.poType === "Lokal" ? store.setPoLocal : store.setPoOverseas;
-      const relatedGRs = remainingGRs.filter(gr => gr.poNomor === g.poNomor && gr.poType === g.poType);
-      const newReceivedMap = {};
-      relatedGRs.forEach(gr => {
-        (gr.items || []).forEach(it => {
-          newReceivedMap[it.partNumber] = (newReceivedMap[it.partNumber] || 0) + (it.qtyDiterima || 0);
-        });
-      });
-      // Also count qty still sitting in a not-yet-confirmed Internal DO for this PO — under the
-      // 3-section model, "received so far" = Final receipts + whatever Workshop hasn't confirmed
-      // yet, not just Final receipts alone, so deleting one Final record doesn't wipe out tracking
-      // of a still-pending Internal DO for the same PO.
-      internalDOs.filter(d => d.poNomor === g.poNomor && d.statusKonfirmasi !== "Diterima Workshop").forEach(d => {
-        (d.items || []).forEach(it => {
-          newReceivedMap[it.partNumber] = (newReceivedMap[it.partNumber] || 0) + (it.qty || 0);
-        });
-      });
-      // Functional form — see saveEditTanggalPO note (silent-overwrite fix, 2026-08-19).
-      setPoList(prev => prev.map(p => {
-        if (p.nomor !== g.poNomor) return p;
-        const fullyReceived = (p.items || []).every(it => (newReceivedMap[it.partNumber] || 0) >= it.qty);
-        const anyReceived = Object.keys(newReceivedMap).length > 0;
-        return {
-          ...p,
-          receivedMap: newReceivedMap,
-          status: fullyReceived ? "Sudah Diterima" : anyReceived ? "Diterima Sebagian" : "Disetujui GM - Kirim ke Supplier"
-        };
-      }));
-      // Any Internal DO (Office -> Workshop transfer) created by this receipt that Workshop hasn't
-      // confirmed yet has nothing to confirm anymore — drop it so nobody can later confirm receiving
-      // stock for a receipt that no longer exists. Already-confirmed transfers are left alone since
-      // that stock movement already happened (consistent with not auto-touching Master Part stock here).
-      const pendingIDO = internalDOs.filter(d => d.grNomor === g.nomor && d.statusKonfirmasi !== "Diterima Workshop");
-      if (pendingIDO.length > 0) {
-        // Functional form — see saveEditTanggalPO note (silent-overwrite fix, 2026-08-19).
-        setInternalDOs(prev => prev.filter(d => !(d.grNomor === g.nomor && d.statusKonfirmasi !== "Diterima Workshop")));
-      }
-      logAudit(store, session, {
+      await gatedDelete({
+        isOwnerLike,
+        store,
+        session,
         module: "Penerimaan Barang",
-        docNomor: g.nomor,
-        action: "Hapus",
-        detail: `${g.poNomor}${pendingIDO.length > 0 ? " — Internal DO terkait (belum dikonfirmasi Workshop) ikut dibatalkan" : ""}`
+        targetId: g.nomor,
+        targetLabel: g.nomor,
+        payload: g,
+        confirmMsg: `Hapus data penerimaan ${g.nomor}? Catatan: stock yang sudah masuk dari penerimaan ini TIDAK otomatis dikurangi — sesuaikan stock secara manual di Master Part bila perlu.`,
+        onDeleteNow: () => {
+          const remainingGRs = goodsReceipts.filter(x => x.nomor !== g.nomor);
+          // Functional form — see saveEditTanggalPO note (silent-overwrite fix, 2026-08-19).
+          setGoodsReceipts(prev => prev.filter(x => x.nomor !== g.nomor));
+          // Recompute the linked PO's receivedMap/status from the remaining receipts (rather than just
+          // subtracting this one) — this is what keeps "sisa qty yang bisa diterima" and the received-status
+          // badges (IR/PO detail) accurate after a Goods Receipt is deleted, instead of leaving the PO
+          // permanently stuck at "Sudah Diterima"/"Diterima Sebagian" even after its receipt is gone.
+          const setPoList = g.poType === "Lokal" ? store.setPoLocal : store.setPoOverseas;
+          const relatedGRs = remainingGRs.filter(gr => gr.poNomor === g.poNomor && gr.poType === g.poType);
+          const newReceivedMap = {};
+          relatedGRs.forEach(gr => {
+            (gr.items || []).forEach(it => {
+              newReceivedMap[it.partNumber] = (newReceivedMap[it.partNumber] || 0) + (it.qtyDiterima || 0);
+            });
+          });
+          // Also count qty still sitting in a not-yet-confirmed Internal DO for this PO — under the
+          // 3-section model, "received so far" = Final receipts + whatever Workshop hasn't confirmed
+          // yet, not just Final receipts alone, so deleting one Final record doesn't wipe out tracking
+          // of a still-pending Internal DO for the same PO.
+          internalDOs.filter(d => d.poNomor === g.poNomor && d.statusKonfirmasi !== "Diterima Workshop").forEach(d => {
+            (d.items || []).forEach(it => {
+              newReceivedMap[it.partNumber] = (newReceivedMap[it.partNumber] || 0) + (it.qty || 0);
+            });
+          });
+          // Functional form — see saveEditTanggalPO note (silent-overwrite fix, 2026-08-19).
+          setPoList(prev => prev.map(p => {
+            if (p.nomor !== g.poNomor) return p;
+            const fullyReceived = (p.items || []).every(it => (newReceivedMap[it.partNumber] || 0) >= it.qty);
+            const anyReceived = Object.keys(newReceivedMap).length > 0;
+            return {
+              ...p,
+              receivedMap: newReceivedMap,
+              status: fullyReceived ? "Sudah Diterima" : anyReceived ? "Diterima Sebagian" : "Disetujui GM - Kirim ke Supplier"
+            };
+          }));
+          // Any Internal DO (Office -> Workshop transfer) created by this receipt that Workshop hasn't
+          // confirmed yet has nothing to confirm anymore — drop it so nobody can later confirm receiving
+          // stock for a receipt that no longer exists. Already-confirmed transfers are left alone since
+          // that stock movement already happened (consistent with not auto-touching Master Part stock here).
+          const pendingIDO = internalDOs.filter(d => d.grNomor === g.nomor && d.statusKonfirmasi !== "Diterima Workshop");
+          if (pendingIDO.length > 0) {
+            // Functional form — see saveEditTanggalPO note (silent-overwrite fix, 2026-08-19).
+            setInternalDOs(prev => prev.filter(d => !(d.grNomor === g.nomor && d.statusKonfirmasi !== "Diterima Workshop")));
+          }
+          logAudit(store, session, {
+            module: "Penerimaan Barang",
+            docNomor: g.nomor,
+            action: "Hapus",
+            detail: `${g.poNomor}${pendingIDO.length > 0 ? " — Internal DO terkait (belum dikonfirmasi Workshop) ikut dibatalkan" : ""}`
+          });
+        }
       });
     } : undefined,
     emptyMsg: "Belum ada penerimaan barang"
@@ -23089,7 +23550,13 @@ function PartsUseModule({
       status: pu.status,
       alasanReturn: pu.returnReason || "-"
     })), "Parts_Use.xlsx", "Parts Use")
-  })), /*#__PURE__*/React.createElement(Input, {
+  })), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Parts Use",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setPartsUse(prev => prev.filter(x => x.nomor !== payload.nomor))
+  }), /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari no. parts use / no. SO / nama client / mekanik / part number / nama part...",
     value: search,
     onChange: setSearch
@@ -23169,13 +23636,24 @@ function PartsUseModule({
     }, pu.status)]),
     onDelete: isOwnerLike ? async i => {
       const pu = partsUseOngoing[i];
-      if (!await askConfirm(`Hapus data Parts Use ${pu.nomor}? Catatan: stock yang sudah terpakai TIDAK otomatis dikembalikan — sesuaikan stock secara manual bila perlu.`)) return;
-      setPartsUse(prev => prev.filter(x => x.nomor !== pu.nomor));
-      logAudit(store, session, {
+      await gatedDelete({
+        isOwnerLike,
+        store,
+        session,
         module: "Parts Use",
-        docNomor: pu.nomor,
-        action: "Hapus",
-        detail: pu.soNomor
+        targetId: pu.nomor,
+        targetLabel: pu.nomor,
+        payload: pu,
+        confirmMsg: `Hapus data Parts Use ${pu.nomor}? Catatan: stock yang sudah terpakai TIDAK otomatis dikembalikan — sesuaikan stock secara manual bila perlu.`,
+        onDeleteNow: () => {
+          setPartsUse(prev => prev.filter(x => x.nomor !== pu.nomor));
+          logAudit(store, session, {
+            module: "Parts Use",
+            docNomor: pu.nomor,
+            action: "Hapus",
+            detail: pu.soNomor
+          });
+        }
       });
     } : undefined,
     emptyMsg: "Belum ada Parts Use ON GOING"
@@ -23200,13 +23678,24 @@ function PartsUseModule({
     }, pu.status)]),
     onDelete: isOwnerLike ? async i => {
       const pu = partsUseDone[i];
-      if (!await askConfirm(`Hapus data Parts Use ${pu.nomor}? Catatan: stock yang sudah terpakai TIDAK otomatis dikembalikan — sesuaikan stock secara manual bila perlu.`)) return;
-      setPartsUse(prev => prev.filter(x => x.nomor !== pu.nomor));
-      logAudit(store, session, {
+      await gatedDelete({
+        isOwnerLike,
+        store,
+        session,
         module: "Parts Use",
-        docNomor: pu.nomor,
-        action: "Hapus",
-        detail: pu.soNomor
+        targetId: pu.nomor,
+        targetLabel: pu.nomor,
+        payload: pu,
+        confirmMsg: `Hapus data Parts Use ${pu.nomor}? Catatan: stock yang sudah terpakai TIDAK otomatis dikembalikan — sesuaikan stock secara manual bila perlu.`,
+        onDeleteNow: () => {
+          setPartsUse(prev => prev.filter(x => x.nomor !== pu.nomor));
+          logAudit(store, session, {
+            module: "Parts Use",
+            docNomor: pu.nomor,
+            action: "Hapus",
+            detail: pu.soNomor
+          });
+        }
       });
     } : undefined,
     emptyMsg: "Belum ada Parts Use DONE"
@@ -23630,7 +24119,13 @@ function DeliveryOrderModule({
       borderRadius: 8,
       border: `1px dashed ${theme.border}`
     }
-  }, "🔒 Description part bersifat internal — tidak ditampilkan di Delivery Order yang diserahkan ke client."), /*#__PURE__*/React.createElement(Input, {
+  }, "🔒 Description part bersifat internal — tidak ditampilkan di Delivery Order yang diserahkan ke client."), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Delivery Order",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setDeliveryOrders(prev => prev.filter(x => x.nomor !== payload.nomor))
+  }), /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari no. DO / no. SO / client / driver / ekspedisi / part number / nama part...",
     value: search,
     onChange: setSearch
@@ -23704,13 +24199,24 @@ function DeliveryOrderModule({
     onEdit: i => canEditDO(deliveryOrdersFiltered[i]) ? openEditDO(deliveryOrdersFiltered[i]) : alert("Hanya pembuat Delivery Order ini (atau Logistic/Sales Admin/HO) yang bisa mengedit."),
     onDelete: isOwnerLike ? async i => {
       const d = deliveryOrdersFiltered[i];
-      if (!await askConfirm(`Hapus Delivery Order ${d.nomor}?`)) return;
-      setDeliveryOrders(deliveryOrders.filter(x => x !== d));
-      logAudit(store, session, {
+      await gatedDelete({
+        isOwnerLike,
+        store,
+        session,
         module: "Delivery Order",
-        docNomor: d.nomor,
-        action: "Hapus",
-        detail: d.customerNama
+        targetId: d.nomor,
+        targetLabel: d.nomor,
+        payload: d,
+        confirmMsg: `Hapus Delivery Order ${d.nomor}?`,
+        onDeleteNow: () => {
+          setDeliveryOrders(prev => prev.filter(x => x.nomor !== d.nomor));
+          logAudit(store, session, {
+            module: "Delivery Order",
+            docNomor: d.nomor,
+            action: "Hapus",
+            detail: d.customerNama
+          });
+        }
       });
     } : undefined,
     emptyMsg: "Belum ada Delivery Order"
@@ -25059,13 +25565,24 @@ function InvoiceModule({
     onEdit: isFinance || isOwnerLike ? i => openEditInv(filtered[i]) : undefined,
     onDelete: isOwnerLike ? async i => {
       const inv = filtered[i];
-      if (!await askConfirm(`Hapus Invoice ${inv.nomor}?`)) return;
-      setInvoices(invoices.filter(x => x !== inv));
-      logAudit(store, session, {
+      await gatedDelete({
+        isOwnerLike,
+        store,
+        session,
         module: "Invoice",
-        docNomor: inv.nomor,
-        action: "Hapus",
-        detail: inv.customerNama
+        targetId: inv.nomor,
+        targetLabel: inv.nomor,
+        payload: inv,
+        confirmMsg: `Hapus Invoice ${inv.nomor}?`,
+        onDeleteNow: () => {
+          setInvoices(prev => prev.filter(x => x.nomor !== inv.nomor));
+          logAudit(store, session, {
+            module: "Invoice",
+            docNomor: inv.nomor,
+            action: "Hapus",
+            detail: inv.customerNama
+          });
+        }
       });
     } : undefined,
     emptyMsg: "Belum ada invoice"
@@ -25356,7 +25873,13 @@ function InvoiceModule({
   }), (isFinance || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
     onClick: () => setModal(true)
-  }, "+ Buat Invoice Manual"))), /*#__PURE__*/React.createElement("div", {
+  }, "+ Buat Invoice Manual"))), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Invoice",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setInvoices(prev => prev.filter(x => x.nomor !== payload.nomor))
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
       color: theme.muted,
@@ -28866,11 +29389,20 @@ function TicketingModule({
     setModal(true);
   };
   const onDelete = async i => {
-    if (await askConfirm("Hapus tiket ini?")) {
-      const arr = [...tickets];
-      arr.splice(i, 1);
-      setTickets(arr);
-    }
+    const target = tickets[i];
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
+      module: "Tiket Perjalanan",
+      targetId: target.nomor,
+      targetLabel: target.nomor,
+      payload: target,
+      confirmMsg: "Hapus tiket ini?",
+      onDeleteNow: () => {
+        setTickets(prev => prev.filter(x => x.nomor !== target.nomor));
+      }
+    });
   };
   const transportIcon = {
     Pesawat: "✈️",
@@ -28938,7 +29470,13 @@ function TicketingModule({
       setEditIdx(null);
       setModal(true);
     }
-  }, "+ Tambah Tiket"))), /*#__PURE__*/React.createElement("div", {
+  }, "+ Tambah Tiket"))), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Tiket Perjalanan",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setTickets(prev => prev.filter(x => x.nomor !== payload.nomor))
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
       gridTemplateColumns: "repeat(auto-fill,minmax(200px,1fr))",
@@ -31210,11 +31748,20 @@ function MasterCOAModule({
     setModal(true);
   };
   const onDelete = async i => {
-    if (await askConfirm("Hapus akun COA ini?")) {
-      const a = [...coa];
-      a.splice(i, 1);
-      setCoa(a);
-    }
+    const target = coa[i];
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
+      module: "COA",
+      targetId: target.kode,
+      targetLabel: `${target.kode} - ${target.nama}`,
+      payload: target,
+      confirmMsg: "Hapus akun COA ini?",
+      onDeleteNow: () => {
+        setCoa(prev => prev.filter(x => x.kode !== target.kode));
+      }
+    });
   };
   const doExport = () => exportToExcel(coa.map(c => ({
     kode: c.kode,
@@ -31335,7 +31882,13 @@ function MasterCOAModule({
       fontSize: 12,
       color: theme.muted
     }
-  }, "Akun biaya operasional kantor (listrik, bensin, parkir, dll) — terpisah dari Master Part, tidak terhubung ke Invoice client."), importSummary && /*#__PURE__*/React.createElement("div", {
+  }, "Akun biaya operasional kantor (listrik, bensin, parkir, dll) — terpisah dari Master Part, tidak terhubung ke Invoice client."), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "COA",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setCoa(prev => prev.filter(x => x.kode !== payload.kode))
+  }), importSummary && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 13,
       color: theme.green,
@@ -32718,13 +33271,24 @@ function AttendanceModule({
   };
   const deleteAttendance = async a => {
     if (!isOwnerLike) return alert("Hanya Owner/GM/HRD Payroll yang dapat menghapus data absensi.");
-    if (!await askConfirm(`Hapus data absensi ${a.tanggal} (${(employees.find(e => e.username === a.username) || {}).nama || a.username})?`)) return;
-    setAttendance(attendance.filter(x => x.id !== a.id));
-    logAudit(store, session, {
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
       module: "Absensi",
-      docNomor: a.id,
-      action: "Hapus",
-      detail: `${a.tanggal} — ${a.status}`
+      targetId: a.id,
+      targetLabel: `${a.tanggal} - ${(employees.find(e => e.username === a.username) || {}).nama || a.username}`,
+      payload: a,
+      confirmMsg: `Hapus data absensi ${a.tanggal} (${(employees.find(e => e.username === a.username) || {}).nama || a.username})?`,
+      onDeleteNow: () => {
+        setAttendance(prev => prev.filter(x => x.id !== a.id));
+        logAudit(store, session, {
+          module: "Absensi",
+          docNomor: a.id,
+          action: "Hapus",
+          detail: `${a.tanggal} — ${a.status}`
+        });
+      }
     });
   };
   const doExport = () => exportToExcel(myAttendance.map(a => ({
@@ -32811,7 +33375,13 @@ function AttendanceModule({
       setForm(blankAttForm());
       setModal(true);
     }
-  }, "+ Catat Absensi"))), /*#__PURE__*/React.createElement("div", {
+  }, "+ Catat Absensi"))), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Absensi",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setAttendance(prev => prev.filter(x => x.id !== payload.id))
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
       gridTemplateColumns: "repeat(auto-fill,minmax(200px,1fr))",
@@ -33415,6 +33985,7 @@ function RekapMesinPanel({
     mingguanMekanikRoster,
     setMingguanMekanikRoster
   } = store;
+  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "hrd_payroll" || hasAdminModule(session, "attendance");
   const fileInputRef = useRef(null);
   const [rawParsed, setRawParsed] = useState(null); // { periode: {mulai, selesai}, karyawan: [...] }
   const [parsing, setParsing] = useState(false);
@@ -33713,13 +34284,27 @@ function RekapMesinPanel({
     });
   };
   const deletePeriode = async (mulai, selesai) => {
-    if (!await askConfirm(`Hapus semua rekap tersimpan untuk periode ${mulai} s/d ${selesai}?`)) return;
-    setRekapAbsensi(prev => (prev || []).filter(r => !(r.periodeMulai === mulai && r.periodeSelesai === selesai)));
-    logAudit(store, session, {
-      module: "Absensi - Rekap Mesin",
-      docNomor: `${mulai} s/d ${selesai}`,
-      action: "Hapus Periode Rekap",
-      detail: ""
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
+      module: "Rekap Absensi (Periode)",
+      targetId: `${mulai}_${selesai}`,
+      targetLabel: `${mulai} s/d ${selesai}`,
+      payload: {
+        mulai,
+        selesai
+      },
+      confirmMsg: `Hapus semua rekap tersimpan untuk periode ${mulai} s/d ${selesai}?`,
+      onDeleteNow: () => {
+        setRekapAbsensi(prev => (prev || []).filter(r => !(r.periodeMulai === mulai && r.periodeSelesai === selesai)));
+        logAudit(store, session, {
+          module: "Absensi - Rekap Mesin",
+          docNomor: `${mulai} s/d ${selesai}`,
+          action: "Hapus Periode Rekap",
+          detail: ""
+        });
+      }
     });
   };
   // Full reset — wipes every saved Rekap Mesin period so HRD can re-upload/re-input cleanly
@@ -33732,15 +34317,28 @@ function RekapMesinPanel({
       return;
     }
     if (!await askConfirm(`Hapus SEMUA data Rekap Absensi tersimpan (${total} baris, seluruh periode)? Tindakan ini tidak bisa dibatalkan. Payroll & Dashboard Absensi akan kosong sampai data baru diinput ulang.`)) return;
-    if (!await askConfirm("Konfirmasi sekali lagi: benar-benar hapus SEMUA data Rekap Absensi?")) return;
-    setRekapAbsensi([]);
-    logAudit(store, session, {
-      module: "Absensi - Rekap Mesin",
-      docNomor: "-",
-      action: "Hapus SEMUA Data Rekap",
-      detail: `${total} baris rekap dihapus, siap input ulang dari Rekap Mesin`
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
+      module: "Rekap Absensi (Semua)",
+      targetId: "ALL",
+      targetLabel: `Seluruh Rekap Absensi (${total} baris)`,
+      payload: {
+        total
+      },
+      confirmMsg: "Konfirmasi sekali lagi: benar-benar hapus SEMUA data Rekap Absensi?",
+      onDeleteNow: () => {
+        setRekapAbsensi([]);
+        logAudit(store, session, {
+          module: "Absensi - Rekap Mesin",
+          docNomor: "-",
+          action: "Hapus SEMUA Data Rekap",
+          detail: `${total} baris rekap dihapus, siap input ulang dari Rekap Mesin`
+        });
+        alert("Semua data Rekap Absensi telah dihapus.");
+      }
     });
-    alert("Semua data Rekap Absensi telah dihapus.");
   };
   // ════════════════════════════════════════════════════════════════════════
   // LAPORAN MINGGUAN MEKANIK (Kamis–Rabu) — replaces the old per-day "Harian"
@@ -33846,7 +34444,19 @@ function RekapMesinPanel({
       flexDirection: "column",
       gap: 20
     }
-  }, /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+  }, /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Rekap Absensi (Periode)",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setRekapAbsensi(prev => (prev || []).filter(r => !(r.periodeMulai === payload.mulai && r.periodeSelesai === payload.selesai)))
+  }), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Rekap Absensi (Semua)",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: () => setRekapAbsensi([])
+  }), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
     style: {
       margin: "0 0 10px",
       color: theme.text,
@@ -35505,11 +36115,24 @@ function KPISalesModule({
     setAddRosterName("");
   };
   const removeFromKpiRoster = async nama => {
-    if (!await askConfirm(`Hapus ${nama} dari daftar KPI Sales? (Role/akses login tidak berubah.)`)) return;
-    setKpiSalesRoster(prev => ({
-      extra: (prev?.extra || []).filter(n => n !== nama),
-      excluded: baseRoster.includes(nama) ? [...new Set([...(prev?.excluded || []), nama])] : prev?.excluded || []
-    }));
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
+      module: "KPI Sales Roster",
+      targetId: nama,
+      targetLabel: nama,
+      payload: {
+        nama
+      },
+      confirmMsg: `Hapus ${nama} dari daftar KPI Sales? (Role/akses login tidak berubah.)`,
+      onDeleteNow: () => {
+        setKpiSalesRoster(prev => ({
+          extra: (prev?.extra || []).filter(n => n !== nama),
+          excluded: baseRoster.includes(nama) ? [...new Set([...(prev?.excluded || []), nama])] : prev?.excluded || []
+        }));
+      }
+    });
   };
   return /*#__PURE__*/React.createElement("div", {
     style: {
@@ -35530,7 +36153,16 @@ function KPISalesModule({
       margin: 0,
       color: theme.text
     }
-  }, "KPI Sales"), /*#__PURE__*/React.createElement(ExportExcelBtn, {
+  }, "KPI Sales"), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "KPI Sales Roster",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setKpiSalesRoster(prev => ({
+      extra: (prev?.extra || []).filter(n => n !== payload.nama),
+      excluded: baseRoster.includes(payload.nama) ? [...new Set([...(prev?.excluded || []), payload.nama])] : prev?.excluded || []
+    }))
+  }), /*#__PURE__*/React.createElement(ExportExcelBtn, {
     onClick: () => exportToExcel(stats.map(s => ({
       salesManager: s.nama,
       valueQuotation: s.valueQuotation,
@@ -35977,13 +36609,24 @@ function BankReconModule({
   };
   const deleteEntry = async e => {
     const warn = e.sourceId ? ` Entry ini tersinkron otomatis dari Jurnal (${e.sourceId}) — jika status Lunas di Jurnal diedit lagi, entry ini bisa muncul kembali secara terpisah.` : "";
-    if (!await askConfirm("Hapus entry Rekonsiliasi Bank ini?" + warn)) return;
-    setBankRecon(bankRecon.filter(x => x.id !== e.id));
-    logAudit(store, session, {
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
       module: "Rekonsiliasi Bank",
-      docNomor: e.id,
-      action: "Hapus",
-      detail: `${e.bank} — ${e.keterangan}`
+      targetId: e.id,
+      targetLabel: `${e.bank} - ${e.keterangan}`,
+      payload: e,
+      confirmMsg: "Hapus entry Rekonsiliasi Bank ini?" + warn,
+      onDeleteNow: () => {
+        setBankRecon(prev => prev.filter(x => x.id !== e.id));
+        logAudit(store, session, {
+          module: "Rekonsiliasi Bank",
+          docNomor: e.id,
+          action: "Hapus",
+          detail: `${e.bank} — ${e.keterangan}`
+        });
+      }
     });
   };
   const [search, setSearch] = useState("");
@@ -36014,7 +36657,13 @@ function BankReconModule({
       fontSize: 12,
       color: theme.muted
     }
-  }, "Mencatat mutasi rekening koran per bank. Entry Masuk/Keluar tersinkron otomatis saat entry Jurnal ditandai Lunas via BCA/MANDIRI — CASH tidak memengaruhi saldo di sini."), /*#__PURE__*/React.createElement("div", {
+  }, "Mencatat mutasi rekening koran per bank. Entry Masuk/Keluar tersinkron otomatis saat entry Jurnal ditandai Lunas via BCA/MANDIRI — CASH tidak memengaruhi saldo di sini."), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Rekonsiliasi Bank",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setBankRecon(prev => prev.filter(x => x.id !== payload.id))
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
       gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
@@ -36611,16 +37260,28 @@ function JurnalModule({
     });
     setPayModal(null);
   };
-  const deleteJurnal = async j => {
-    const warn = j.sourceId ? " Entry ini tersinkron otomatis dari " + j.sourceModule + " — jika dokumen sumbernya masih ada, entry ini bisa muncul kembali." : "";
-    if (!await askConfirm("Hapus entry jurnal ini?" + warn)) return;
-    setJurnal(jurnal.filter(x => x.id !== j.id));
-    setBankRecon(bankRecon.filter(b => !(b.sourceModule === "Jurnal" && b.sourceId === j.id)));
+  const cascadeDeleteJurnal = j => {
+    setJurnal(prev => prev.filter(x => x.id !== j.id));
+    setBankRecon(prev => prev.filter(b => !(b.sourceModule === "Jurnal" && b.sourceId === j.id)));
     logAudit(store, session, {
       module: "Jurnal",
       docNomor: j.id,
       action: "Hapus",
       detail: j.keterangan
+    });
+  };
+  const deleteJurnal = async j => {
+    const warn = j.sourceId ? " Entry ini tersinkron otomatis dari " + j.sourceModule + " — jika dokumen sumbernya masih ada, entry ini bisa muncul kembali." : "";
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
+      module: "Jurnal",
+      targetId: j.id,
+      targetLabel: j.keterangan || j.id,
+      payload: j,
+      confirmMsg: "Hapus entry jurnal ini?" + warn,
+      onDeleteNow: () => cascadeDeleteJurnal(j)
     });
   };
   const [jurnalSearch, setJurnalSearch] = useState("");
@@ -36671,7 +37332,13 @@ function JurnalModule({
       margin: 0,
       color: theme.text
     }
-  }, "Jurnal"), /*#__PURE__*/React.createElement("div", {
+  }, "Jurnal"), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Jurnal",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => cascadeDeleteJurnal(payload)
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
@@ -37259,12 +37926,23 @@ function WorkshopOpsModule({
     setEditingExpenseId(e.id);
     setModal(true);
   };
+  const deleteExpenseById = id => {
+    setWorkshopOpsExpenses(prev => prev.filter(x => x.id !== id));
+  };
   const onDeleteExpense = async i => {
     const e = periodItems[i];
     if (!canEditEntry(e)) return alert("Anda hanya dapat menghapus pengeluaran yang Anda input sendiri.");
-    if (await askConfirm("Hapus pengeluaran ini?")) {
-      setWorkshopOpsExpenses(workshopOpsExpenses.filter(x => x.id !== e.id));
-    }
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
+      module: "Pengeluaran Workshop",
+      targetId: e.id,
+      targetLabel: `${e.tanggal} — ${e.kategoriLabel || e.kategori} (${fmt(e.nominal)})`,
+      payload: e,
+      confirmMsg: "Hapus pengeluaran ini?",
+      onDeleteNow: () => deleteExpenseById(e.id)
+    });
   };
   // Bulk-mark every expense in a given weekly (Thu-Wed) period as paid/unpaid at once — the recap
   // is what actually gets settled/paid to the team, not each individual line item.
@@ -37400,7 +38078,13 @@ function WorkshopOpsModule({
     }), "Workshop_Ops.xlsx", "Workshop Ops")
   }), /*#__PURE__*/React.createElement(Btn, {
     onClick: () => setModal(true)
-  }, "+ Catat Pengeluaran"))), /*#__PURE__*/React.createElement("p", {
+  }, "+ Catat Pengeluaran"))), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Pengeluaran Workshop",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => deleteExpenseById(payload.id)
+  }), /*#__PURE__*/React.createElement("p", {
     style: {
       margin: 0,
       fontSize: 12,
@@ -38021,11 +38705,22 @@ function MasterMillModule({
     setEditIdx(mills.indexOf(filtered[i]));
     setModal(true);
   };
+  const deleteMillByName = millName => {
+    setMills(prev => prev.filter(m => m.millName !== millName));
+  };
   const onDelete = async i => {
-    if (!await askConfirm("Hapus lokasi mill ini?")) return;
-    const a = [...mills];
-    a.splice(mills.indexOf(filtered[i]), 1);
-    setMills(a);
+    const m = filtered[i];
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
+      module: "Master Mill",
+      targetId: m.millName,
+      targetLabel: m.millName,
+      payload: m,
+      confirmMsg: "Hapus lokasi mill ini?",
+      onDeleteNow: () => deleteMillByName(m.millName)
+    });
   };
   const save = () => {
     if (!form.millName) return alert("Nama Mill wajib diisi");
@@ -38073,7 +38768,13 @@ function MasterMillModule({
     onClick: () => downloadTemplate(MILL_TEMPLATE_HEADERS, "Template_Master_Mill.xlsx")
   }, "📄 Template"), canEdit && /*#__PURE__*/React.createElement(Btn, {
     onClick: openCreate
-  }, "+ Tambah Lokasi Mill"))), importSummary && /*#__PURE__*/React.createElement("div", {
+  }, "+ Tambah Lokasi Mill"))), /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "Master Mill",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => deleteMillByName(payload.millName)
+  }), importSummary && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 13,
       color: theme.green,
