@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-21.2";
+const APP_BUILD = "2026-08-21.3";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -3135,7 +3135,13 @@ function submitEditRequest(store, session, {
     tanggal: today(),
     status: `Menunggu Approval ${approverLabel}`
   };
-  store.setEditRequests(prevReqs => [...prevReqs, req]);
+  // Pruned on write same as logAudit (see PRUNE_RETENTION_DAYS comment above) — anything still
+  // "Menunggu Approval ..." is kept regardless of age no matter how long GM takes to get to it;
+  // only already-decided (Disetujui/Ditolak) requests older than the retention window are dropped.
+  store.setEditRequests(prevReqs => pruneOldEntries([...prevReqs, req], {
+    dateField: "tanggal",
+    keepIf: r => String(r.status || "").startsWith("Menunggu")
+  }));
   // Log the submission itself (not just the eventual approve/reject) so Audit Trail shows
   // every creation/edit attempt as it happens, not only once GM has decided on it.
   logAudit(store, session, {
@@ -3199,7 +3205,11 @@ function PendingHapusCard({
   session,
   applyDelete
 }) {
-  const pending = (editRequests || []).filter(r => r.module === module && r.action === "Hapus" && r.status === "Menunggu Approval GM");
+  // PERF FIX (2026-08-21): this re-scanned the full editRequests array on every render of every
+  // module that mounts a PendingHapusCard (30+ call sites). Now memoized on [editRequests, module]
+  // so it only recomputes when the underlying requests actually changed, not on every unrelated
+  // re-render (e.g. typing in a search box elsewhere on the same page).
+  const pending = React.useMemo(() => (editRequests || []).filter(r => r.module === module && r.action === "Hapus" && r.status === "Menunggu Approval GM"), [editRequests, module]);
   if (pending.length === 0) return null;
   const approve = req => {
     applyDelete(req.payload, req);
@@ -3275,6 +3285,24 @@ function PendingHapusCard({
 
 // Global audit log helper — call this whenever an approval/rejection decision happens.
 // Usage: logAudit(store, session, { module: "Quotation Unit", docNomor: q.nomor, action: "Approve", detail: "..." })
+// PERF FIX (2026-08-21): erp_audit_log and erp_edit_requests are both CAS_PILOT_KEYS (cheap
+// single-round-trip writes), but neither had any pruning — every entry ever written was loaded
+// in full on EVERY page load, regardless of module, forever. This is exactly the kind of
+// ever-growing per-render/per-load cost flagged in the earlier code review as a lag contributor,
+// and got worse this session since erp_edit_requests now receives a "Hapus" entry from every
+// non-owner delete app-wide (previously just Master Part/Database Client). Both logAudit() and
+// submitEditRequest() now trim on write: keep everything from the last PRUNE_RETENTION_DAYS,
+// plus (for edit requests specifically) always keep anything still "Menunggu Approval ..." no
+// matter how old, so a slow-to-review request can never be silently deleted out from under GM.
+const PRUNE_RETENTION_DAYS = 180;
+function pruneOldEntries(arr, { keepIf, dateField = "timestamp" } = {}) {
+  const cutoff = Date.now() - PRUNE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  return (arr || []).filter(e => {
+    if (keepIf && keepIf(e)) return true;
+    const ts = e[dateField] ? Date.parse(e[dateField]) : NaN;
+    return isNaN(ts) || ts >= cutoff;
+  });
+}
 function logAudit(store, session, {
   module,
   docNomor,
@@ -3299,7 +3327,7 @@ function logAudit(store, session, {
   // writer's entry entirely. Root-caused after a leave request ("Ajukan Cuti") audit trail for one
   // user was found completely missing (not even a stale copy) while another user's concurrent
   // Form Cuti actions logged fine — re-fetching immediately before appending closes that window.
-  store.setAuditLog(prev => [...prev, entry]);
+  store.setAuditLog(prev => pruneOldEntries([...prev, entry]));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
