@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-26.3";
+const APP_BUILD = "2026-08-26.4";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -1019,9 +1019,21 @@ function hitungKoreksiAbsensi(karyawan, hariLibur, penyesuaian) {
     // undercount bug (2026-08-19). Moved above otherLeave so riilEdit/absenEdit's day-pool math
     // naturally accounts for it too.
     const setengahHariEdit = numOrNull(p.setengahHari) || 0;
-    const ijinEdit = (numOrNull(p.ijin) ?? k.ijin) + setengahHariEdit * 0.5;
+    const ijinRaw = numOrNull(p.ijin) ?? k.ijin;
+    // ijinEdit (saved/reported Ijin total, feeds annual Ijin-quota tracking) keeps the ×0.5 weighting —
+    // a half-day Ijin should only consume half a day of annual Ijin quota.
+    const ijinEdit = ijinRaw + setengahHariEdit * 0.5;
     const sakitEdit = numOrNull(p.sakit) ?? k.sakit;
-    const otherLeave = cutiEdit + cutiKhususEdit + jmlIjinEdit + ijinEdit + sakitEdit;
+    // otherLeave (used below for the Riil/Absen day-pool: riilEdit/absenEdit) instead counts each
+    // setengahHari occurrence as a FULL accounted day (not ×0.5) — because that calendar day, as a
+    // whole, is accounted for (half worked + half Ijin), no different from a full Cuti/Ijin/Sakit day
+    // for "was this day absent?" purposes. Using ×0.5 here left a 0.5-day gap that silently leaked
+    // into absenEdit whenever the fingerprint machine's raw riil count didn't itself also carry a
+    // fractional 0.5 credit for that day — which then broke Uang Kerajinan eligibility (absenHari
+    // === 0) even though the employee was never actually absent, just Ijin setengah hari. Root cause
+    // of "Uang Kerajinan hilang saat ½ hari Ijin" bug (2026-08-26). Uang Makan still gets its correct
+    // 0.5x credit separately (riilEdit + 0.5 * setengahHariEdit), unaffected by this change.
+    const otherLeave = cutiEdit + cutiKhususEdit + jmlIjinEdit + ijinRaw + setengahHariEdit + sakitEdit;
     const normalOverride = numOrNull(p.normalOverride);
     const fullDinasLuar = dLuar > 0 && dLuar >= k.normal;
     const normalEdit = normalOverride !== null ? normalOverride : fullDinasLuar ? k.normal : Math.max(0, k.normal - liburNum);
