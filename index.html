@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-26.4";
+const APP_BUILD = "2026-08-26.5";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -16372,8 +16372,24 @@ function SalesOrderModule({
   // Master Unit BOM this SO was built from has been revised since creation (see bomRevisedUnits).
   // Never blocks anything — purely informational, so the user knows to check whether downstream
   // IR/PO still match the current BOM.
+  // PERF FIX (module still laggy after the prior soOnGoingList/soToPOList/soCompletedList memo):
+  // soLabel is called once per SO row on every render of the WHOLE module — and this component
+  // re-renders on EVERY keystroke in any of its own forms (shipForm/editForm/soTopForm/search/etc)
+  // and on every modal open/close, since they're all state on this one component. It called
+  // bomRevisedUnits(), which does an Object.keys().filter() over the SO's bomSnapshot with a
+  // units.find() per key — an O(bomKeys × units.length) scan repeated for EVERY visible SO row on
+  // EVERY render, regardless of whether salesOrders/units actually changed. Precompute once
+  // (memoized on salesOrders/units only) which SO nomors currently have a revised BOM, then just
+  // look it up per row instead of rescanning.
+  const revisedBomSONomors = React.useMemo(() => {
+    const set = new Set();
+    salesOrders.forEach(so => {
+      if (bomRevisedUnits(so.bomSnapshot, units).length > 0) set.add(so.nomor);
+    });
+    return set;
+  }, [salesOrders, units]);
   const soLabel = so => {
-    const revised = bomRevisedUnits(so.bomSnapshot, units).length > 0;
+    const revised = revisedBomSONomors.has(so.nomor);
     return (so.cascadeAlert ? "⚠ " : "") + (revised ? "🔧 " : "") + so.nomor;
   };
   const [detail, setDetail] = useState(null);
@@ -16669,11 +16685,32 @@ function SalesOrderModule({
   // (see its definition near findQuotationForSO) — mirrors the identical fix in
   // QuotationUnit/QuotationPS list components, all three now calling the same function.
   const quotItemKey = it => it.partNumber && it.partNumber !== "-" ? it.partNumber : `${it.partNumber || ""}::${it.partName || ""}`;
-  const quotPulledItemKeySet = nomor => new Set(salesOrders.filter(so => quotationFamilyNomors(quotationsUnit, quotationsPS, nomor).includes(so.sourceNomor)).flatMap(so => (so.items || []).map(quotItemKey)));
+  // PERF FIX: quotPulledItemKeySet/quotAlreadyHasSO each re-scanned the FULL salesOrders array
+  // (with a nested quotationFamilyNomors scan of ALL quotations inside that scan) for every single
+  // quotation shown in SQ ON GOING — called straight from the render body (not memoized), so this
+  // ran again in full on every re-render of the module, including renders triggered by typing into
+  // an unrelated field (shipForm/editForm/etc) or opening/closing a modal. Precompute both lookup
+  // maps ONCE per actual data change (quotationsUnit/quotationsPS/salesOrders) instead of redoing
+  // the O(quotations × salesOrders) work on every keystroke.
+  const quotPulledItemKeyMap = React.useMemo(() => {
+    const map = new Map();
+    [...quotationsUnit, ...quotationsPS].forEach(q => {
+      map.set(q.nomor, new Set(salesOrders.filter(so => quotationFamilyNomors(quotationsUnit, quotationsPS, q.nomor).includes(so.sourceNomor)).flatMap(so => (so.items || []).map(quotItemKey))));
+    });
+    return map;
+  }, [quotationsUnit, quotationsPS, salesOrders]);
+  const quotHasAnySOMap = React.useMemo(() => {
+    const map = new Map();
+    [...quotationsUnit, ...quotationsPS].forEach(q => {
+      map.set(q.nomor, salesOrders.some(so => quotationFamilyNomors(quotationsUnit, quotationsPS, q.nomor).includes(so.sourceNomor)));
+    });
+    return map;
+  }, [quotationsUnit, quotationsPS, salesOrders]);
+  const quotPulledItemKeySet = nomor => quotPulledItemKeyMap.get(nomor) || new Set(salesOrders.filter(so => quotationFamilyNomors(quotationsUnit, quotationsPS, nomor).includes(so.sourceNomor)).flatMap(so => (so.items || []).map(quotItemKey)));
   const quotUninvoicedItems = q => (q.items || []).filter(it => !quotPulledItemKeySet(q.nomor).has(quotItemKey(it)));
   const quotAlreadyHasSO = q => {
     const nomor = typeof q === "string" ? q : q.nomor;
-    const hasAnySO = salesOrders.some(so => quotationFamilyNomors(quotationsUnit, quotationsPS, nomor).includes(so.sourceNomor));
+    const hasAnySO = quotHasAnySOMap.has(nomor) ? quotHasAnySOMap.get(nomor) : salesOrders.some(so => quotationFamilyNomors(quotationsUnit, quotationsPS, nomor).includes(so.sourceNomor));
     if (!hasAnySO) return false;
     if (typeof q === "string") return true; // fallback: no item detail available, keep old (any-SO) behavior
     return quotUninvoicedItems(q).length === 0;
@@ -16713,15 +16750,28 @@ function SalesOrderModule({
     const latest = members.reduce((a, b) => revNum(b) > revNum(a) ? b : a);
     return latest.nomor === q.nomor;
   };
-  const approvedUnit = quotationsUnit.filter(q => q.status === "Disetujui GM" && !q.dismissedFromSOList && !quotAlreadyHasSO(q) && quotIsLatestRevision(quotationsUnit, q)).filter(q => !pullSearch.trim() || [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(pullSearch.trim().toLowerCase())));
-  const approvedPS = quotationsPS.filter(q => q.status === "Disetujui GM" && !q.dismissedFromSOList && !quotAlreadyHasSO(q) && quotIsLatestRevision(quotationsPS, q)).filter(q => !pullSearch.trim() || [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(pullSearch.trim().toLowerCase())));
+  // PERF FIX: these were plain consts recomputed in full on every render (including renders caused
+  // by typing in an unrelated field elsewhere in this module) — now memoized so they only redo work
+  // when the quotation/SO data or the search box itself actually changes.
+  const approvedUnit = React.useMemo(() => quotationsUnit.filter(q => q.status === "Disetujui GM" && !q.dismissedFromSOList && !quotAlreadyHasSO(q) && quotIsLatestRevision(quotationsUnit, q)).filter(q => !pullSearch.trim() || [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(pullSearch.trim().toLowerCase()))), [quotationsUnit, quotationsPS, salesOrders, pullSearch]);
+  const approvedPS = React.useMemo(() => quotationsPS.filter(q => q.status === "Disetujui GM" && !q.dismissedFromSOList && !quotAlreadyHasSO(q) && quotIsLatestRevision(quotationsPS, q)).filter(q => !pullSearch.trim() || [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(pullSearch.trim().toLowerCase()))), [quotationsUnit, quotationsPS, salesOrders, pullSearch]);
   // Quotations manually marked "Selesai" via dismissQuotFromSOList even though not every item was
   // pulled into an SO (e.g. client never ordered the remaining item) — shown in their own
   // collapsible section with a restore option, mirroring Invoice's SO ONGOING dismiss/restore.
-  const dismissedQuotUnit = quotationsUnit.filter(q => q.dismissedFromSOList && quotIsLatestRevision(quotationsUnit, q));
-  const dismissedQuotPS = quotationsPS.filter(q => q.dismissedFromSOList && quotIsLatestRevision(quotationsPS, q));
+  const dismissedQuotUnit = React.useMemo(() => quotationsUnit.filter(q => q.dismissedFromSOList && quotIsLatestRevision(quotationsUnit, q)), [quotationsUnit]);
+  const dismissedQuotPS = React.useMemo(() => quotationsPS.filter(q => q.dismissedFromSOList && quotIsLatestRevision(quotationsPS, q)), [quotationsPS]);
   const soSearch = search;
-  const salesOrdersFiltered = (soSearch.trim() ? salesOrders.filter(so => [so.nomor, so.customerNama, so.salesManagerNama, so.sourceNomor].filter(Boolean).some(x => String(x).toLowerCase().includes(soSearch.trim().toLowerCase()))) : salesOrders).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  // PERF FIX (root cause of the "already fixed" soOnGoingList/soToPOList/soCompletedList memo not
+  // actually helping): salesOrdersFiltered used to be a plain const rebuilt via .filter().slice()
+  // .sort() on every single render — even renders where salesOrders/soSearch hadn't changed at all
+  // (e.g. typing into shipForm/editForm, or opening/closing the detail modal). .slice()/.sort()
+  // always return a BRAND NEW array reference, and that new reference was then passed straight into
+  // the useMemo dependency arrays of soOnGoingList/soToPOList/soCompletedList below — so those memos
+  // saw a "changed" dependency on every render and recomputed their full soHasBecomePO/soIsCompleted
+  // scans anyway, silently defeating the whole point of that earlier fix. Memoizing
+  // salesOrdersFiltered itself (on salesOrders/soSearch only) keeps its reference stable across
+  // unrelated re-renders, so the downstream memos can finally actually skip work.
+  const salesOrdersFiltered = React.useMemo(() => (soSearch.trim() ? salesOrders.filter(so => [so.nomor, so.customerNama, so.salesManagerNama, so.sourceNomor].filter(Boolean).some(x => String(x).toLowerCase().includes(soSearch.trim().toLowerCase()))) : salesOrders).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || "")), [salesOrders, soSearch]);
   // PERF FIX (module was slow to open): soHasBecomePO/soIsCompleted/soFullyShipped each scan the
   // full itemRequisitions/poLocal/poOverseas/deliveryOrders/invoices arrays per SO. Below, the exact
   // same `.filter(so => ...)` expression using these was written out separately for count/rows/onEdit/
