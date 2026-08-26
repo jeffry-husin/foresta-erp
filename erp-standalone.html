@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-26.2";
+const APP_BUILD = "2026-08-26.3";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -16710,6 +16710,16 @@ function SalesOrderModule({
   const dismissedQuotPS = quotationsPS.filter(q => q.dismissedFromSOList && quotIsLatestRevision(quotationsPS, q));
   const soSearch = search;
   const salesOrdersFiltered = (soSearch.trim() ? salesOrders.filter(so => [so.nomor, so.customerNama, so.salesManagerNama, so.sourceNomor].filter(Boolean).some(x => String(x).toLowerCase().includes(soSearch.trim().toLowerCase()))) : salesOrders).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  // PERF FIX (module was slow to open): soHasBecomePO/soIsCompleted/soFullyShipped each scan the
+  // full itemRequisitions/poLocal/poOverseas/deliveryOrders/invoices arrays per SO. Below, the exact
+  // same `.filter(so => ...)` expression using these was written out separately for count/rows/onEdit/
+  // onDelete in EACH of the 3 sections (ON GOING / TO PURCHASE ORDER / COMPLETED) — so every render
+  // re-ran the full per-SO scan up to 12 times over instead of once. Computing each bucket exactly
+  // once here (and memoizing so it's skipped entirely when nothing relevant changed, e.g. just
+  // opening/closing a modal) cuts that redundant work out.
+  const soOnGoingList = React.useMemo(() => salesOrdersFiltered.filter(so => !soHasBecomePO(so) && !soIsCompleted(so)), [salesOrdersFiltered, itemRequisitions, poLocal, poOverseas, deliveryOrders, invoices]);
+  const soToPOList = React.useMemo(() => salesOrdersFiltered.filter(so => soHasBecomePO(so) && !soIsCompleted(so)), [salesOrdersFiltered, itemRequisitions, poLocal, poOverseas, deliveryOrders, invoices]);
+  const soCompletedList = React.useMemo(() => salesOrdersFiltered.filter(so => soIsCompleted(so)), [salesOrdersFiltered, deliveryOrders, invoices]);
   // Compute the next number from the max existing sequence in the given (ideally freshly-fetched)
   // array rather than its .length — this avoids both collisions when two users create a record at
   // the same moment (each browser's setter re-fetches fresh data right before merging, so passing
@@ -17085,12 +17095,12 @@ function SalesOrderModule({
     onClick: () => restoreQuotToSOList(q, "Parts/Service")
   }, "↩ Kembalikan ke ON GOING"))))), /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "ON GOING",
-    count: salesOrdersFiltered.filter(so => !soHasBecomePO(so) && !soIsCompleted(so)).length,
+    count: soOnGoingList.length,
     badgeColor: theme.accent,
     storageKey: "so_ongoing"
   }, /*#__PURE__*/React.createElement(Table, {
     headers: ["No. SO", "Tipe", "Rute", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Status", "Selesai"],
-    rows: salesOrdersFiltered.filter(so => !soHasBecomePO(so) && !soIsCompleted(so)).map(so => [/*#__PURE__*/React.createElement("span", {
+    rows: soOnGoingList.map(so => [/*#__PURE__*/React.createElement("span", {
       style: {
         color: theme.accentLight,
         fontWeight: 600,
@@ -17112,17 +17122,17 @@ function SalesOrderModule({
       variant: "ghost",
       onClick: () => openSelesaiModal(so)
     }, "✓ Tandai Selesai")]),
-    onEdit: (isEpy || isOwnerLike) ? i => openEditSO(salesOrdersFiltered.filter(so => !soHasBecomePO(so) && !soIsCompleted(so))[i]) : undefined,
-    onDelete: isOwnerLike ? i => deleteSO(salesOrdersFiltered.filter(so => !soHasBecomePO(so) && !soIsCompleted(so))[i]) : undefined,
+    onEdit: (isEpy || isOwnerLike) ? i => openEditSO(soOnGoingList[i]) : undefined,
+    onDelete: isOwnerLike ? i => deleteSO(soOnGoingList[i]) : undefined,
     emptyMsg: "Belum ada Sales Order on going"
   })), /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "SALES ORDER TO PURCHASE ORDER",
-    count: salesOrdersFiltered.filter(so => soHasBecomePO(so) && !soIsCompleted(so)).length,
+    count: soToPOList.length,
     badgeColor: theme.cyan,
     storageKey: "so_to_po"
   }, /*#__PURE__*/React.createElement(Table, {
     headers: ["No. SO", "Tipe", "Rute", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Status", "Selesai"],
-    rows: salesOrdersFiltered.filter(so => soHasBecomePO(so) && !soIsCompleted(so)).map(so => [/*#__PURE__*/React.createElement("span", {
+    rows: soToPOList.map(so => [/*#__PURE__*/React.createElement("span", {
       style: {
         color: theme.accentLight,
         fontWeight: 600,
@@ -17144,17 +17154,17 @@ function SalesOrderModule({
       variant: "ghost",
       onClick: () => openSelesaiModal(so)
     }, "✓ Tandai Selesai")]),
-    onEdit: (isEpy || isOwnerLike) ? i => openEditSO(salesOrdersFiltered.filter(so => soHasBecomePO(so) && !soIsCompleted(so))[i]) : undefined,
-    onDelete: isOwnerLike ? i => deleteSO(salesOrdersFiltered.filter(so => soHasBecomePO(so) && !soIsCompleted(so))[i]) : undefined,
+    onEdit: (isEpy || isOwnerLike) ? i => openEditSO(soToPOList[i]) : undefined,
+    onDelete: isOwnerLike ? i => deleteSO(soToPOList[i]) : undefined,
     emptyMsg: "Belum ada Sales Order yang sudah menjadi Purchase Order"
   })), /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "SALES ORDER COMPLETED",
-    count: salesOrdersFiltered.filter(so => soIsCompleted(so)).length,
+    count: soCompletedList.length,
     badgeColor: theme.green,
     storageKey: "so_completed"
   }, /*#__PURE__*/React.createElement(Table, {
     headers: ["No. SO", "Tipe", "Rute", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Selesai Via"],
-    rows: salesOrdersFiltered.filter(so => soIsCompleted(so)).map(so => [/*#__PURE__*/React.createElement("span", {
+    rows: soCompletedList.map(so => [/*#__PURE__*/React.createElement("span", {
       style: {
         color: theme.accentLight,
         fontWeight: 600,
@@ -17172,7 +17182,7 @@ function SalesOrderModule({
     }, fulfillmentLabel(so.fulfillmentType))), so.sourceNomor, so.noPoClient || "-", so.tanggal, so.customerNama, fmt(so.total), /*#__PURE__*/React.createElement(Badge, {
       color: theme.green
     }, soSelesaiVia(so))]),
-    onDelete: isOwnerLike ? i => deleteSO(salesOrdersFiltered.filter(so => soIsCompleted(so))[i]) : undefined,
+    onDelete: isOwnerLike ? i => deleteSO(soCompletedList[i]) : undefined,
     emptyMsg: "Belum ada Sales Order yang selesai"
   })), /*#__PURE__*/React.createElement(Modal, {
     open: !!pickQuot,
