@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-21.5";
+const APP_BUILD = "2026-08-26.2";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -13856,7 +13856,13 @@ function QuotationUnit({
   // secondary signal only — so a quotation disappears from ON GOING the moment every one of its
   // items has genuinely been pulled into some SO, regardless of what the status field says.
   const onGoingQ = myQuotations.filter(q => q.status !== "Closed" && !quotAlreadyHasSO(q) && quotIsLatestRevision(quotationsUnit, q));
-  const successQ = myQuotations.filter(q => q.status !== "Closed" && (q.status === "Sudah jadi SO" || quotAlreadyHasSO(q)));
+  // BUG FIX (UQ-024-FRT-VII-2026 / UQ-024-FRT-VII-2026-R1 both showing SUCCESS): quotAlreadyHasSO()
+  // matches against the WHOLE revision family (see quotationFamilyNomors), so once any SO is pulled
+  // from any member of the family, every member — the original AND every revision — satisfies the
+  // check and would show up in QUOTATION SUCCESS simultaneously. onGoingQ above already guards against
+  // this with quotIsLatestRevision so only the latest revision of a family can appear; successQ needs
+  // the identical guard so only the latest revision represents the family as "success" too.
+  const successQ = myQuotations.filter(q => q.status !== "Closed" && (q.status === "Sudah jadi SO" || quotAlreadyHasSO(q)) && quotIsLatestRevision(quotationsUnit, q));
   const closedQ = myQuotations.filter(q => q.status === "Closed");
   const staleQ = onGoingQ.filter(needsFollowUp);
   return /*#__PURE__*/React.createElement("div", {
@@ -15435,7 +15441,10 @@ function QuotationPS({
     return (q.items || []).every(it => pulled.has(qpsItemKeyPS(it)));
   };
   const qpsOnGoing = quotationsPSFiltered.filter(q => q.status !== "Closed" && !quotAlreadyHasSOPS(q) && quotIsLatestRevision(quotationsPS, q));
-  const qpsSuccess = quotationsPSFiltered.filter(q => q.status !== "Closed" && (q.status === "Sudah jadi SO" || quotAlreadyHasSOPS(q)));
+  // Same fix as QuotationUnit's successQ (see UQ-024-FRT-VII-2026 case): quotAlreadyHasSOPS() matches
+  // the whole revision family, so without quotIsLatestRevision both an original and its revision would
+  // show up in QUOTATION SUCCESS at once.
+  const qpsSuccess = quotationsPSFiltered.filter(q => q.status !== "Closed" && (q.status === "Sudah jadi SO" || quotAlreadyHasSOPS(q)) && quotIsLatestRevision(quotationsPS, q));
   const qpsClosed = quotationsPSFiltered.filter(q => q.status === "Closed");
   const qpsStaleQ = qpsOnGoing.filter(needsFollowUp);
   return /*#__PURE__*/React.createElement("div", {
@@ -18838,7 +18847,29 @@ function ItemRequisitionModule({
       gap: 10,
       justifyContent: "flex-end"
     }
-  }, React.createElement(PrintBtn, {
+  }, React.createElement(ExportExcelBtn, {
+    onClick: () => exportToExcel(detail.items.map(it => {
+      const live = liveIrItemStock(it, detail.soNomor);
+      const diterima = irRefInfo(detail).receivedByPart[it.partNumber] || 0;
+      const statusDiterima = diterima <= 0 ? "Belum Diterima" : diterima < (Number(it.qtyButuh) || 0) ? `Sebagian (${diterima}/${it.qtyButuh})` : "Lengkap";
+      return {
+        noIR: detail.nomor,
+        tanggalIR: detail.tanggal,
+        noSO: detail.soNomor || "-",
+        namaClient: detail.soCustomerNama || "-",
+        noPOClient: (salesOrders.find(s => s.nomor === detail.soNomor)?.noPoClient) || "-",
+        status: detail.status,
+        partNumber: it.partNumber,
+        partName: it.partName,
+        deskripsi: it.description || parts.find(p => p.partNumber === it.partNumber)?.description || "-",
+        qtyDibutuhkan: it.qtyButuh,
+        stokTersedia: live.stokTersedia,
+        qtyKurang: live.qtyKurang,
+        catatan: it.catatan || "-",
+        statusDiterima
+      };
+    }), `IR_${detail.nomor}.xlsx`, "Item Requisition")
+  }), React.createElement(PrintBtn, {
     onClick: () => printDocument({
       company: store.companySettings,
       docTitle: "ITEM REQUISITION",
