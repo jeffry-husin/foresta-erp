@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-26.5";
+const APP_BUILD = "2026-08-26.6";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -9351,6 +9351,43 @@ function MekanikReport({
     });
     setEditingUnitLokasi(false);
   };
+  // No. SO — normally set once at Kunjungan creation ("Isi dari Sales Order", opsional), but that
+  // dropdown only lists SOs that already exist. When Workshop has to dispatch a mekanik BEFORE Sales
+  // has formalized the SO (which does happen — job comes in first, paperwork follows), the Kunjungan
+  // gets created with soNomor blank and, until this fix, had NO way to attach the SO once it existed:
+  // every downstream link keyed on soNomor (Document Trail's MR stage, No. IR shown above, Uang Dinas
+  // project tie-in, Komisi) stayed permanently disconnected, making the job look perpetually "not
+  // closed" even though the actual field work was done and marked Selesai. Same edit-in-place pattern
+  // as Jenis Berita Acara / Unit Terkait above, so it can be linked (or re-linked/corrected) any time.
+  const [editingSoNomor, setEditingSoNomor] = useState(false);
+  const [soNomorEditValue, setSoNomorEditValue] = useState("");
+  const startEditSoNomor = () => {
+    setSoNomorEditValue(detailVisit.soNomor || "");
+    setEditingSoNomor(true);
+  };
+  const saveSoNomor = () => {
+    const so = salesOrders.find(s => s.nomor === soNomorEditValue);
+    setVisits(visits.map(x => x.id === detailVisit.id ? {
+      ...x,
+      soNomor: soNomorEditValue,
+      customerNama: so ? so.customerNama : x.customerNama
+    } : x));
+    setDetailVisit(d => d && d.id === detailVisit.id ? {
+      ...d,
+      soNomor: soNomorEditValue,
+      customerNama: so ? so.customerNama : d.customerNama
+    } : d);
+    if (soNomorEditValue && so && ["MR", "BOTH"].includes(so.fulfillmentType)) {
+      ensureUangDinasProject(so.nomor, so.customerNama);
+    }
+    logAudit(store, session, {
+      module: "Mekanik Report",
+      docNomor: detailVisit.id,
+      action: "Edit No. SO",
+      detail: `No. SO: "${detailVisit.soNomor || "-"}" → "${soNomorEditValue || "-"}"`
+    });
+    setEditingSoNomor(false);
+  };
   const [formType, setFormType] = useState(null); // 'dar' | 'partrec' | 'status' | 'bast'
   // Full-screen "page" takeover for DAR / Part Recommendation / Status Report / BAPP — clicking the
   // corresponding button in the Kunjungan Kerja table sets this instead of opening a small modal,
@@ -12242,11 +12279,40 @@ function MekanikReport({
     style: {
       color: theme.muted
     }
-  }, "No. SO:"), " ", /*#__PURE__*/React.createElement("strong", {
+  }, "No. SO:"), " ", editingSoNomor ? /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: soNomorEditValue,
+    onChange: v => {
+      setSoNomorEditValue(v);
+    },
+    options: [{
+      value: "",
+      label: "— Tidak menggunakan Sales Order —"
+    }, ...salesOrders.map(so => ({
+      value: so.nomor,
+      label: `${so.nomor} — ${so.customerNama}`
+    }))]
+  }), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    onClick: saveSoNomor
+  }, "Simpan"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => setEditingSoNomor(false)
+  }, "Batal")) : /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("strong", {
     style: {
       color: theme.text
     }
-  }, detailVisit.soNomor || "-")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+  }, detailVisit.soNomor || "-"), (isOwnerLike || isSepti || isMekanik) && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: startEditSoNomor
+  }, "✏️"))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.muted
     }
