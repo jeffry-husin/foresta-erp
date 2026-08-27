@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-26.6";
+const APP_BUILD = "2026-08-27.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -18617,6 +18617,70 @@ function ItemRequisitionModule({
     setStockRecheckModal(null);
     setDetail(null);
   };
+  // Per-item edit (qty) / delete on an already-created IR — previously the only way to change an
+  // existing IR's items was the whole-form "Revisi" path (Non-SO/BOM-candidate only) or the BOM
+  // recheck/stock recheck diff-and-apply flows. Neither covers "this specific item's qty changed"
+  // or "this item turned out not to be needed" for an SO-linked IR. Mirrors the same guarded-while-
+  // pending pattern as Recheck Stock above (detail.status !== "Sudah di-PO" && canManage) and logs
+  // to Audit Trail the same way.
+  const [editingIRItem, setEditingIRItem] = useState(null); // partNumber currently being qty-edited
+  const [irItemQtyForm, setIrItemQtyForm] = useState("");
+  const startEditIRItemQty = it => {
+    setEditingIRItem(it.partNumber);
+    setIrItemQtyForm(String(it.qtyButuh ?? ""));
+  };
+  const cancelEditIRItemQty = () => {
+    setEditingIRItem(null);
+    setIrItemQtyForm("");
+  };
+  const saveIRItemQty = (ir, partNumber) => {
+    const newQty = parseFloat(irItemQtyForm);
+    if (!(newQty >= 0)) return alert("Qty tidak valid");
+    let oldQty = null;
+    const nextItems = (ir.items || []).map(it => {
+      if (it.partNumber !== partNumber) return it;
+      oldQty = it.qtyButuh;
+      const stok = it.stokTersedia || 0;
+      return {
+        ...it,
+        qtyButuh: newQty,
+        qtyKurang: Math.max(newQty - stok, 0)
+      };
+    });
+    setItemRequisitions(prev => prev.map(r => r.nomor === ir.nomor ? {
+      ...r,
+      items: nextItems
+    } : r));
+    logAudit(store, session, {
+      module: "Item Requisition",
+      docNomor: ir.nomor,
+      action: "Koreksi Qty Item",
+      detail: `${partNumber}: qty ${oldQty} → ${newQty}`
+    });
+    setDetail(d => d && d.nomor === ir.nomor ? {
+      ...d,
+      items: nextItems
+    } : d);
+    cancelEditIRItemQty();
+  };
+  const deleteIRItem = (ir, it) => {
+    if (!window.confirm(`Hapus part ${it.partNumber} — ${it.partName} dari IR ${ir.nomor}? Riwayat PO/GR yang sudah ada untuk part ini tidak akan terhapus.`)) return;
+    const nextItems = (ir.items || []).filter(x => x.partNumber !== it.partNumber);
+    setItemRequisitions(prev => prev.map(r => r.nomor === ir.nomor ? {
+      ...r,
+      items: nextItems
+    } : r));
+    logAudit(store, session, {
+      module: "Item Requisition",
+      docNomor: ir.nomor,
+      action: "Hapus Item (Tidak Dibutuhkan)",
+      detail: `${it.partNumber} — ${it.partName} (qty ${it.qtyButuh})`
+    });
+    setDetail(d => d && d.nomor === ir.nomor ? {
+      ...d,
+      items: nextItems
+    } : d);
+  };
   return React.createElement("div", {
     style: {
       display: "flex",
@@ -18958,28 +19022,71 @@ function ItemRequisitionModule({
     size: "sm",
     variant: "ghost",
     onClick: () => openStockRecheck(detail)
-  }, "📦 Recheck Stock — bandingkan qty kurang dengan stock Master Part saat ini")), React.createElement(Table, {
-    headers: ["Part Number", "Part Name", "Qty Dibutuhkan", "Stok Tersedia", "Qty Kurang", "Catatan", "Status Diterima"],
-    rows: detail.items.map(it => {
-      const diterima = irRefInfo(detail).receivedByPart[it.partNumber] || 0;
-      const live = liveIrItemStock(it, detail.soNomor);
-      const statusBadge = diterima <= 0 ? React.createElement(Badge, {
-        color: theme.red
-      }, "Belum Diterima") : diterima < (Number(it.qtyButuh) || 0) ? React.createElement(Badge, {
-        color: theme.yellow
-      }, `Sebagian (${fmtNum(diterima)}/${fmtNum(it.qtyButuh)})`) : React.createElement(Badge, {
-        color: theme.green
-      }, `✓ Lengkap (${fmtNum(diterima)})`);
-      return [it.partNumber, it.partName, fmtNum(it.qtyButuh), fmtNum(live.stokTersedia), React.createElement("span", {
-        style: {
-          color: theme.red,
-          fontWeight: 600
-        }
-      }, fmtNum(live.qtyKurang)), React.createElement("span", {
-        style: catatanStyle
-      }, it.catatan || "-"), statusBadge];
-    })
-  }), detail && React.createElement("div", {
+  }, "📦 Recheck Stock — bandingkan qty kurang dengan stock Master Part saat ini")), (() => {
+    const canEditItems = canManage && detail.status !== "Sudah di-PO";
+    const headers = ["Part Number", "Part Name", "Qty Dibutuhkan", "Stok Tersedia", "Qty Kurang", "Catatan", "Status Diterima"];
+    if (canEditItems) headers.push("Aksi");
+    return React.createElement(Table, {
+      headers,
+      rows: detail.items.map(it => {
+        const diterima = irRefInfo(detail).receivedByPart[it.partNumber] || 0;
+        const live = liveIrItemStock(it, detail.soNomor);
+        const statusBadge = diterima <= 0 ? React.createElement(Badge, {
+          color: theme.red
+        }, "Belum Diterima") : diterima < (Number(it.qtyButuh) || 0) ? React.createElement(Badge, {
+          color: theme.yellow
+        }, `Sebagian (${fmtNum(diterima)}/${fmtNum(it.qtyButuh)})`) : React.createElement(Badge, {
+          color: theme.green
+        }, `✓ Lengkap (${fmtNum(diterima)})`);
+        const isEditingQty = editingIRItem === it.partNumber;
+        const row = [it.partNumber, it.partName, isEditingQty ? React.createElement("div", {
+          style: {
+            display: "flex",
+            gap: 4,
+            alignItems: "center"
+          }
+        }, React.createElement(Input, {
+          type: "number",
+          value: irItemQtyForm,
+          onChange: setIrItemQtyForm,
+          style: {
+            width: 70
+          }
+        }), React.createElement(Btn, {
+          size: "sm",
+          onClick: () => saveIRItemQty(detail, it.partNumber)
+        }, "✓"), React.createElement(Btn, {
+          size: "sm",
+          variant: "ghost",
+          onClick: cancelEditIRItemQty
+        }, "✕")) : fmtNum(it.qtyButuh), fmtNum(live.stokTersedia), React.createElement("span", {
+          style: {
+            color: theme.red,
+            fontWeight: 600
+          }
+        }, fmtNum(live.qtyKurang)), React.createElement("span", {
+          style: catatanStyle
+        }, it.catatan || "-"), statusBadge];
+        if (canEditItems) row.push(React.createElement("div", {
+          style: {
+            display: "flex",
+            gap: 4
+          }
+        }, !isEditingQty && React.createElement(Btn, {
+          size: "sm",
+          variant: "ghost",
+          title: "Edit Qty",
+          onClick: () => startEditIRItemQty(it)
+        }, "✏️"), React.createElement(Btn, {
+          size: "sm",
+          variant: "danger",
+          title: "Hapus (Tidak Dibutuhkan)",
+          onClick: () => deleteIRItem(detail, it)
+        }, "🗑️")));
+        return row;
+      })
+    });
+  })(), detail && React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
