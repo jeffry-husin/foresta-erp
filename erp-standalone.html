@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-27.1";
+const APP_BUILD = "2026-08-27.3";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -1875,7 +1875,7 @@ function computeBadgeCount(store, session, moduleId) {
       return 0;
     case "financial_dashboard":
       if (["owner", "gm", "finance", "finance_director"].includes(role)) {
-        const ov1 = store.invoices.filter(i => i.statusBayar !== "Lunas" && i.tipePembayaran === "TEMPO" && getDueStatus(i.tipePembayaran, i.tanggalJatuhTempo).label === "Terlambat").length;
+        const ov1 = store.invoices.filter(i => !i.longOverdue && i.statusBayar !== "Lunas" && i.tipePembayaran === "TEMPO" && getDueStatus(i.tipePembayaran, i.tanggalJatuhTempo).label === "Terlambat").length;
         const ov2 = [...store.poLocal, ...store.poOverseas].filter(p => p.statusBayar !== "Sudah Dibayar" && p.tipePembayaran === "TEMPO" && getDueStatus(p.tipePembayaran, p.tanggalJatuhTempo).label === "Terlambat").length;
         return ov1 + ov2;
       }
@@ -5232,6 +5232,7 @@ function Dashboard({
 
   // Due-date reminders for Invoice (receivables) and PO (payables)
   const invoiceReminders = (store.invoices || []).filter(inv => {
+    if (inv.longOverdue) return false; // moved to the dedicated "Long Overdue" section in Invoice module — stop cluttering this widget
     if (inv.statusBayar === "Lunas" || inv.tipePembayaran !== "TEMPO") return false;
     const due = getDueStatus(inv.tipePembayaran, inv.tanggalJatuhTempo);
     return due.label === "Terlambat" || due.label === "Jatuh Tempo Segera";
@@ -6965,7 +6966,7 @@ function MasterUnit({
     open: modal,
     title: editIdx !== null ? "Edit Unit" : "Tambah Unit Baru",
     onClose: () => setModal(false),
-    width: 680
+    width: 900
   }, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -24918,6 +24919,37 @@ function InvoiceModule({
   } = store;
   const isFinance = session.role === "finance" || session.role === "finance_director";
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
+  const canFlagOverdue = isFinance || isOwnerLike;
+  // "Long Overdue" flag — staff can manually park an invoice that's been overdue a long time into
+  // its own section so it stops cluttering the normal Daftar Invoice list and the Dashboard/
+  // Financial Dashboard overdue widgets, without touching its real payment/due-date data (per
+  // Jef's request: too many overdue invoices kept showing up everywhere).
+  const markLongOverdue = inv => {
+    setInvoices(prev => prev.map(x => x.nomor === inv.nomor ? {
+      ...x,
+      longOverdue: true,
+      longOverdueMarkedAt: today(),
+      longOverdueMarkedBy: session.nama
+    } : x));
+    logAudit(store, session, {
+      module: "Invoice",
+      docNomor: inv.nomor,
+      action: "Tandai Long Overdue",
+      detail: `Dipindahkan ke section Long Overdue oleh ${session.nama}`
+    });
+  };
+  const unmarkLongOverdue = inv => {
+    setInvoices(prev => prev.map(x => x.nomor === inv.nomor ? {
+      ...x,
+      longOverdue: false
+    } : x));
+    logAudit(store, session, {
+      module: "Invoice",
+      docNomor: inv.nomor,
+      action: "Batal Tandai Long Overdue",
+      detail: `Dikembalikan ke Daftar Invoice normal oleh ${session.nama}`
+    });
+  };
   // Consolidated into ONE module-wide search bar per Jef's request.
   const [search, setSearch] = useState("");
   // "Detail PO" popup — clicking the No. PO Client reference shows the client's PO number
@@ -25650,7 +25682,11 @@ function InvoiceModule({
     } : x));
     setFakturModal(null);
   };
-  const filteredByStatus = filter === "Semua" ? invoices : invoices.filter(i => i.statusBayar === filter);
+  // Invoices manually flagged Long Overdue live only in their own section below — excluded from
+  // the normal Daftar Invoice list entirely (per Jef: they should only appear in that section).
+  const nonLongOverdueInvoices = invoices.filter(i => !i.longOverdue);
+  const longOverdueInvoices = invoices.filter(i => i.longOverdue).slice().sort((a, b) => (a.tanggalJatuhTempo || "").localeCompare(b.tanggalJatuhTempo || ""));
+  const filteredByStatus = filter === "Semua" ? nonLongOverdueInvoices : nonLongOverdueInvoices.filter(i => i.statusBayar === filter);
   const filtered = (invSearch.trim() ? filteredByStatus.filter(i => [i.nomor, i.soNomor, i.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(invSearch.trim().toLowerCase()))) : filteredByStatus).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const approvalColor = {
     "Menunggu Approval GM": theme.yellow,
@@ -25870,6 +25906,29 @@ function InvoiceModule({
     variant: "success",
     onClick: () => approveSelesaiManual(r)
   }, "✓ Approve")))));
+  const sectionLongOverdue = longOverdueInvoices.length > 0 && /*#__PURE__*/React.createElement(CollapsibleSection, {
+    title: "🚩 Invoice Long Overdue",
+    count: longOverdueInvoices.length,
+    badgeColor: theme.red,
+    storageKey: "inv_long_overdue",
+    defaultOpen: true
+  }, /*#__PURE__*/React.createElement(Table, {
+    headers: ["No. Invoice", "Client", "Total", "Sisa", "Jatuh Tempo", "Ditandai Oleh", "Aksi"],
+    rows: longOverdueInvoices.map(inv => [/*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.accentLight,
+        fontWeight: 600,
+        cursor: "pointer"
+      },
+      onClick: () => setDetail(inv)
+    }, inv.nomor), inv.customerNama, fmt(invoiceDisplayFinancials(inv).total), fmt(invoiceDisplayFinancials(inv).total - (inv.terbayar || 0)), inv.tanggalJatuhTempo || "-", inv.longOverdueMarkedBy ? `${inv.longOverdueMarkedBy} (${inv.longOverdueMarkedAt})` : "-", canFlagOverdue ? /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      title: "Kembalikan ke Daftar Invoice normal",
+      onClick: () => unmarkLongOverdue(inv)
+    }, "↩️ Kembalikan") : "-"]),
+    emptyMsg: "Tidak ada invoice long overdue"
+  }));
   const sectionDaftar = /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "Daftar Invoice",
     count: filtered.length,
@@ -25906,7 +25965,16 @@ function InvoiceModule({
           fontSize: 11,
           color: theme.muted
         }
-      }, inv.tanggalJatuhTempo)) : "-", inv.noFakturPajak ? /*#__PURE__*/React.createElement("span", {
+      }, inv.tanggalJatuhTempo), canFlagOverdue && due.label === "Terlambat" && /*#__PURE__*/React.createElement("div", {
+        style: {
+          marginTop: 4
+        }
+      }, /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "ghost",
+        title: "Pindahkan ke section Long Overdue",
+        onClick: () => markLongOverdue(inv)
+      }, "🚩 Long Overdue"))) : "-", inv.noFakturPajak ? /*#__PURE__*/React.createElement("span", {
         style: {
           color: theme.text
         }
@@ -26250,7 +26318,7 @@ function InvoiceModule({
     placeholder: "Cari no. invoice / no. SO / client...",
     value: search,
     onChange: setSearch
-  }), sectionApprovalGM, sectionApprovalEdit, sectionApprovalSelesaiManual, sectionOngoing, sectionDismissed, sectionPembayaran, sectionDaftar, null, null, /*#__PURE__*/React.createElement(Modal, {
+  }), sectionApprovalGM, sectionApprovalEdit, sectionApprovalSelesaiManual, sectionOngoing, sectionDismissed, sectionPembayaran, sectionLongOverdue, sectionDaftar, null, null, /*#__PURE__*/React.createElement(Modal, {
     open: !!reviewNewInv,
     title: reviewNewInv ? `Detail / Edit Invoice — ${reviewNewInv.nomor}` : "",
     onClose: () => setReviewNewInv(null)
@@ -30768,6 +30836,7 @@ function FinancialDashboardModule({
   const netCashFlow = cashIn - cashOut;
   const nilaiInventory = parts.filter(p => p.stok !== null).reduce((s, p) => s + p.stok * p.hargaBeli, 0);
   const overdueInvoices = invoices.filter(i => {
+    if (i.longOverdue) return false; // moved to the dedicated "Long Overdue" section in Invoice module — stop cluttering this widget
     if (i.statusBayar === "Lunas" || i.tipePembayaran !== "TEMPO") return false;
     return getDueStatus(i.tipePembayaran, i.tanggalJatuhTempo).label === "Terlambat";
   });
