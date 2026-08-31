@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-27.3";
+const APP_BUILD = "2026-08-27.5";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -13731,20 +13731,31 @@ function QuotationUnit({
   // 14 days after approval (or after the last Extend). Sales manager then chooses EXTEND (resets
   // the 14-day timer) or CLOSED (requires a reason; distinct from becoming an SO).
   const needsFollowUp = q => q.status === "Disetujui GM" && daysSince(q.followUpExtendedAt || q.approvedDate || q.tanggal) >= 14;
-  const extendFollowUp = q => {
+  // Extending now requires a reason (per Jef's request) so there's a written record of WHY a
+  // quotation kept dragging on — stored as a running extendHistory array (same pattern as
+  // Maintenance Schedule's extendSchedule) so every extension's date/reason/actor is visible, not
+  // just the latest one.
+  const extendFollowUp = async q => {
+    const reason = await askPrompt("Alasan perpanjangan follow-up 14 hari:");
+    if (!reason || !reason.trim()) return;
     const arr = [...quotationsUnit];
     const newCount = (q.extensionCount || 0) + 1;
     arr[quotationsUnit.indexOf(q)] = {
       ...q,
       followUpExtendedAt: today(),
-      extensionCount: newCount
+      extensionCount: newCount,
+      extendHistory: [...(q.extendHistory || []), {
+        tanggal: today(),
+        alasan: reason.trim(),
+        oleh: session.nama
+      }]
     };
     setQuotationsUnit(arr);
     logAudit(store, session, {
       module: "Unit Quotation",
       docNomor: q.nomor,
       action: "Extend Follow-up",
-      detail: `${q.customerNama} — follow-up diperpanjang 14 hari (perpanjangan ke-${newCount})`
+      detail: `${q.customerNama} — follow-up diperpanjang 14 hari (perpanjangan ke-${newCount}): ${reason.trim()}`
     });
   };
   const closeQuotation = async q => {
@@ -13934,6 +13945,52 @@ function QuotationUnit({
   // GOING/SUCCESS are decided by actual item coverage (quotAlreadyHasSO), with q.status as a
   // secondary signal only — so a quotation disappears from ON GOING the moment every one of its
   // items has genuinely been pulled into some SO, regardless of what the status field says.
+  // Per-section Sales filter + total value footer (per Jef's request) — each of ON GOING / SUCCESS
+  // / CLOSED gets its own independent filter so you can isolate one sales manager's numbers in any
+  // section without affecting the others, plus a running total of what's currently shown.
+  const [salesFilterOngoing, setSalesFilterOngoing] = useState("Semua");
+  const [salesFilterSuccess, setSalesFilterSuccess] = useState("Semua");
+  const [salesFilterClosed, setSalesFilterClosed] = useState("Semua");
+  const allSalesNamesUQ = [...new Set(myQuotationsAll.map(q => q.salesManagerNama).filter(Boolean))].sort();
+  const salesFilterOptions = [{
+    value: "Semua",
+    label: "Semua Sales"
+  }, ...allSalesNamesUQ.map(n => ({
+    value: n,
+    label: n
+  }))];
+  // Duplicate-nomor safety net (found via UQ-001-FRT-IV-2026, Aug 2026): genDocNumber can produce
+  // the same number twice under a rapid-fire race (two submissions landing before either write is
+  // reflected in the other's array snapshot). Since quotAlreadyHasSO() keys off nomor text, a
+  // collision silently corrupts ON GOING/SUCCESS classification for BOTH records involved (a
+  // completely different, still-in-progress quotation can start looking like it's "Sudah jadi SO").
+  // Surfaced here so a superuser can reassign the affected copy to a fresh, unique number in one
+  // click — via the normal setQuotationsUnit save path, same as every other edit in this module.
+  const duplicateNomorGroupsUQ = (() => {
+    const byNomor = {};
+    quotationsUnit.forEach(q => {
+      (byNomor[q.nomor] = byNomor[q.nomor] || []).push(q);
+    });
+    return Object.values(byNomor).filter(g => g.length > 1);
+  })();
+  const fixDuplicateNomorUQ = q => {
+    const newNomorVal = genDocNumber(quotationsUnit, "UQ");
+    if (!window.confirm(`Ubah nomor "${q.nomor}" (${q.customerNama}, ${q.tanggal}) menjadi "${newNomorVal}"? Quotation ini akan berpindah ke nomor barunya di semua daftar.`)) return;
+    const arr = [...quotationsUnit];
+    const idx = quotationsUnit.indexOf(q);
+    const oldNomorVal = q.nomor;
+    arr[idx] = {
+      ...q,
+      nomor: newNomorVal
+    };
+    setQuotationsUnit(arr);
+    logAudit(store, session, {
+      module: "Unit Quotation",
+      docNomor: newNomorVal,
+      action: "Perbaiki Nomor Duplikat",
+      detail: `${q.customerNama} — nomor diubah dari ${oldNomorVal} menjadi ${newNomorVal} (perbaikan duplikat oleh ${session.nama})`
+    });
+  };
   const onGoingQ = myQuotations.filter(q => q.status !== "Closed" && !quotAlreadyHasSO(q) && quotIsLatestRevision(quotationsUnit, q));
   // BUG FIX (UQ-024-FRT-VII-2026 / UQ-024-FRT-VII-2026-R1 both showing SUCCESS): quotAlreadyHasSO()
   // matches against the WHOLE revision family (see quotationFamilyNomors), so once any SO is pulled
@@ -13944,6 +14001,12 @@ function QuotationUnit({
   const successQ = myQuotations.filter(q => q.status !== "Closed" && (q.status === "Sudah jadi SO" || quotAlreadyHasSO(q)) && quotIsLatestRevision(quotationsUnit, q));
   const closedQ = myQuotations.filter(q => q.status === "Closed");
   const staleQ = onGoingQ.filter(needsFollowUp);
+  const onGoingQFiltered = salesFilterOngoing === "Semua" ? onGoingQ : onGoingQ.filter(q => q.salesManagerNama === salesFilterOngoing);
+  const successQFiltered = salesFilterSuccess === "Semua" ? successQ : successQ.filter(q => q.salesManagerNama === salesFilterSuccess);
+  const closedQFiltered = salesFilterClosed === "Semua" ? closedQ : closedQ.filter(q => q.salesManagerNama === salesFilterClosed);
+  const totalValueOngoing = onGoingQFiltered.reduce((s, q) => s + (preTaxQ(q) || 0), 0);
+  const totalValueSuccess = successQFiltered.reduce((s, q) => s + (preTaxQ(q) || 0), 0);
+  const totalValueClosed = closedQFiltered.reduce((s, q) => s + (preTaxQ(q) || 0), 0);
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -14090,7 +14153,50 @@ function QuotationUnit({
       onClick: () => closeQuotation(q)
     }, "🔒 Closed"))]),
     emptyMsg: "Tidak ada quotation yang perlu follow-up"
-  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
+  })), isOwnerLike && duplicateNomorGroupsUQ.length > 0 && /*#__PURE__*/React.createElement(Card, {
+    style: {
+      background: theme.red + "11",
+      border: `1px solid ${theme.red}44`
+    }
+  }, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 4px",
+      color: theme.red,
+      fontSize: 15
+    }
+  }, "⚠ Nomor Quotation Duplikat Terdeteksi"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 12px",
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Dua atau lebih quotation punya nomor yang sama — ini bisa membuat status \"Sudah jadi SO\" salah muncul di quotation lain. Klik \"Beri Nomor Baru\" pada salah satu yang seharusnya punya nomor sendiri (biasanya yang BUKAN sudah jadi SO)."), duplicateNomorGroupsUQ.map((group, gi) => /*#__PURE__*/React.createElement("div", {
+    key: gi,
+    style: {
+      marginBottom: 10,
+      paddingBottom: 10,
+      borderBottom: gi < duplicateNomorGroupsUQ.length - 1 ? `1px solid ${theme.border}` : "none"
+    }
+  }, group.map((q, qi) => /*#__PURE__*/React.createElement("div", {
+    key: qi,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      padding: "6px 0",
+      fontSize: 13
+    }
+  }, /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, q.nomor), " — ", q.customerNama, " (", q.tanggal, ") — ", /*#__PURE__*/React.createElement(Badge, {
+    color: q.status === "Sudah jadi SO" ? theme.green : theme.yellow
+  }, q.status)), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "warning",
+    onClick: () => fixDuplicateNomorUQ(q)
+  }, "🔧 Beri Nomor Baru")))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari no. quotation / client / sales manager...",
     value: quSearch,
     onChange: setQuSearch,
@@ -14099,32 +14205,113 @@ function QuotationUnit({
     }
   })), /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "ON GOING",
-    count: onGoingQ.length,
+    count: onGoingQFiltered.length,
     badgeColor: theme.accent,
     storageKey: "qu_ongoing"
-  }, /*#__PURE__*/React.createElement(Table, {
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: salesFilterOngoing,
+    onChange: setSalesFilterOngoing,
+    options: salesFilterOptions,
+    style: {
+      width: 220
+    }
+  })), /*#__PURE__*/React.createElement(Table, {
     headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total (excl. PPN)", "Status", "Aksi"],
-    rows: onGoingQ.map(buildRow),
+    rows: onGoingQFiltered.map(buildRow),
     emptyMsg: "Tidak ada quotation on going"
-  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      marginTop: 10,
+      fontSize: 14,
+      fontWeight: 600,
+      color: theme.text
+    }
+  }, "Total Value: ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.green,
+      marginLeft: 6
+    }
+  }, fmt(totalValueOngoing)))), /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "QUOTATION SUCCESS (Sudah jadi SO)",
-    count: successQ.length,
+    count: successQFiltered.length,
     badgeColor: theme.cyan,
     storageKey: "qu_success"
-  }, /*#__PURE__*/React.createElement(Table, {
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: salesFilterSuccess,
+    onChange: setSalesFilterSuccess,
+    options: salesFilterOptions,
+    style: {
+      width: 220
+    }
+  })), /*#__PURE__*/React.createElement(Table, {
     headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total (excl. PPN)", "Status", "Aksi"],
-    rows: successQ.map(buildRow),
+    rows: successQFiltered.map(buildRow),
     emptyMsg: "Belum ada quotation yang menjadi SO"
-  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      marginTop: 10,
+      fontSize: 14,
+      fontWeight: 600,
+      color: theme.text
+    }
+  }, "Total Value: ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.green,
+      marginLeft: 6
+    }
+  }, fmt(totalValueSuccess)))), /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "QUOTATION CLOSED",
-    count: closedQ.length,
+    count: closedQFiltered.length,
     badgeColor: theme.muted,
     storageKey: "qu_closed"
-  }, /*#__PURE__*/React.createElement(Table, {
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: salesFilterClosed,
+    onChange: setSalesFilterClosed,
+    options: salesFilterOptions,
+    style: {
+      width: 220
+    }
+  })), /*#__PURE__*/React.createElement(Table, {
     headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total (excl. PPN)", "Status", "Aksi"],
-    rows: closedQ.map(buildRow),
+    rows: closedQFiltered.map(buildRow),
     emptyMsg: "Belum ada quotation yang closed"
-  })), /*#__PURE__*/React.createElement(Modal, {
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      marginTop: 10,
+      fontSize: 14,
+      fontWeight: 600,
+      color: theme.text
+    }
+  }, "Total Value: ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.green,
+      marginLeft: 6
+    }
+  }, fmt(totalValueClosed)))), /*#__PURE__*/React.createElement(Modal, {
     open: !!detail,
     title: `Detail ${detail?.nomor}`,
     onClose: () => setDetail(null),
@@ -15344,20 +15531,28 @@ function QuotationPS({
     });
   };
   const needsFollowUp = q => q.status === "Disetujui GM" && daysSince(q.followUpExtendedAt || q.approvedDate || q.tanggal) >= 14;
-  const extendFollowUp = q => {
+  // Same required-reason + extendHistory pattern as Unit Quotation — see comment there.
+  const extendFollowUp = async q => {
+    const reason = await askPrompt("Alasan perpanjangan follow-up 14 hari:");
+    if (!reason || !reason.trim()) return;
     const arr = [...quotationsPS];
     const newCount = (q.extensionCount || 0) + 1;
     arr[quotationsPS.indexOf(q)] = {
       ...q,
       followUpExtendedAt: today(),
-      extensionCount: newCount
+      extensionCount: newCount,
+      extendHistory: [...(q.extendHistory || []), {
+        tanggal: today(),
+        alasan: reason.trim(),
+        oleh: session.nama
+      }]
     };
     setQuotationsPS(arr);
     logAudit(store, session, {
       module: "Parts & Service Quotation",
       docNomor: q.nomor,
       action: "Extend Follow-up",
-      detail: `${q.customerNama} — follow-up diperpanjang 14 hari (perpanjangan ke-${newCount})`
+      detail: `${q.customerNama} — follow-up diperpanjang 14 hari (perpanjangan ke-${newCount}): ${reason.trim()}`
     });
   };
   const closeQuotationPS = async q => {
@@ -15526,6 +15721,24 @@ function QuotationPS({
   const qpsSuccess = quotationsPSFiltered.filter(q => q.status !== "Closed" && (q.status === "Sudah jadi SO" || quotAlreadyHasSOPS(q)) && quotIsLatestRevision(quotationsPS, q));
   const qpsClosed = quotationsPSFiltered.filter(q => q.status === "Closed");
   const qpsStaleQ = qpsOnGoing.filter(needsFollowUp);
+  // Per-section Sales filter + total value footer — same pattern as Unit Quotation.
+  const [salesFilterQpsOngoing, setSalesFilterQpsOngoing] = useState("Semua");
+  const [salesFilterQpsSuccess, setSalesFilterQpsSuccess] = useState("Semua");
+  const [salesFilterQpsClosed, setSalesFilterQpsClosed] = useState("Semua");
+  const allSalesNamesQPS = [...new Set(quotationsPS.map(q => q.salesManagerNama).filter(Boolean))].sort();
+  const salesFilterOptionsQPS = [{
+    value: "Semua",
+    label: "Semua Sales"
+  }, ...allSalesNamesQPS.map(n => ({
+    value: n,
+    label: n
+  }))];
+  const qpsOnGoingFiltered = salesFilterQpsOngoing === "Semua" ? qpsOnGoing : qpsOnGoing.filter(q => q.salesManagerNama === salesFilterQpsOngoing);
+  const qpsSuccessFiltered = salesFilterQpsSuccess === "Semua" ? qpsSuccess : qpsSuccess.filter(q => q.salesManagerNama === salesFilterQpsSuccess);
+  const qpsClosedFiltered = salesFilterQpsClosed === "Semua" ? qpsClosed : qpsClosed.filter(q => q.salesManagerNama === salesFilterQpsClosed);
+  const totalValueQpsOngoing = qpsOnGoingFiltered.reduce((s, q) => s + (preTaxQ(q) || 0), 0);
+  const totalValueQpsSuccess = qpsSuccessFiltered.reduce((s, q) => s + (preTaxQ(q) || 0), 0);
+  const totalValueQpsClosed = qpsClosedFiltered.reduce((s, q) => s + (preTaxQ(q) || 0), 0);
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -15683,32 +15896,113 @@ function QuotationPS({
     }
   })), /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "ON GOING",
-    count: qpsOnGoing.length,
+    count: qpsOnGoingFiltered.length,
     badgeColor: theme.accent,
     storageKey: "qps_ongoing"
-  }, /*#__PURE__*/React.createElement(Table, {
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: salesFilterQpsOngoing,
+    onChange: setSalesFilterQpsOngoing,
+    options: salesFilterOptionsQPS,
+    style: {
+      width: 220
+    }
+  })), /*#__PURE__*/React.createElement(Table, {
     headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total (excl. PPN)", "Sumber", "Status", "Aksi"],
-    rows: qpsOnGoing.map(buildRowPS),
+    rows: qpsOnGoingFiltered.map(buildRowPS),
     emptyMsg: "Tidak ada quotation on going"
-  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      marginTop: 10,
+      fontSize: 14,
+      fontWeight: 600,
+      color: theme.text
+    }
+  }, "Total Value: ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.green,
+      marginLeft: 6
+    }
+  }, fmt(totalValueQpsOngoing)))), /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "QUOTATION SUCCESS (Sudah jadi SO)",
-    count: qpsSuccess.length,
+    count: qpsSuccessFiltered.length,
     badgeColor: theme.cyan,
     storageKey: "qps_success"
-  }, /*#__PURE__*/React.createElement(Table, {
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: salesFilterQpsSuccess,
+    onChange: setSalesFilterQpsSuccess,
+    options: salesFilterOptionsQPS,
+    style: {
+      width: 220
+    }
+  })), /*#__PURE__*/React.createElement(Table, {
     headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total (excl. PPN)", "Sumber", "Status", "Aksi"],
-    rows: qpsSuccess.map(buildRowPS),
+    rows: qpsSuccessFiltered.map(buildRowPS),
     emptyMsg: "Belum ada quotation yang menjadi SO"
-  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      marginTop: 10,
+      fontSize: 14,
+      fontWeight: 600,
+      color: theme.text
+    }
+  }, "Total Value: ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.green,
+      marginLeft: 6
+    }
+  }, fmt(totalValueQpsSuccess)))), /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "QUOTATION CLOSED",
-    count: qpsClosed.length,
+    count: qpsClosedFiltered.length,
     badgeColor: theme.muted,
     storageKey: "qps_closed"
-  }, /*#__PURE__*/React.createElement(Table, {
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: salesFilterQpsClosed,
+    onChange: setSalesFilterQpsClosed,
+    options: salesFilterOptionsQPS,
+    style: {
+      width: 220
+    }
+  })), /*#__PURE__*/React.createElement(Table, {
     headers: ["No. Quotation", "Tanggal", "Client", "Sales Manager", "Total (excl. PPN)", "Sumber", "Status", "Aksi"],
-    rows: qpsClosed.map(buildRowPS),
+    rows: qpsClosedFiltered.map(buildRowPS),
     emptyMsg: "Belum ada quotation yang closed"
-  })), /*#__PURE__*/React.createElement(Modal, {
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      marginTop: 10,
+      fontSize: 14,
+      fontWeight: 600,
+      color: theme.text
+    }
+  }, "Total Value: ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.green,
+      marginLeft: 6
+    }
+  }, fmt(totalValueQpsClosed)))), /*#__PURE__*/React.createElement(Modal, {
     open: pullModal,
     title: "Pilih Part Recommendation dari Mekanik",
     onClose: () => setPullModal(false),
