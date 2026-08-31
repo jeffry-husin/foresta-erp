@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-27.5";
+const APP_BUILD = "2026-08-27.6";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -13369,7 +13369,15 @@ function QuotationUnit({
     noRek: ""
   });
   const [quSearch, setQuSearch] = useState("");
-  const myQuotationsAll = isOwnerLike ? quotationsUnit : quotationsUnit.filter(q => q.salesManagerUsername === session.username);
+  // Period filter (per Jef's request) — without this every quotation from 2025 through now sits
+  // in the same list forever, which gets unwieldy. Empty = no lower/upper bound (shows everything,
+  // same as before this feature). Applied here at the top so it cascades into every section below
+  // (ON GOING/SUCCESS/CLOSED, their totals, and the Sales filter options) rather than being yet
+  // another independent per-section control.
+  const [quPeriodeDari, setQuPeriodeDari] = useState("");
+  const [quPeriodeSampai, setQuPeriodeSampai] = useState("");
+  const myQuotationsAllUnfiltered = isOwnerLike ? quotationsUnit : quotationsUnit.filter(q => q.salesManagerUsername === session.username);
+  const myQuotationsAll = myQuotationsAllUnfiltered.filter(q => (!quPeriodeDari || (q.tanggal || "") >= quPeriodeDari) && (!quPeriodeSampai || (q.tanggal || "") <= quPeriodeSampai));
   const myQuotations = (quSearch.trim() ? myQuotationsAll.filter(q => [q.nomor, q.customerNama, q.salesManagerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(quSearch.trim().toLowerCase()))) : myQuotationsAll).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const newNomor = baseNomor => {
     if (baseNomor) {
@@ -14203,7 +14211,37 @@ function QuotationUnit({
     style: {
       marginBottom: 12
     }
-  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      alignItems: "flex-end",
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Periode Dari",
+    type: "date",
+    value: quPeriodeDari,
+    onChange: setQuPeriodeDari,
+    style: {
+      width: 170
+    }
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Periode Sampai",
+    type: "date",
+    value: quPeriodeSampai,
+    onChange: setQuPeriodeSampai,
+    style: {
+      width: 170
+    }
+  }), (quPeriodeDari || quPeriodeSampai) && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => {
+      setQuPeriodeDari("");
+      setQuPeriodeSampai("");
+    }
+  }, "✕ Reset Periode"))), /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "ON GOING",
     count: onGoingQFiltered.length,
     badgeColor: theme.accent,
@@ -15020,7 +15058,11 @@ function QuotationPS({
   // Quotation document and the Ringkasan (subtotal/pajak/total) breakdown in the detail modal.
   const preTaxQ = q => (Number(q.total) || 0) - (Number(q.pajak) || 0);
   const [qpsSearch, setQpsSearch] = useState("");
-  const quotationsPSFiltered = (qpsSearch.trim() ? quotationsPS.filter(q => [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(qpsSearch.trim().toLowerCase()))) : quotationsPS).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  // Period filter — same reasoning/pattern as Unit Quotation's quPeriodeDari/Sampai.
+  const [qpsPeriodeDari, setQpsPeriodeDari] = useState("");
+  const [qpsPeriodeSampai, setQpsPeriodeSampai] = useState("");
+  const quotationsPSByPeriod = quotationsPS.filter(q => (!qpsPeriodeDari || (q.tanggal || "") >= qpsPeriodeDari) && (!qpsPeriodeSampai || (q.tanggal || "") <= qpsPeriodeSampai));
+  const quotationsPSFiltered = (qpsSearch.trim() ? quotationsPSByPeriod.filter(q => [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(qpsSearch.trim().toLowerCase()))) : quotationsPSByPeriod).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const [modal, setModal] = useState(false);
   const [revisionOf, setRevisionOf] = useState(null);
   const [editingQ, setEditingQ] = useState(null); // quotation being edited in-place (same nomor, no new revision)
@@ -15368,7 +15410,7 @@ function QuotationPS({
         logAudit(store, session, {
           module: "Parts & Service Quotation",
           docNomor: editingQ.nomor,
-          action: newStatus === "Draft" ? "Simpan Draft" : "Edit",
+          action: newStatus === "Draft" ? "Simpan Draft" : (isOwnerLike && editingQ.status !== "Menunggu Approval GM" && editingQ.status !== "Draft" ? "Edit (Superuser)" : "Edit"),
           detail: `${cust?.nama || editingQ.customerNama} — ${fmt(total)}`
         });
       }
@@ -15647,12 +15689,12 @@ function QuotationPS({
       gap: 6,
       flexWrap: "wrap"
     }
-  }, (q.status === "Menunggu Approval GM" || q.status === "Draft") && (isAsil || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+  }, ((q.status === "Menunggu Approval GM" || q.status === "Draft") && isAsil || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
-    title: "Edit",
+    title: isOwnerLike && q.status !== "Menunggu Approval GM" && q.status !== "Draft" ? "Edit (Superuser) — termasuk quotation yang sudah jadi SO" : "Edit",
     onClick: () => openEdit(q)
-  }, "✎"), q.status === "Draft" && (isAsil || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+  }, isOwnerLike && q.status !== "Menunggu Approval GM" && q.status !== "Draft" ? "✎ (Superuser)" : "✎"), q.status === "Draft" && (isAsil || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "success",
     onClick: () => submitDraft(q)
@@ -15894,7 +15936,37 @@ function QuotationPS({
     style: {
       marginBottom: 12
     }
-  })), /*#__PURE__*/React.createElement(CollapsibleSection, {
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      alignItems: "flex-end",
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Periode Dari",
+    type: "date",
+    value: qpsPeriodeDari,
+    onChange: setQpsPeriodeDari,
+    style: {
+      width: 170
+    }
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Periode Sampai",
+    type: "date",
+    value: qpsPeriodeSampai,
+    onChange: setQpsPeriodeSampai,
+    style: {
+      width: 170
+    }
+  }), (qpsPeriodeDari || qpsPeriodeSampai) && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => {
+      setQpsPeriodeDari("");
+      setQpsPeriodeSampai("");
+    }
+  }, "✕ Reset Periode"))), /*#__PURE__*/React.createElement(CollapsibleSection, {
     title: "ON GOING",
     count: qpsOnGoingFiltered.length,
     badgeColor: theme.accent,
