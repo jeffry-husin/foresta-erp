@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-27.6";
+const APP_BUILD = "2026-08-27.7";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -13867,34 +13867,39 @@ function QuotationUnit({
   }, "Diperpanjang ", q.extensionCount, "x")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
-      gap: 6,
+      gap: 4,
       flexWrap: "wrap"
     }
   }, (q.status === "Menunggu Approval GM" || q.status === "Draft" || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: isOwnerLike && q.status !== "Menunggu Approval GM" && q.status !== "Draft" ? "Edit (Superuser)" : "Edit",
     onClick: () => openEdit(q)
-  }, isOwnerLike && q.status !== "Menunggu Approval GM" && q.status !== "Draft" ? "✎ Edit (Superuser)" : "✎ Edit"), q.status === "Draft" && /*#__PURE__*/React.createElement(Btn, {
+  }, "✎"), q.status === "Draft" && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "success",
     onClick: () => submitDraft(q)
   }, "📤 Ajukan ke GM"), q.status !== "Sudah jadi SO" && q.status !== "Draft" && q.status !== "Closed" && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Revisi",
     onClick: () => openRevision(q)
-  }, "↻ Revisi"), q.status === "Disetujui GM" && !quotAlreadyHasSO(q) && /*#__PURE__*/React.createElement(Btn, {
+  }, "↻"), q.status === "Disetujui GM" && !quotAlreadyHasSO(q) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Extend Follow-up 14 hari",
     onClick: () => extendFollowUp(q)
-  }, "🔄 Extend"), q.status === "Disetujui GM" && !quotAlreadyHasSO(q) && /*#__PURE__*/React.createElement(Btn, {
+  }, "⏳"), q.status === "Disetujui GM" && !quotAlreadyHasSO(q) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "warning",
+    title: "Closed",
     onClick: () => closeQuotation(q)
-  }, "🔒 Closed"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+  }, "🚫"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Ganti Sales Manager",
     onClick: () => openReassignSM(q)
-  }, "🔁 Sales Manager"), q.status === "Disetujui GM" && !q.dismissedFromSOList && !quotAlreadyHasSO(q) && quotIsLatestRevision(quotationsUnit, q) && onRequestSO && /*#__PURE__*/React.createElement(Btn, {
+  }, "🧑‍💼"), q.status === "Disetujui GM" && !q.dismissedFromSOList && !quotAlreadyHasSO(q) && quotIsLatestRevision(quotationsUnit, q) && onRequestSO && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "success",
     onClick: () => onRequestSO(q.nomor)
@@ -14154,12 +14159,14 @@ function QuotationUnit({
     }, /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "ghost",
+      title: "Extend Follow-up 14 hari",
       onClick: () => extendFollowUp(q)
-    }, "🔄 Extend (14 hari lagi)"), /*#__PURE__*/React.createElement(Btn, {
+    }, "⏳"), /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "warning",
+      title: "Closed",
       onClick: () => closeQuotation(q)
-    }, "🔒 Closed"))]),
+    }, "🚫"))]),
     emptyMsg: "Tidak ada quotation yang perlu follow-up"
   })), isOwnerLike && duplicateNomorGroupsUQ.length > 0 && /*#__PURE__*/React.createElement(Card, {
     style: {
@@ -15686,7 +15693,7 @@ function QuotationPS({
   }, "Diperpanjang ", q.extensionCount, "x")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
-      gap: 6,
+      gap: 4,
       flexWrap: "wrap"
     }
   }, ((q.status === "Menunggu Approval GM" || q.status === "Draft") && isAsil || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
@@ -15694,27 +15701,31 @@ function QuotationPS({
     variant: "ghost",
     title: isOwnerLike && q.status !== "Menunggu Approval GM" && q.status !== "Draft" ? "Edit (Superuser) — termasuk quotation yang sudah jadi SO" : "Edit",
     onClick: () => openEdit(q)
-  }, isOwnerLike && q.status !== "Menunggu Approval GM" && q.status !== "Draft" ? "✎ (Superuser)" : "✎"), q.status === "Draft" && (isAsil || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+  }, "✎"), q.status === "Draft" && (isAsil || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "success",
     onClick: () => submitDraft(q)
   }, "📤 Ajukan ke GM"), q.status !== "Sudah jadi SO" && q.status !== "Draft" && q.status !== "Closed" && (isAsil || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Revisi",
     onClick: () => openRevision(q)
-  }, "↻ Revisi"), q.status === "Disetujui GM" && !quotAlreadyHasSOPS(q) && /*#__PURE__*/React.createElement(Btn, {
+  }, "↻"), q.status === "Disetujui GM" && !quotAlreadyHasSOPS(q) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Extend Follow-up 14 hari",
     onClick: () => extendFollowUp(q)
-  }, "🔄 Extend"), q.status === "Disetujui GM" && !quotAlreadyHasSOPS(q) && /*#__PURE__*/React.createElement(Btn, {
+  }, "⏳"), q.status === "Disetujui GM" && !quotAlreadyHasSOPS(q) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "warning",
+    title: "Closed",
     onClick: () => closeQuotationPS(q)
-  }, "🔒 Closed"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+  }, "🚫"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Ganti Sales Manager",
     onClick: () => openReassignSM(q)
-  }, "🔁 Sales Manager"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+  }, "🧑‍💼"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "danger",
     onClick: () => deleteQuotationPS(q)
@@ -15924,12 +15935,14 @@ function QuotationPS({
   }, /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Extend Follow-up 14 hari",
     onClick: () => extendFollowUp(q)
-  }, "🔄 Extend (14 hari lagi)"), /*#__PURE__*/React.createElement(Btn, {
+  }, "⏳"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "warning",
+    title: "Closed",
     onClick: () => closeQuotationPS(q)
-  }, "🔒 Closed"))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
+  }, "🚫"))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari no. quotation / client...",
     value: qpsSearch,
     onChange: setQpsSearch,
