@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-27.7";
+const APP_BUILD = "2026-08-27.8";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -611,6 +611,81 @@ function getDueStatus(tipePembayaran, tanggalJatuhTempo) {
     label: "Belum Jatuh Tempo",
     color: theme.green
   };
+}
+
+// CLIENT PAYMENT RATING (added 1/9/2026, per request) — measures how punctually a client pays its
+// TEMPO invoices, so Sales can see a client's payment track record right when building a new
+// Quotation for them, not just after the fact in Invoice. Only TEMPO invoices with a due date count
+// (COD is paid immediately and carries no punctuality signal). For an invoice already marked Lunas,
+// the date it was actually settled is the tanggal of its LAST riwayatPembayaran entry — that's the
+// payment that brought it to Lunas — compared against tanggalJatuhTempo: on/before due = on-time,
+// after = late (and by how many days). Invoices not yet Lunas but already past due today are counted
+// separately as "masih overdue" — a live risk signal even though they haven't resolved either way
+// yet, so they don't get counted as either on-time or late (that would be premature).
+function computeClientPaymentRating(invoices, customerId) {
+  const tempo = (invoices || []).filter(i => i.customerId === customerId && i.tipePembayaran === "TEMPO" && i.tanggalJatuhTempo);
+  const stillOverdueCount = tempo.filter(i => i.statusBayar !== "Lunas" && getDueStatus(i.tipePembayaran, i.tanggalJatuhTempo).label === "Terlambat").length;
+  const resolved = tempo.filter(i => i.statusBayar === "Lunas");
+  let onTimeCount = 0,
+    lateCount = 0,
+    totalLateDays = 0;
+  for (const inv of resolved) {
+    const hist = inv.riwayatPembayaran || [];
+    const paidDate = hist.length ? hist[hist.length - 1].tanggal : inv.dibayarTanggal;
+    if (!paidDate) continue;
+    const diffDays = Math.round((new Date(paidDate) - new Date(inv.tanggalJatuhTempo)) / 86400000);
+    if (diffDays > 0) {
+      lateCount++;
+      totalLateDays += diffDays;
+    } else {
+      onTimeCount++;
+    }
+  }
+  const totalResolved = onTimeCount + lateCount;
+  const pctOnTime = totalResolved > 0 ? onTimeCount / totalResolved * 100 : null;
+  const avgLateDays = lateCount > 0 ? Math.round(totalLateDays / lateCount) : 0;
+  let rating, color;
+  if (pctOnTime === null) {
+    rating = "Belum Ada Data";
+    color = theme.muted;
+  } else if (pctOnTime >= 90) {
+    rating = "Sangat Baik";
+    color = theme.green;
+  } else if (pctOnTime >= 70) {
+    rating = "Baik";
+    color = theme.cyan;
+  } else if (pctOnTime >= 50) {
+    rating = "Cukup";
+    color = theme.yellow;
+  } else {
+    rating = "Kurang";
+    color = theme.red;
+  }
+  return {
+    rating,
+    color,
+    onTimeCount,
+    lateCount,
+    totalResolved,
+    avgLateDays,
+    stillOverdueCount,
+    pctOnTime
+  };
+}
+// Small reusable badge that renders computeClientPaymentRating for a given customer — used in
+// Database Client (the master record) and in the Unit/Parts & Service Quotation forms (so Sales
+// sees the rating right when picking the client to quote), keeping the calculation in one place.
+function ClientPaymentRatingBadge({
+  invoices,
+  customerId
+}) {
+  if (!customerId) return null;
+  const r = computeClientPaymentRating(invoices, customerId);
+  const title = r.totalResolved > 0 ? `${r.onTimeCount}/${r.totalResolved} invoice TEMPO tepat waktu (${Math.round(r.pctOnTime)}%)` + (r.lateCount > 0 ? `, rata-rata telat ${r.avgLateDays} hari` : "") + (r.stillOverdueCount > 0 ? `, ${r.stillOverdueCount} invoice masih overdue saat ini` : "") : r.stillOverdueCount > 0 ? `${r.stillOverdueCount} invoice masih overdue saat ini, belum ada riwayat pelunasan TEMPO` : "Belum ada riwayat invoice TEMPO yang lunas untuk client ini";
+  return /*#__PURE__*/React.createElement(Badge, {
+    color: r.color,
+    title
+  }, "💳 ", r.rating, r.stillOverdueCount > 0 ? ` ⚠${r.stillOverdueCount}` : "");
 }
 
 // Backward-compat normalizer: older Part Recommendation records (pre-migration) were stored as
@@ -4618,9 +4693,11 @@ function Table({
 }
 function Badge({
   children,
-  color = theme.accent
+  color = theme.accent,
+  title
 }) {
   return /*#__PURE__*/React.createElement("span", {
+    title,
     style: {
       background: color + "22",
       color,
@@ -8001,7 +8078,7 @@ function CustomerDB({
     // since that's what actually identifies a client at a glance, not the internal ID. ID itself,
     // Email, and Telepon are dropped from the list entirely (still in the record/edit form, just
     // not useful clutter here).
-    headers: ["Nama Client", "PIC Utama", "Category", "Group", "Sales Manager", "Akses"],
+    headers: ["Nama Client", "PIC Utama", "Category", "Group", "Sales Manager", "Rating Pembayaran", "Akses"],
     rows: filtered.map(c => {
       const picLabelText = c.pics && c.pics.length ? `${c.pics[0].nama}${c.pics.length > 1 ? ` (+${c.pics.length - 1})` : ""}` : "-";
       const picLabel = /*#__PURE__*/React.createElement("span", {
@@ -8060,7 +8137,10 @@ function CustomerDB({
       }, "Request Akses"));
       return [c.nama, picLabel, categoryCell, groupCell, /*#__PURE__*/React.createElement(Badge, {
         color: theme.accent
-      }, c.salesManager || "-"), accessCell];
+      }, c.salesManager || "-"), /*#__PURE__*/React.createElement(ClientPaymentRatingBadge, {
+        invoices: store.invoices,
+        customerId: c.id
+      }), accessCell];
     }),
     onEdit: onEdit,
     onDelete: isOwnerLike ? onDelete : undefined
@@ -14510,7 +14590,15 @@ function QuotationUnit({
       label: c.nama
     })),
     required: true
-  })), /*#__PURE__*/React.createElement("div", {
+  }), form.customerId && /*#__PURE__*/React.createElement("div", {
+    style: {
+      alignSelf: "flex-end",
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement(ClientPaymentRatingBadge, {
+    invoices: store.invoices,
+    customerId: form.customerId
+  }))), /*#__PURE__*/React.createElement("div", {
     style: {
       border: `1px solid ${theme.border}`,
       borderRadius: 10,
@@ -15048,7 +15136,8 @@ function QuotationPS({
     partRecs: partRecsRaw,
     setPartRecs,
     employees,
-    salesOrders
+    salesOrders,
+    setSalesOrders
   } = store;
   const partRecs = normalizePartRecs(partRecsRaw);
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
@@ -15767,6 +15856,58 @@ function QuotationPS({
     const pulled = new Set(relatedSO.flatMap(so => (so.items || []).map(qpsItemKeyPS)));
     return (q.items || []).every(it => pulled.has(qpsItemKeyPS(it)));
   };
+  // DATA INTEGRITY GUARD (added 1/9/2026 — SQ-019/SQ-037/SO-003 case): an SO's sourceNomor is typed/
+  // selected by hand when the SO is created, so a slip (e.g. picking a nearby-numbered quotation by
+  // mistake) silently mislinks the SO. Because quotAlreadyHasSOPS matches by nomor, a mislink makes
+  // the WRONG quotation look converted while the RIGHT one stays stuck in ON GOING forever. This scan
+  // catches any SO whose sourceNomor points to a quotation with a different customerId than the SO
+  // itself — a mismatch that should never happen if the link is correct — and offers a one-click fix
+  // to an unused same-customer quotation whose items+total match the SO exactly (high confidence).
+  // Where no such exact match exists, a manual nomor field lets a superuser correct it themselves.
+  const soSourceMismatches = React.useMemo(() => {
+    if (!isOwnerLike) return [];
+    const allQuotAll = [...(store.quotationsUnit || []).map(q => ({
+      ...q,
+      mod: "UQ"
+    })), ...quotationsPS.map(q => ({
+      ...q,
+      mod: "PS"
+    }))];
+    const quotByNomor = new Map(allQuotAll.map(q => [q.nomor, q]));
+    const usedNomors = new Set((salesOrders || []).map(s => s.sourceNomor).filter(Boolean));
+    const itemsKey = items => (items || []).map(i => `${i.partNumber || i.partName || ""}x${i.qty}`).sort().join("|");
+    const out = [];
+    for (const so of salesOrders || []) {
+      if (!so.sourceNomor) continue;
+      const wrongSource = quotByNomor.get(so.sourceNomor);
+      if (!wrongSource) continue;
+      if (wrongSource.customerId && so.customerId && wrongSource.customerId !== so.customerId) {
+        const soKey = itemsKey(so.items);
+        const candidate = allQuotAll.find(c => c.customerId === so.customerId && !usedNomors.has(c.nomor) && c.total === so.total && itemsKey(c.items) === soKey);
+        out.push({
+          so,
+          wrongSource,
+          candidate
+        });
+      }
+    }
+    return out;
+  }, [salesOrders, quotationsPS, store.quotationsUnit, isOwnerLike]);
+  const [soFixInput, setSoFixInput] = useState({});
+  const fixSOSource = (so, newNomor) => {
+    if (!newNomor || !newNomor.trim()) return;
+    if (!window.confirm(`Ubah sumber SO ${so.nomor} dari "${so.sourceNomor}" menjadi "${newNomor.trim()}"?`)) return;
+    setSalesOrders((salesOrders || []).map(s => s.nomor === so.nomor ? {
+      ...s,
+      sourceNomor: newNomor.trim()
+    } : s));
+    logAudit(store, session, {
+      module: "Parts & Service Quotation",
+      docNomor: so.nomor,
+      action: "Perbaiki Sumber SO",
+      detail: `sourceNomor diubah dari "${so.sourceNomor}" menjadi "${newNomor.trim()}"`
+    });
+  };
   const qpsOnGoing = quotationsPSFiltered.filter(q => q.status !== "Closed" && !quotAlreadyHasSOPS(q) && quotIsLatestRevision(quotationsPS, q));
   // Same fix as QuotationUnit's successQ (see UQ-024-FRT-VII-2026 case): quotAlreadyHasSOPS() matches
   // the whole revision family, so without quotIsLatestRevision both an original and its revision would
@@ -15942,7 +16083,80 @@ function QuotationPS({
     variant: "warning",
     title: "Closed",
     onClick: () => closeQuotationPS(q)
-  }, "🚫"))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
+  }, "🚫"))))), isOwnerLike && soSourceMismatches.length > 0 && /*#__PURE__*/React.createElement(Card, {
+    style: {
+      background: theme.red + "11",
+      border: `1px solid ${theme.red}44`
+    }
+  }, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 6px",
+      color: theme.red,
+      fontSize: 15
+    }
+  }, "⚠ SO dengan Sumber Quotation Tidak Sesuai"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 12px",
+      fontSize: 13,
+      color: theme.textSecondary
+    }
+  }, "SO berikut merujuk ke quotation dengan Client yang berbeda dari Client SO itu sendiri — kemungkinan salah pilih quotation sumber saat SO dibuat."), soSourceMismatches.map(({
+    so,
+    wrongSource,
+    candidate
+  }) => /*#__PURE__*/React.createElement("div", {
+    key: so.nomor,
+    style: {
+      padding: "10px 0",
+      borderBottom: `1px solid ${theme.border}33`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      marginBottom: 6
+    }
+  }, /*#__PURE__*/React.createElement("strong", null, so.nomor), " (", so.customerNama, ") saat ini merujuk ke ", /*#__PURE__*/React.createElement("strong", null, wrongSource.nomor), " (", wrongSource.customerNama, ")"), candidate ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      alignItems: "center"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13,
+      color: theme.green
+    }
+  }, "Kandidat cocok (items & total sama): ", /*#__PURE__*/React.createElement("strong", null, candidate.nomor)), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "success",
+    onClick: () => fixSOSource(so, candidate.nomor)
+  }, "🔧 Perbaiki ke ", candidate.nomor)) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      alignItems: "center",
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13,
+      color: theme.textSecondary
+    }
+  }, "Tidak ditemukan kandidat otomatis — masukkan No. Quotation yang benar:"), /*#__PURE__*/React.createElement(Input, {
+    placeholder: "mis. SQ-020-FRT-VII-2026",
+    value: soFixInput[so.nomor] || "",
+    onChange: v => setSoFixInput(prev => ({
+      ...prev,
+      [so.nomor]: v
+    })),
+    style: {
+      width: 220
+    }
+  }), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "warning",
+    onClick: () => fixSOSource(so, soFixInput[so.nomor])
+  }, "Terapkan"))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari no. quotation / client...",
     value: qpsSearch,
     onChange: setQpsSearch,
@@ -16287,7 +16501,14 @@ function QuotationPS({
     })),
     required: true,
     disabled: form.fromRecIds.length > 0
-  }), form.fromRecIds.length > 0 && /*#__PURE__*/React.createElement("p", {
+  }), form.customerId && /*#__PURE__*/React.createElement("div", {
+    style: {
+      margin: "6px 0 0"
+    }
+  }, /*#__PURE__*/React.createElement(ClientPaymentRatingBadge, {
+    invoices: store.invoices,
+    customerId: form.customerId
+  })), form.fromRecIds.length > 0 && /*#__PURE__*/React.createElement("p", {
     style: {
       margin: "6px 0 0",
       fontSize: 11,
