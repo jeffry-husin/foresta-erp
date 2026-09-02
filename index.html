@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-27.12";
+const APP_BUILD = "2026-08-27.13";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -30133,10 +30133,26 @@ function SalesReportModule({
   } = store;
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   const isSalesManager = session.role === "sales_manager";
+  // Same revision-family dedup as ClientAnalysisModule/PriceAnalysisModule — without this, a
+  // quotation that got revised (e.g. "-R1") was counted BOTH as itself and as its own revision,
+  // inflating totalQuotation/jumlahQuotation and skewing conversionRate. This module isn't
+  // currently wired into the router (dead code as of this fix), but corrected for consistency —
+  // see task #348.
+  const quotIsLatestRevision = (arr, q) => {
+    const fam = q.revisiDari || q.nomor;
+    const members = (arr || []).filter(x => (x.revisiDari || x.nomor) === fam);
+    if (members.length <= 1) return true;
+    const revNum = x => {
+      const m = /-R(\d+)$/.exec(x.nomor || "");
+      return m ? parseInt(m[1], 10) : -1;
+    };
+    const latest = members.reduce((a, b) => revNum(b) > revNum(a) ? b : a);
+    return latest.nomor === q.nomor;
+  };
   const salesManagerNames = [...new Set(quotationsUnit.map(q => q.salesManagerNama).filter(Boolean))];
   const targetNames = isSalesManager ? [session.nama] : salesManagerNames;
   const statsPerManager = targetNames.map(nama => {
-    const myQuot = quotationsUnit.filter(q => q.salesManagerNama === nama);
+    const myQuot = quotationsUnit.filter(q => q.salesManagerNama === nama && q.status !== "Draft" && quotIsLatestRevision(quotationsUnit, q));
     const mySO = salesOrders.filter(so => so.salesManagerNama === nama);
     const totalQuotation = myQuot.reduce((s, q) => s + q.total, 0);
     const totalSO = mySO.reduce((s, so) => s + so.total, 0);
@@ -33665,9 +33681,26 @@ function PriceAnalysisModule({
     if (!cust || !cust.groupId) return "-";
     return (clientGroups || []).find(g => g.id === cust.groupId)?.nama || "-";
   };
+  // Canonical "is this the latest revision of its family" check — same body used by
+  // QuotationUnit/QuotationPS/SalesOrder/KPISales (revisiDari is the authoritative link, not a
+  // nomor-suffix guess) — copied here so allPoints below only counts each revision FAMILY once
+  // (via its latest revision), instead of summing every superseded revision on top of its
+  // replacement (same double-count class of bug found in ClientAnalysisModule 2026-09-02).
+  const quotIsLatestRevision = (arr, q) => {
+    const fam = q.revisiDari || q.nomor;
+    const members = (arr || []).filter(x => (x.revisiDari || x.nomor) === fam);
+    if (members.length <= 1) return true;
+    const revNum = x => {
+      const m = /-R(\d+)$/.exec(x.nomor || "");
+      return m ? parseInt(m[1], 10) : -1;
+    };
+    const latest = members.reduce((a, b) => revNum(b) > revNum(a) ? b : a);
+    return latest.nomor === q.nomor;
+  };
   const allPoints = [];
   (quotationsUnit || []).forEach(q => {
     if (q.status === "Draft") return;
+    if (!quotIsLatestRevision(quotationsUnit, q)) return;
     (q.items || []).forEach(it => {
       if (!it.unitCode) return;
       allPoints.push({
@@ -33685,6 +33718,7 @@ function PriceAnalysisModule({
   });
   (quotationsPS || []).forEach(q => {
     if (q.status === "Draft") return;
+    if (!quotIsLatestRevision(quotationsPS, q)) return;
     (q.items || []).forEach(it => {
       if (!it.partNumber) return;
       allPoints.push({
@@ -34023,9 +34057,27 @@ function ClientAnalysisModule({
     if (!cust || !cust.groupId) return "-";
     return (clientGroups || []).find(g => g.id === cust.groupId)?.nama || "-";
   };
+  // Canonical "is this the latest revision of its family" check — same body used by
+  // QuotationUnit/QuotationPS/SalesOrder/KPISales (revisiDari is the authoritative link, not a
+  // nomor-suffix guess) — copied here so allPoints below only counts each revision FAMILY once
+  // (via its latest revision), instead of summing every superseded revision on top of its
+  // replacement. Bug found 2026-09-02: MANDIRI PRIMA ADIPERKASA's history showed both an original
+  // UQ and its -R1 revision as separate line items, inflating Total Nilai Pembelian/Qty.
+  const quotIsLatestRevision = (arr, q) => {
+    const fam = q.revisiDari || q.nomor;
+    const members = (arr || []).filter(x => (x.revisiDari || x.nomor) === fam);
+    if (members.length <= 1) return true;
+    const revNum = x => {
+      const m = /-R(\d+)$/.exec(x.nomor || "");
+      return m ? parseInt(m[1], 10) : -1;
+    };
+    const latest = members.reduce((a, b) => revNum(b) > revNum(a) ? b : a);
+    return latest.nomor === q.nomor;
+  };
   const allPoints = [];
   (quotationsUnit || []).forEach(q => {
     if (q.status === "Draft") return;
+    if (!quotIsLatestRevision(quotationsUnit, q)) return;
     (q.items || []).forEach(it => {
       if (!it.unitCode) return;
       allPoints.push({
@@ -34043,6 +34095,7 @@ function ClientAnalysisModule({
   });
   (quotationsPS || []).forEach(q => {
     if (q.status === "Draft") return;
+    if (!quotIsLatestRevision(quotationsPS, q)) return;
     (q.items || []).forEach(it => {
       if (!it.partNumber) return;
       allPoints.push({
@@ -34628,14 +34681,23 @@ function UserAnalysisModule({
   session
 }) {
   const [periodeDays, setPeriodeDays] = useState("30");
+  const [customFrom, setCustomFrom] = useState("");
+  const [customTo, setCustomTo] = useState("");
   const [selectedUser, setSelectedUser] = useState("");
   const [search, setSearch] = useState("");
+  const isCustomRange = periodeDays === "custom";
   const periodeNum = Number(periodeDays) || 0;
-  const cutoffMs = periodeNum > 0 ? Date.now() - periodeNum * 24 * 60 * 60 * 1000 : 0;
+  // Custom range takes explicit From/To dates (inclusive, local-day boundaries); the preset
+  // options fall back to "N days back from now". Either way this can only filter data that was
+  // actually LOGGED — tracking only started when this module was deployed (build 2026-08-27.11,
+  // 02-Sep-2026), so there is no historical login/navigation data from earlier in the year to pull
+  // regardless of what range is picked here (see the info banner below).
+  const cutoffMs = isCustomRange ? customFrom ? new Date(customFrom + "T00:00:00").getTime() : 0 : periodeNum > 0 ? Date.now() - periodeNum * 24 * 60 * 60 * 1000 : 0;
+  const endMs = isCustomRange && customTo ? new Date(customTo + "T23:59:59.999").getTime() : Date.now();
   const logInPeriod = React.useMemo(() => (store.userActivityLog || []).filter(e => {
     const ts = Date.parse(e.timestamp);
-    return !isNaN(ts) && ts >= cutoffMs;
-  }), [store.userActivityLog, cutoffMs]);
+    return !isNaN(ts) && ts >= cutoffMs && ts <= endMs;
+  }), [store.userActivityLog, cutoffMs, endMs]);
   const moduleLabelMap = React.useMemo(() => {
     const map = {};
     ALL_MODULES.forEach(m => {
@@ -34708,6 +34770,9 @@ function UserAnalysisModule({
   }, {
     value: "0",
     label: "Semua (maks. 180 hari — batas retensi log)"
+  }, {
+    value: "custom",
+    label: "Rentang Tanggal Kustom..."
   }];
   const summaryCards = [["User Aktif (dari total akun)", activeUserCount + " / " + perUser.length, theme.text], ["Total Login", totalLogins, theme.green], ["Total Aktivitas Navigasi", logInPeriod.filter(e => e.type === "navigate").length, theme.text], ["Modul Berbeda yang Disentuh", moduleStats.length, theme.text]].map(([label, val, color], i) => /*#__PURE__*/React.createElement("div", {
     key: i,
@@ -34774,7 +34839,7 @@ function UserAnalysisModule({
       borderRadius: 8,
       border: `1px dashed ${theme.border}`
     }
-  }, "ℹ️ Menghitung seberapa sering setiap user login dan berpindah antar modul ERP — dasar untuk menilai modul mana yang benar-benar dipakai per role. Data disimpan maks. 180 hari."), !detail && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+  }, "ℹ️ Menghitung seberapa sering setiap user login dan berpindah antar modul ERP — dasar untuk menilai modul mana yang benar-benar dipakai per role. Pelacakan baru mulai berjalan sejak fitur ini diaktifkan (02-Sep-2026) — data login/navigasi SEBELUM tanggal itu tidak tersedia (tidak bisa ditarik dari awal tahun). Data disimpan maks. 180 hari ke belakang dari hari ini."), !detail && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 12,
@@ -34788,6 +34853,22 @@ function UserAnalysisModule({
     options: periodeOptions,
     style: {
       width: 240
+    }
+  }), isCustomRange && /*#__PURE__*/React.createElement(Input, {
+    label: "Dari Tanggal",
+    type: "date",
+    value: customFrom,
+    onChange: setCustomFrom,
+    style: {
+      width: 180
+    }
+  }), isCustomRange && /*#__PURE__*/React.createElement(Input, {
+    label: "Sampai Tanggal",
+    type: "date",
+    value: customTo,
+    onChange: setCustomTo,
+    style: {
+      width: 180
     }
   }), /*#__PURE__*/React.createElement(Input, {
     label: "Cari user",
