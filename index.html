@@ -35,7 +35,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-08-27.8";
+const APP_BUILD = "2026-08-27.12";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -1333,12 +1333,12 @@ const ROLE_DEFS = {
   finance_director: {
     label: "Finance Director",
     color: "#f59e0b",
-    modules: ["dashboard", "invoice", "payroll", "customer", "supplier", "financial_dashboard", "client_history", "attendance", "jurnal", "bank_recon", "price_analysis", "price_analysis_purchase", "komisi"]
+    modules: ["dashboard", "invoice", "payroll", "customer", "supplier", "financial_dashboard", "client_history", "attendance", "jurnal", "bank_recon", "price_analysis", "price_analysis_purchase", "client_analysis", "komisi"]
   },
   sales_manager: {
     label: "Sales Manager",
     color: "#3b82f6",
-    modules: ["dashboard", "quotation_unit", "customer", "client_history", "sales_activity", "kpi_sales", "attendance", "price_analysis", "komisi"]
+    modules: ["dashboard", "quotation_unit", "customer", "client_history", "sales_activity", "kpi_sales", "attendance", "price_analysis", "client_analysis", "komisi"]
   },
   service_manager: {
     label: "Service Manager",
@@ -1388,13 +1388,13 @@ const ROLE_DEFS = {
   hrd: {
     label: "HRD",
     color: "#ec4899",
-    modules: ["dashboard", "attendance"]
+    modules: ["dashboard", "attendance", "user_analysis"]
   },
   // payroll EXCLUDED for HRD per requirement; payroll module itself is owner/gm/hrd_payroll only
   hrd_payroll: {
     label: "HRD Payroll",
     color: "#db2777",
-    modules: ["dashboard", "payroll", "attendance"]
+    modules: ["dashboard", "payroll", "attendance", "user_analysis"]
   },
   // special role for Pak Laurent - payroll access only
   mekanik: {
@@ -1738,6 +1738,10 @@ const ALL_MODULES = [{
   icon: "📈",
   label: "Analisa Harga"
 }, {
+  id: "client_analysis",
+  icon: "📇",
+  label: "Analisa Client"
+}, {
   id: "komisi",
   icon: "💸",
   label: "Komisi"
@@ -1749,6 +1753,10 @@ const ALL_MODULES = [{
   id: "payroll",
   icon: "💵",
   label: "Payroll (Akses Terbatas)"
+}, {
+  id: "user_analysis",
+  icon: "📶",
+  label: "Analisa User (Akses Terbatas)"
 }, {
   id: "uang_makan",
   icon: "🍚",
@@ -1798,7 +1806,7 @@ const SIDEBAR_GROUPS = [{
 }, {
   key: "sales",
   label: "SALES",
-  moduleIds: ["quotation_unit", "quotation_ps", "sales_activity", "client_history", "price_analysis", "komisi"]
+  moduleIds: ["quotation_unit", "quotation_ps", "sales_activity", "client_history", "price_analysis", "client_analysis", "komisi"]
 }, {
   key: "operation",
   label: "OPERATION",
@@ -1822,7 +1830,7 @@ const SIDEBAR_GROUPS = [{
 }, {
   key: "hr",
   label: "HR",
-  moduleIds: ["attendance", "cuti", "uang_makan", "payroll"]
+  moduleIds: ["attendance", "cuti", "uang_makan", "payroll", "user_analysis"]
 }, {
   key: "kpi",
   label: "KPI",
@@ -1861,6 +1869,12 @@ function getAllowedModules(role, customModules) {
 // Payroll hard rule: only owner/gm regardless of role list
 function hasPayrollAccess(role) {
   return role === "owner" || role === "gm" || role === "hrd_payroll";
+}
+// Analisa User hard rule: this module surfaces per-person login/usage data, so — same as Payroll —
+// it must never leak to a regular staff account via a misconfigured customModules override. Only
+// Owner/GM/HRD (both hrd and hrd_payroll) can see it.
+function hasUserAnalysisAccess(role) {
+  return role === "owner" || role === "gm" || role === "hrd" || role === "hrd_payroll";
 }
 // Uang Dinas hard rule: Super User (owner/gm/finance_director = HO1/HO2/HO3) sees + pays everyone;
 // WORKSHOP1/WORKSHOP2 (by username, not a shared role) see + edit every mekanik's records;
@@ -2644,7 +2658,7 @@ function getPreloadedErpData() {
 //      wholesale, because plain re-fetch-then-upsert has no way to detect that conflict. True
 //      compare-and-swap (erp_data_cas) is the only thing that actually closes this, hence promoting
 //      these three keys out of the pilot.
-const CAS_PILOT_KEYS = new Set(["erp_mills", "erp_client_groups", "erp_parts", "erp_edit_requests", "erp_audit_log"]);
+const CAS_PILOT_KEYS = new Set(["erp_mills", "erp_client_groups", "erp_parts", "erp_edit_requests", "erp_audit_log", "erp_user_activity_log"]);
 function usePersisted(key, defaultVal) {
   const cacheKey = "erp_cache_" + key;
   const [val, setValRaw] = useState(() => {
@@ -2892,6 +2906,7 @@ function useStore() {
   const [tickets, setTickets] = usePersisted("erp_tickets", []); // Travel tickets (pesawat/kapal/kereta-bus) for mekanik to client sites
   const [maintenanceSchedules, setMaintenanceSchedules] = usePersisted("erp_maintenance", []); // Maintenance schedule per sold unit, 3-month interval
   const [auditLog, setAuditLog] = usePersisted("erp_audit_log", []); // Approval/rejection history across all modules
+  const [userActivityLog, setUserActivityLog] = usePersisted("erp_user_activity_log", []); // Analisa User: login + module-navigation events per user, for usage/adoption analysis (HR/Owner/GM only)
   const [editRequests, setEditRequests] = usePersisted("erp_edit_requests", []); // Pending edit/add/delete requests needing GM approval (Client, Master Part)
   const [coa, setCoa] = usePersisted("erp_coa", seedCOA); // Master COA - office operational cost accounts
   const [salesActivities, setSalesActivities] = usePersisted("erp_sales_activities", []); // Daily sales activity log: visits, calls, operational costs
@@ -3151,6 +3166,8 @@ function useStore() {
     setMaintenanceSchedules,
     auditLog,
     setAuditLog,
+    userActivityLog,
+    setUserActivityLog,
     editRequests,
     setEditRequests,
     coa,
@@ -3415,6 +3432,28 @@ function logAudit(store, session, {
   // user was found completely missing (not even a stale copy) while another user's concurrent
   // Form Cuti actions logged fine — re-fetching immediately before appending closes that window.
   store.setAuditLog(prev => pruneOldEntries([...prev, entry]));
+}
+
+// Analisa User — records who logs in and which modules they actually navigate into, so usage/
+// adoption can be assessed per user (separate from logAudit, which only captures write/approval
+// actions and would miss plain browsing). type: "login" (fired once per successful login) or
+// "navigate" (fired on every module switch, including sidebar clicks and cross-module handoffs).
+function logUserActivity(store, session, {
+  type,
+  moduleId
+}) {
+  if (!session || !session.username) return;
+  const entry = {
+    id: "LOG-" + uid(),
+    timestamp: new Date().toISOString(),
+    type: type || "navigate",
+    moduleId: moduleId || null,
+    userId: session.userId || null,
+    username: session.username,
+    nama: session.nama,
+    role: session.role
+  };
+  store.setUserActivityLog(prev => pruneOldEntries([...prev, entry]));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -20333,6 +20372,93 @@ function PurchaseOrderModule({
     setIrPick(null);
     setIrPickedIdx([]);
   };
+  const irPickPanel = () => irPick && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 10,
+      padding: 14,
+      background: theme.surface,
+      border: `1px solid ${theme.accent}66`,
+      borderRadius: 10,
+      display: "flex",
+      flexDirection: "column",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      color: theme.text,
+      fontSize: 13,
+      fontWeight: 700
+    }
+  }, `Pilih Item dari ${irPick?.nomor || ""}`), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      color: theme.muted,
+      fontSize: 12,
+      fontWeight: 600
+    }
+  }, "Pilih item mana yang mau dibuat menjadi PO ini (item yang sudah di-PO tidak bisa dipilih lagi):"), irPick.items.map((it, i) => {
+    const consumed = !!it.sudahDiPO;
+    const partDesc = store.parts.find(p => p.partNumber === it.partNumber)?.description || "";
+    const livePart = store.parts.find(p => p.partNumber === it.partNumber);
+    const rawLiveStok = livePart ? (livePart.stok ?? 0) : (it.stokTersedia || 0);
+    const netLiveStok = Math.max(0, rawLiveStok - reservedQtyFor(store, it.partNumber, irPick.soNomor));
+    const liveQtyKurang = Math.max(0, (it.qtyButuh || 0) - netLiveStok);
+    return /*#__PURE__*/React.createElement("label", {
+      key: i,
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "8px 12px",
+        background: theme.bg || theme.surface,
+        borderRadius: 8,
+        marginBottom: 6,
+        cursor: consumed ? "not-allowed" : "pointer",
+        fontSize: 13,
+        color: consumed ? theme.muted : theme.text,
+        opacity: consumed ? 0.55 : 1
+      }
+    }, /*#__PURE__*/React.createElement("input", {
+      type: "checkbox",
+      checked: irPickedIdx.includes(i),
+      disabled: consumed,
+      onChange: () => toggleIrPickedIdx(i)
+    }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("strong", null, it.partNumber), " — ", it.partName, " — Qty ", fmtNum(liveQtyKurang), liveQtyKurang <= 0 && liveQtyKurang !== it.qtyKurang && /*#__PURE__*/React.createElement("span", {
+      style: {
+        marginLeft: 6,
+        fontSize: 11,
+        color: theme.green,
+        fontWeight: 600
+      }
+    }, "(stock sudah cukup — direvisi sejak IR dibuat)")), partDesc && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        color: theme.muted,
+        marginTop: 2
+      }
+    }, partDesc), consumed && /*#__PURE__*/React.createElement("span", {
+      style: {
+        marginLeft: 8
+      }
+    }, /*#__PURE__*/React.createElement(Badge, {
+      color: theme.green
+    }, "Sudah di-PO"))));
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => {
+      setIrPick(null);
+      setIrPickedIdx([]);
+    }
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: confirmIrPick
+  }, "+ Tambahkan Item Terpilih")));
   const removeIR = irNomor => setForm(f => ({
     ...f,
     irNomors: f.irNomors.filter(n => n !== irNomor),
@@ -20942,6 +21068,7 @@ function PurchaseOrderModule({
   }, "👁"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
+    title: "Edit PO — tambah/ubah item dari IR lain",
     onClick: () => openRevise(p)
   }, "✏️"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
@@ -21021,6 +21148,7 @@ function PurchaseOrderModule({
       }, (isHandler || isMaria || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
         size: "sm",
         variant: "ghost",
+        title: p.status === "Disetujui GM - Kirim ke Supplier" ? "Edit PO — tambah item/IR lain (akan kembali ke Menunggu Approval GM)" : "Edit PO — tambah/ubah item dari IR lain",
         onClick: () => openRevise(p)
       }, "✏️"), (isHandler || isMaria || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
         size: "sm",
@@ -21517,7 +21645,7 @@ function PurchaseOrderModule({
     style: {
       width: 260
     }
-  })), form.irNomors.length > 0 && /*#__PURE__*/React.createElement("div", {
+  })), irPick && irPickTarget === "create" && irPickPanel(), form.irNomors.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 6,
@@ -21861,93 +21989,6 @@ function PurchaseOrderModule({
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     onClick: save
   }, "Ajukan PO")))), /*#__PURE__*/React.createElement(Modal, {
-    open: !!irPick,
-    title: `Pilih Item dari ${irPick?.nomor || ""}`,
-    onClose: () => {
-      setIrPick(null);
-      setIrPickedIdx([]);
-    },
-    width: 560
-  }, irPick && /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      flexDirection: "column",
-      gap: 16
-    }
-  }, /*#__PURE__*/React.createElement("p", {
-    style: {
-      margin: 0,
-      color: theme.muted,
-      fontSize: 13,
-      fontWeight: 600
-    }
-  }, "Pilih item mana yang mau dibuat menjadi PO ini (item yang sudah di-PO tidak bisa dipilih lagi):"), irPick.items.map((it, i) => {
-    const consumed = !!it.sudahDiPO;
-    // Show Item Description alongside part number/name so Purchasing can tell parts apart when
-    // choosing which items actually belong on this PO (looked up the same way confirmIrPick does).
-    const partDesc = store.parts.find(p => p.partNumber === it.partNumber)?.description || "";
-    // Live qty kurang vs current Master Part stock — see confirmIrPick's note; this is the qty
-    // Purchasing sees BEFORE picking, so it needs to already be live too, not just at confirm time.
-    const livePart = store.parts.find(p => p.partNumber === it.partNumber);
-    const rawLiveStok = livePart ? (livePart.stok ?? 0) : (it.stokTersedia || 0);
-    // Net out stock already reserved by OTHER SOs' outstanding IRs — same fix as confirmIrPick.
-    const netLiveStok = Math.max(0, rawLiveStok - reservedQtyFor(store, it.partNumber, irPick.soNomor));
-    const liveQtyKurang = Math.max(0, (it.qtyButuh || 0) - netLiveStok);
-    return /*#__PURE__*/React.createElement("label", {
-      key: i,
-      style: {
-        display: "flex",
-        alignItems: "center",
-        gap: 10,
-        padding: "8px 12px",
-        background: theme.surface,
-        borderRadius: 8,
-        marginBottom: 6,
-        cursor: consumed ? "not-allowed" : "pointer",
-        fontSize: 13,
-        color: consumed ? theme.muted : theme.text,
-        opacity: consumed ? 0.55 : 1
-      }
-    }, /*#__PURE__*/React.createElement("input", {
-      type: "checkbox",
-      checked: irPickedIdx.includes(i),
-      disabled: consumed,
-      onChange: () => toggleIrPickedIdx(i)
-    }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("strong", null, it.partNumber), " — ", it.partName, " — Qty ", fmtNum(liveQtyKurang), liveQtyKurang <= 0 && liveQtyKurang !== it.qtyKurang && /*#__PURE__*/React.createElement("span", {
-      style: {
-        marginLeft: 6,
-        fontSize: 11,
-        color: theme.green,
-        fontWeight: 600
-      }
-    }, "(stock sudah cukup — direvisi sejak IR dibuat)")), partDesc && /*#__PURE__*/React.createElement("div", {
-      style: {
-        fontSize: 11,
-        color: theme.muted,
-        marginTop: 2
-      }
-    }, partDesc), consumed && /*#__PURE__*/React.createElement("span", {
-      style: {
-        marginLeft: 8
-      }
-    }, /*#__PURE__*/React.createElement(Badge, {
-      color: theme.green
-    }, "Sudah di-PO"))));
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 10,
-      justifyContent: "flex-end"
-    }
-  }, /*#__PURE__*/React.createElement(Btn, {
-    variant: "ghost",
-    onClick: () => {
-      setIrPick(null);
-      setIrPickedIdx([]);
-    }
-  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
-    onClick: confirmIrPick
-  }, "+ Tambahkan Item Terpilih")))), /*#__PURE__*/React.createElement(Modal, {
     open: !!importCostModal,
     title: `Import Cost — ${importCostModal?.nomor}`,
     onClose: () => setImportCostModal(null),
@@ -22183,7 +22224,7 @@ function PurchaseOrderModule({
     style: {
       width: 260
     }
-  })), /*#__PURE__*/React.createElement(Table, {
+  })), irPick && irPickTarget === "revise" && irPickPanel(), /*#__PURE__*/React.createElement(Table, {
     headers: ["Part Number", "Part Name", "Qty", "Harga Satuan", "Subtotal"],
     rows: reviseItems.map((it, i) => [it.partNumber, it.partName, fmtNum(it.qty), /*#__PURE__*/React.createElement("input", {
       type: "number",
@@ -33903,6 +33944,355 @@ function PriceAnalysisModule({
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// ANALISA CLIENT — client-centric mirror of PriceAnalysisModule above (per request 1/9/2026):
+// same underlying data (Quotation Unit + Quotation Parts/Service line items, non-Draft), but the
+// picker is a Client instead of a Part/Unit code, so Sales can select one client and see everything
+// that client has ever bought — every item/unit code, quantities, price range, last price/date, and
+// total value — instead of picking an item and seeing which clients bought it (that's what
+// PriceAnalysisModule already does; this is the inverse pivot of the same dataset).
+// ════════════════════════════════════════════════════════════════════════════
+function ClientAnalysisModule({
+  store,
+  session
+}) {
+  const {
+    quotationsUnit,
+    quotationsPS,
+    customers,
+    clientGroups,
+    salesOrders
+  } = store;
+  // Revision-family key: "SQ-099-FRT-VII-2026-R6" and its siblings all collapse to
+  // "SQ-099-FRT-VII-2026" so a quotation that got revised multiple times is only counted ONCE
+  // toward "berapa kali client minta quotation" below, matching how QuotationUnit/QuotationPS
+  // already treat a revision family as a single quotation for their own ON GOING/SUCCESS/CLOSED
+  // buckets — this is a lighter-weight recomputation of that same bucketing, done here at the
+  // per-client aggregate level (doesn't need each module's own quotAlreadyHasSO/isLatestRevision
+  // closures since family-level bucketing already avoids double counting).
+  const quotFamilyKey = nomor => (nomor || "").replace(/-R\d+$/, "");
+  // Per-client: how often they actually request a quotation vs how often that turns into a real
+  // order (PO/SO) vs how often it's explicitly Closed without becoming one (e.g. lost to a
+  // competitor's price) — requested so Sales can see who's "just shopping for quotes" vs who
+  // reliably converts.
+  const conversionByClient = React.useMemo(() => {
+    const families = new Map();
+    const collect = arr => (arr || []).forEach(q => {
+      if (q.status === "Draft") return;
+      const key = quotFamilyKey(q.nomor);
+      if (!families.has(key)) families.set(key, {
+        customerNama: q.customerNama || "-",
+        nomors: [],
+        statuses: [],
+        closeReasons: [],
+        _lastTanggal: ""
+      });
+      const f = families.get(key);
+      f.nomors.push(q.nomor);
+      f.statuses.push(q.status);
+      if (q.status === "Closed" && q.closeReason) f.closeReasons.push(q.closeReason);
+      if (!f._lastTanggal || (q.tanggal || "") >= f._lastTanggal) {
+        f._lastTanggal = q.tanggal || f._lastTanggal;
+        f.customerNama = q.customerNama || f.customerNama;
+      }
+    });
+    collect(quotationsUnit);
+    collect(quotationsPS);
+    const map = new Map();
+    families.forEach(f => {
+      const converted = (salesOrders || []).some(so => f.nomors.includes(so.sourceNomor));
+      const closedLost = !converted && f.statuses.includes("Closed");
+      const bucket = converted ? "converted" : closedLost ? "closedLost" : "ongoing";
+      if (!map.has(f.customerNama)) map.set(f.customerNama, {
+        total: 0,
+        converted: 0,
+        closedLost: 0,
+        ongoing: 0,
+        closeReasons: []
+      });
+      const m = map.get(f.customerNama);
+      m.total++;
+      m[bucket]++;
+      if (bucket === "closedLost") m.closeReasons.push(...f.closeReasons);
+    });
+    return map;
+  }, [quotationsUnit, quotationsPS, salesOrders]);
+  // Same groupNamaForCustomerNama pattern as PriceAnalysisModule — quotations only carry a
+  // point-in-time customerNama snapshot, not a live customerId, so Group is resolved by name.
+  const groupNamaForCustomerNama = nama => {
+    const cust = (customers || []).find(c => c.nama === nama);
+    if (!cust || !cust.groupId) return "-";
+    return (clientGroups || []).find(g => g.id === cust.groupId)?.nama || "-";
+  };
+  const allPoints = [];
+  (quotationsUnit || []).forEach(q => {
+    if (q.status === "Draft") return;
+    (q.items || []).forEach(it => {
+      if (!it.unitCode) return;
+      allPoints.push({
+        tipe: "Unit",
+        quotNomor: q.nomor,
+        tanggal: q.tanggal,
+        status: q.status,
+        customerNama: q.customerNama || "-",
+        code: it.unitCode,
+        name: it.unitName || "",
+        harga: it.harga || 0,
+        qty: it.qty || 0
+      });
+    });
+  });
+  (quotationsPS || []).forEach(q => {
+    if (q.status === "Draft") return;
+    (q.items || []).forEach(it => {
+      if (!it.partNumber) return;
+      allPoints.push({
+        tipe: "Part/Service",
+        quotNomor: q.nomor,
+        tanggal: q.tanggal,
+        status: q.status,
+        customerNama: q.customerNama || "-",
+        code: it.partNumber,
+        name: it.partName || "",
+        harga: it.harga || 0,
+        qty: it.qty || 0
+      });
+    });
+  });
+  const clientMap = new Map();
+  allPoints.forEach(p => {
+    const key = p.customerNama || "-";
+    if (!clientMap.has(key)) clientMap.set(key, {
+      customerNama: key,
+      count: 0,
+      totalValue: 0
+    });
+    const c = clientMap.get(key);
+    c.count++;
+    c.totalValue += (p.harga || 0) * (p.qty || 0);
+  });
+  const clientOptions = [...clientMap.values()].sort((a, b) => b.totalValue - a.totalValue);
+  const [search, setSearch] = useState("");
+  const filteredClientOptions = search.trim() ? clientOptions.filter(c => c.customerNama.toLowerCase().includes(search.trim().toLowerCase())) : clientOptions;
+  const [selectedClient, setSelectedClient] = useState("");
+  const history = selectedClient ? allPoints.filter(p => p.customerNama === selectedClient).slice().sort((a, b) => (a.tanggal || "").localeCompare(b.tanggal || "")) : [];
+  const historyDesc = history.slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  const itemMap = new Map();
+  history.forEach(p => {
+    const key = p.code;
+    if (!itemMap.has(key)) itemMap.set(key, {
+      code: p.code,
+      name: p.name,
+      tipe: p.tipe,
+      count: 0,
+      totalQty: 0,
+      min: Infinity,
+      max: -Infinity,
+      sum: 0,
+      lastTanggal: "",
+      lastHarga: 0,
+      totalValue: 0
+    });
+    const it = itemMap.get(key);
+    it.count++;
+    it.totalQty += p.qty || 0;
+    it.min = Math.min(it.min, p.harga);
+    it.max = Math.max(it.max, p.harga);
+    it.sum += p.harga;
+    it.totalValue += (p.harga || 0) * (p.qty || 0);
+    if (p.tanggal >= it.lastTanggal) {
+      it.lastTanggal = p.tanggal;
+      it.lastHarga = p.harga;
+    }
+  });
+  const perItem = [...itemMap.values()].sort((a, b) => b.totalValue - a.totalValue);
+  const totalValue = history.reduce((s, p) => s + (p.harga || 0) * (p.qty || 0), 0);
+  const totalQty = history.reduce((s, p) => s + (p.qty || 0), 0);
+  const uniqueItemCount = itemMap.size;
+  const firstTanggal = history.length ? history[0].tanggal : "-";
+  const lastTanggal = history.length ? historyDesc[0].tanggal : "-";
+  const clientGroupName = selectedClient ? groupNamaForCustomerNama(selectedClient) : "-";
+  const conv = selectedClient ? conversionByClient.get(selectedClient) || {
+    total: 0,
+    converted: 0,
+    closedLost: 0,
+    ongoing: 0,
+    closeReasons: []
+  } : null;
+  const convRate = conv && conv.total > 0 ? conv.converted / conv.total * 100 : 0;
+  const convStatCards = conv ? [["Total Quotation Diminta", conv.total, theme.text], ["Jadi PO/SO", conv.converted, theme.green], ["Conversion Rate", convRate.toFixed(0) + "%", convRate >= 50 ? theme.green : theme.yellow], ["Closed — Tidak Jadi", conv.closedLost, theme.red], ["Masih On Going", conv.ongoing, theme.cyan]].map(([label, val, color], i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      background: theme.surface,
+      borderRadius: 8,
+      padding: "10px 14px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: theme.muted,
+      marginBottom: 4
+    }
+  }, label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 700,
+      color: color
+    }
+  }, val))) : [];
+  const conversionStatsCard = conv ? /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 4px",
+      color: theme.text,
+      fontSize: 15
+    }
+  }, "Konversi Quotation → PO/SO"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 14px",
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Seberapa sering client ini benar-benar meminta quotation, dan seberapa sering itu berujung jadi pembelian (bukan hanya untuk membandingkan harga dengan kompetitor)."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+      gap: 12
+    }
+  }, convStatCards), conv.closeReasons.length > 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 14,
+      paddingTop: 12,
+      borderTop: `1px solid ${theme.border}`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      fontWeight: 600,
+      color: theme.muted,
+      marginBottom: 6
+    }
+  }, "Alasan Closed (tidak jadi PO/SO):"), conv.closeReasons.map((r, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      fontSize: 12,
+      color: theme.text,
+      marginBottom: 3
+    }
+  }, "• ", r))) : null) : null;
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      flexWrap: "wrap",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("h2", {
+    style: {
+      margin: 0,
+      color: theme.text
+    }
+  }, "Analisa Client"), selectedClient && /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setSelectedClient("")
+  }, "← Kembali ke daftar client")), !selectedClient && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      background: theme.surface,
+      padding: "8px 14px",
+      borderRadius: 8,
+      border: `1px dashed ${theme.border}`
+    }
+  }, "ℹ️ Data ditarik dari seluruh riwayat Quotation Unit dan Quotation Parts/Service (kecuali Draft). Pilih satu client untuk melihat semua item/unit yang pernah mereka beli, jumlah, harga, dan total nilai."), !selectedClient && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari nama client...",
+    value: search,
+    onChange: setSearch,
+    style: {
+      marginBottom: 12
+    }
+  }), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Nama Client", "Group", "Jumlah Transaksi", "Total Nilai Pembelian"],
+    rows: filteredClientOptions.map(c => [/*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.accentLight,
+        fontWeight: 600,
+        cursor: "pointer"
+      },
+      onClick: () => setSelectedClient(c.customerNama)
+    }, c.customerNama), groupNamaForCustomerNama(c.customerNama), c.count, fmt(c.totalValue)]),
+    emptyMsg: "Belum ada data pembelian dari Quotation."
+  })), selectedClient && history.length === 0 && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: theme.muted,
+      margin: 0
+    }
+  }, "Tidak ada riwayat pembelian untuk client ini.")), selectedClient && history.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 4px",
+      color: theme.text
+    }
+  }, selectedClient, " ", clientGroupName !== "-" && /*#__PURE__*/React.createElement(Badge, {
+    color: theme.accent
+  }, clientGroupName)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
+      gap: 12,
+      marginTop: 14
+    }
+  }, [["Total Nilai Pembelian", fmt(totalValue), theme.green], ["Total Qty Dibeli", fmtNum(totalQty), theme.text], ["Jumlah Item Unik", uniqueItemCount, theme.text], ["Jumlah Transaksi", history.length, theme.text], ["Pembelian Pertama", firstTanggal, theme.text], ["Pembelian Terakhir", lastTanggal, theme.text]].map(([label, val, color], i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      background: theme.surface,
+      borderRadius: 8,
+      padding: "10px 14px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: theme.muted,
+      marginBottom: 4
+    }
+  }, label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 700,
+      color: color
+    }
+  }, val)))), conversionStatsCard, /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.text,
+      fontSize: 15
+    }
+  }, "Rincian Item yang Dibeli"), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Kode", "Nama", "Tipe", "Total Qty", "Harga Terendah", "Harga Tertinggi", "Harga Terakhir", "Tanggal Terakhir", "Total Nilai"],
+    rows: perItem.map(it => [it.code, it.name, /*#__PURE__*/React.createElement(Badge, {
+      color: it.tipe === "Unit" ? theme.purple : theme.cyan
+    }, it.tipe), fmtNum(it.totalQty), fmt(it.min), fmt(it.max), fmt(it.lastHarga), it.lastTanggal, fmt(it.totalValue)]),
+    emptyMsg: "-"
+  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.text,
+      fontSize: 15
+    }
+  }, "Riwayat Lengkap"), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Tanggal", "No. Quotation", "Kode", "Nama", "Status", "Qty", "Harga", "Subtotal"],
+    rows: historyDesc.map(p => [p.tanggal, p.quotNomor, p.code, p.name, /*#__PURE__*/React.createElement(Badge, {
+      color: p.status === "Disetujui GM" || p.status === "Sudah jadi SO" ? theme.green : theme.yellow
+    }, p.status), fmtNum(p.qty), fmt(p.harga), fmt((p.harga || 0) * (p.qty || 0))]),
+    emptyMsg: "-"
+  })))));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // ANALISA HARGA PEMBELIAN — purchase-price-history / fluctuation comparison for the
 // Purchasing team, mirroring PriceAnalysisModule above but pulled from PO Local + PO
 // Overseas line items (unified system, per explicit request) instead of Sales quotations.
@@ -34225,6 +34615,265 @@ function PurchasePriceAnalysisModule({
     }, p.status), fmtNum(p.qty), p.currency, p.currency === "IDR" ? fmt(p.harga) : fmtNum(p.harga)]),
     emptyMsg: "-"
   })))));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ANALISA USER — login frequency + module-usage breakdown per user (Owner/GM/HRD only), reading
+// erp_user_activity_log (see logUserActivity + the App()-level login/navigate hooks). Separate
+// from erp_audit_log, which only captures write/approval actions — this captures plain login and
+// browsing, so HR/management can assess which modules are genuinely used and by whom.
+// ════════════════════════════════════════════════════════════════════════════
+function UserAnalysisModule({
+  store,
+  session
+}) {
+  const [periodeDays, setPeriodeDays] = useState("30");
+  const [selectedUser, setSelectedUser] = useState("");
+  const [search, setSearch] = useState("");
+  const periodeNum = Number(periodeDays) || 0;
+  const cutoffMs = periodeNum > 0 ? Date.now() - periodeNum * 24 * 60 * 60 * 1000 : 0;
+  const logInPeriod = React.useMemo(() => (store.userActivityLog || []).filter(e => {
+    const ts = Date.parse(e.timestamp);
+    return !isNaN(ts) && ts >= cutoffMs;
+  }), [store.userActivityLog, cutoffMs]);
+  const moduleLabelMap = React.useMemo(() => {
+    const map = {};
+    ALL_MODULES.forEach(m => {
+      map[m.id] = `${m.icon} ${m.label}`;
+    });
+    return map;
+  }, []);
+  const perUser = React.useMemo(() => {
+    const map = new Map();
+    const blank = (username, nama, role) => ({
+      username,
+      nama,
+      role,
+      loginCount: 0,
+      navigateCount: 0,
+      lastActive: null,
+      moduleCounts: {}
+    });
+    (store.authUsers || []).forEach(u => map.set(u.username, blank(u.username, u.nama, u.role)));
+    logInPeriod.forEach(e => {
+      if (!e.username) return;
+      if (!map.has(e.username)) map.set(e.username, blank(e.username, e.nama, e.role));
+      const u = map.get(e.username);
+      if (e.type === "login") u.loginCount++;else u.navigateCount++;
+      if (e.moduleId) u.moduleCounts[e.moduleId] = (u.moduleCounts[e.moduleId] || 0) + 1;
+      if (!u.lastActive || Date.parse(e.timestamp) > Date.parse(u.lastActive)) u.lastActive = e.timestamp;
+    });
+    return [...map.values()].sort((a, b) => b.loginCount + b.navigateCount - (a.loginCount + a.navigateCount));
+  }, [logInPeriod, store.authUsers]);
+  const filteredUsers = search.trim() ? perUser.filter(u => (u.nama || "").toLowerCase().includes(search.trim().toLowerCase()) || (u.username || "").toLowerCase().includes(search.trim().toLowerCase())) : perUser;
+  const moduleStats = React.useMemo(() => {
+    const counts = {};
+    logInPeriod.forEach(e => {
+      if (e.type !== "navigate" || !e.moduleId) return;
+      if (!counts[e.moduleId]) counts[e.moduleId] = {
+        count: 0,
+        users: new Set()
+      };
+      counts[e.moduleId].count++;
+      counts[e.moduleId].users.add(e.username);
+    });
+    return Object.entries(counts).map(([moduleId, v]) => ({
+      moduleId,
+      count: v.count,
+      userCount: v.users.size
+    })).sort((a, b) => b.count - a.count);
+  }, [logInPeriod]);
+  const activeUserCount = perUser.filter(u => u.loginCount > 0 || u.navigateCount > 0).length;
+  const totalLogins = logInPeriod.filter(e => e.type === "login").length;
+  const detail = selectedUser ? perUser.find(u => u.username === selectedUser) : null;
+  const detailModules = detail ? Object.entries(detail.moduleCounts).map(([moduleId, count]) => ({
+    moduleId,
+    count
+  })).sort((a, b) => b.count - a.count) : [];
+  const fmtDateTime = ts => {
+    if (!ts) return "-";
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return "-";
+    return fmtDateRev(ts) + " " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+  };
+  const periodeOptions = [{
+    value: "7",
+    label: "7 Hari Terakhir"
+  }, {
+    value: "30",
+    label: "30 Hari Terakhir"
+  }, {
+    value: "90",
+    label: "90 Hari Terakhir"
+  }, {
+    value: "0",
+    label: "Semua (maks. 180 hari — batas retensi log)"
+  }];
+  const summaryCards = [["User Aktif (dari total akun)", activeUserCount + " / " + perUser.length, theme.text], ["Total Login", totalLogins, theme.green], ["Total Aktivitas Navigasi", logInPeriod.filter(e => e.type === "navigate").length, theme.text], ["Modul Berbeda yang Disentuh", moduleStats.length, theme.text]].map(([label, val, color], i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      background: theme.surface,
+      borderRadius: 8,
+      padding: "10px 14px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: theme.muted,
+      marginBottom: 4
+    }
+  }, label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 700,
+      color: color
+    }
+  }, val)));
+  const userTableRows = filteredUsers.map(u => {
+    const roleLabel = ROLE_DEFS[u.role]?.label || u.role || "-";
+    const topModule = Object.entries(u.moduleCounts).sort((a, b) => b[1] - a[1])[0];
+    return [/*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.accentLight,
+        fontWeight: 600,
+        cursor: "pointer"
+      },
+      onClick: () => setSelectedUser(u.username)
+    }, u.nama || u.username), roleLabel, u.loginCount, u.navigateCount, Object.keys(u.moduleCounts).length, topModule ? moduleLabelMap[topModule[0]] || topModule[0] : "-", fmtDateTime(u.lastActive)];
+  });
+  const moduleStatRows = moduleStats.map(m => [moduleLabelMap[m.moduleId] || m.moduleId, m.count, m.userCount]);
+  const detailRows = detailModules.map(m => [moduleLabelMap[m.moduleId] || m.moduleId, m.count]);
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      flexWrap: "wrap",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("h2", {
+    style: {
+      margin: 0,
+      color: theme.text
+    }
+  }, "Analisa User"), detail && /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setSelectedUser("")
+  }, "← Kembali ke daftar user")), !detail && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      background: theme.surface,
+      padding: "8px 14px",
+      borderRadius: 8,
+      border: `1px dashed ${theme.border}`
+    }
+  }, "ℹ️ Menghitung seberapa sering setiap user login dan berpindah antar modul ERP — dasar untuk menilai modul mana yang benar-benar dipakai per role. Data disimpan maks. 180 hari."), !detail && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 12,
+      flexWrap: "wrap",
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    label: "Periode",
+    value: periodeDays,
+    onChange: setPeriodeDays,
+    options: periodeOptions,
+    style: {
+      width: 240
+    }
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Cari user",
+    placeholder: "Nama atau username...",
+    value: search,
+    onChange: setSearch,
+    style: {
+      flex: 1,
+      minWidth: 200
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+      gap: 12
+    }
+  }, summaryCards)), !detail && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.text,
+      fontSize: 15
+    }
+  }, "Per User"), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Nama", "Role", "Jumlah Login", "Aktivitas Navigasi", "Modul Unik Disentuh", "Modul Paling Sering", "Terakhir Aktif"],
+    rows: userTableRows,
+    emptyMsg: "Belum ada data aktivitas user."
+  })), !detail && moduleStats.length > 0 && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 4px",
+      color: theme.text,
+      fontSize: 15
+    }
+  }, "Modul Paling Sering Diakses (Company-Wide)"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 12px",
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Diurutkan dari yang paling sering — dasar untuk menilai modul mana yang benar-benar dipakai."), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Modul", "Jumlah Kunjungan", "Jumlah User Berbeda"],
+    rows: moduleStatRows,
+    emptyMsg: "-"
+  })), detail && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 4px",
+      color: theme.text
+    }
+  }, detail.nama || detail.username, " ", /*#__PURE__*/React.createElement(Badge, {
+    color: theme.accent
+  }, ROLE_DEFS[detail.role]?.label || detail.role || "-")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+      gap: 12,
+      marginTop: 14
+    }
+  }, [["Jumlah Login", detail.loginCount, theme.green], ["Aktivitas Navigasi", detail.navigateCount, theme.text], ["Modul Unik Disentuh", detailModules.length, theme.text], ["Terakhir Aktif", fmtDateTime(detail.lastActive), theme.text]].map(([label, val, color], i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      background: theme.surface,
+      borderRadius: 8,
+      padding: "10px 14px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: theme.muted,
+      marginBottom: 4
+    }
+  }, label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 700,
+      color: color
+    }
+  }, val))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.text,
+      fontSize: 15
+    }
+  }, "Rincian Penggunaan Modul"), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Modul", "Jumlah Kunjungan"],
+    rows: detailRows,
+    emptyMsg: "Belum ada aktivitas modul untuk user ini pada periode ini."
+  }))));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -40916,7 +41565,21 @@ function App() {
   const handleLoginSuccess = sess => {
     setSession(sess);
     markAuthReady();
+    logUserActivity(store, sess, {
+      type: "login"
+    });
   };
+  // Analisa User: record every module the logged-in user actually lands on — covers explicit
+  // sidebar clicks (selectMenu above) AND programmatic cross-module handoffs that call setActive
+  // directly (e.g. pendingSOQuot/pendingSQClient flows), since both funnel through `active`.
+  useEffect(() => {
+    if (!session) return;
+    logUserActivity(store, session, {
+      type: "navigate",
+      moduleId: active
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, session?.username]);
   if (!authChecked) return /*#__PURE__*/React.createElement("div", {
     style: {
       minHeight: "100vh",
@@ -40934,6 +41597,7 @@ function App() {
   let allowedModuleIds = getAllowedModules(session.role, session.customModules);
   if (!hasPayrollAccess(session.role)) allowedModuleIds = allowedModuleIds.filter(m => m !== "payroll");
   if (!hasUangDinasAccess(session)) allowedModuleIds = allowedModuleIds.filter(m => m !== "uang_dinas");
+  if (!hasUserAnalysisAccess(session.role)) allowedModuleIds = allowedModuleIds.filter(m => m !== "user_analysis");
   const allowedMenus = ALL_MODULES.filter(m => allowedModuleIds.includes(m.id));
   const activeMenu = allowedMenus.find(m => m.id === active) || allowedMenus[0];
   const def = ROLE_DEFS[session.role];
@@ -41229,6 +41893,11 @@ function App() {
           store: store,
           session: session
         });
+      case "client_analysis":
+        return /*#__PURE__*/React.createElement(ClientAnalysisModule, {
+          store: store,
+          session: session
+        });
       case "price_analysis_purchase":
         return /*#__PURE__*/React.createElement(PurchasePriceAnalysisModule, {
           store: store,
@@ -41290,6 +41959,13 @@ function App() {
           session: session
         }) : /*#__PURE__*/React.createElement(AccessDenied, {
           label: "Payroll"
+        });
+      case "user_analysis":
+        return hasUserAnalysisAccess(session.role) ? /*#__PURE__*/React.createElement(UserAnalysisModule, {
+          store: store,
+          session: session
+        }) : /*#__PURE__*/React.createElement(AccessDenied, {
+          label: "Analisa User"
         });
       case "uang_dinas":
         return hasUangDinasAccess(session) ? /*#__PURE__*/React.createElement(UangDinasModule, {
