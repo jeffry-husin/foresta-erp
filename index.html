@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-09-03.8";
+const APP_BUILD = "2026-09-03.9";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -4628,6 +4628,14 @@ function Table({
   // tableCellSortValue() extracted from the already-rendered row cells.
   const [sortCol, setSortCol] = useState(null);
   const [sortDir, setSortDir] = useState("asc");
+  // Below 768px, every Table app-wide (there are dozens of call sites across every module) renders
+  // as stacked cards instead of a wide <table> — one column of "label: value" lines per row, using
+  // the same headers/rows data the table markup already gets, so no call site needs to change.
+  // Fixing this centrally (instead of hand-converting each module's table one at a time, which was
+  // the first approach tried) is what makes the "every module, down to the inner pages" mobile
+  // request actually tractable — a single change here reaches every table in the app, including
+  // ones inside detail modals and sub-pages that a per-module pass would take many sessions to reach.
+  const isMobile = useIsMobile();
   // Optional built-in quick-filter search box (opt in via `search: true`), for lists that don't
   // already sit under a page-level search Input.
   const [quickSearch, setQuickSearch] = useState("");
@@ -4695,6 +4703,72 @@ function Table({
     el.scrollLeft += e.key === "ArrowRight" ? 120 : -120;
     e.preventDefault();
   };
+  // Generic mobile card rendering — first column becomes the card's bold title (mirrors how the
+  // desktop table sticks column 0 as the row's identifying info), every other column becomes a
+  // "label: value" line using that column's header as the label. Same pageRows (already
+  // filtered/sorted/paginated) and the same onEdit/onDelete callbacks as the table branch below, so
+  // behavior is identical — only the layout differs.
+  const mobileCardsEl = /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 10
+    }
+  }, sortedRows.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: theme.muted,
+      padding: 24,
+      textAlign: "center"
+    }
+  }, emptyMsg) : pageRows.map(({
+    row,
+    origIdx
+  }) => /*#__PURE__*/React.createElement("div", {
+    key: origIdx,
+    style: {
+      background: theme.card,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 12,
+      padding: 14,
+      display: "flex",
+      flexDirection: "column",
+      gap: 6
+    }
+  }, row.map((cell, j) => /*#__PURE__*/React.createElement("div", {
+    key: j,
+    style: {
+      display: "flex",
+      justifyContent: j === 0 ? "flex-start" : "space-between",
+      gap: 10,
+      fontSize: j === 0 ? 15 : 13,
+      fontWeight: j === 0 ? 700 : 400,
+      color: theme.text
+    }
+  }, j !== 0 && /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted,
+      fontSize: 12,
+      flexShrink: 0
+    }
+  }, headers[j] || ""), /*#__PURE__*/React.createElement("span", {
+    style: {
+      textAlign: j === 0 ? "left" : "right"
+    }
+  }, autoFormatTableCell(cell)))), (onEdit || onDelete) && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      marginTop: 4
+    }
+  }, onEdit && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => onEdit(origIdx)
+  }, "✏️ Edit"), onDelete && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "danger",
+    onClick: () => onDelete(origIdx)
+  }, "✕ Hapus")))));
   return /*#__PURE__*/React.createElement("div", null, search && /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari di tabel ini...",
     value: quickSearch,
@@ -4705,7 +4779,7 @@ function Table({
     style: {
       marginBottom: 10
     }
-  }), /*#__PURE__*/React.createElement("div", {
+  }), isMobile ? mobileCardsEl : /*#__PURE__*/React.createElement("div", {
     ref: scrollWrapRef,
     tabIndex: -1,
     onMouseEnter: e => e.currentTarget.focus(),
@@ -11556,7 +11630,37 @@ function MekanikReport({
         variant: "success",
         onClick: () => submitRecDoc(v)
       }, recDoc && recDoc.status !== "Menunggu Approval Septi" ? "💾 Simpan & Ajukan Ulang untuk Approval (" : "💾 Simpan Part Recommendation (", recCart.length, " item)")));
-    })(), type === "status" && !formType && /*#__PURE__*/React.createElement(Table, {
+    })(), type === "status" && !formType && (isMobile ? /*#__PURE__*/React.createElement(MobileCardList, {
+      items: visitStatus(v.id),
+      keyFor: s => s.id,
+      fields: [{
+        label: "Status",
+        render: s => /*#__PURE__*/React.createElement(Badge, {
+          color: statusColor[s.statusPekerjaan]
+        }, s.statusPekerjaan)
+      }, {
+        label: "Kondisi Unit",
+        render: s => /*#__PURE__*/React.createElement(Badge, {
+          color: kondisiUnitColor[s.kondisiUnit]
+        }, s.kondisiUnit)
+      }, {
+        label: "Tingkat Keparahan",
+        render: s => /*#__PURE__*/React.createElement(Badge, {
+          color: keparahanColor[s.keparahan]
+        }, s.keparahan)
+      }, {
+        label: "Catatan",
+        render: s => s.catatanKondisi || "-"
+      }, {
+        label: "Rekomendasi Lanjutan",
+        render: s => s.rekomendasiLanjutan || "-"
+      }],
+      actions: s => [/*#__PURE__*/React.createElement(PrintBtn, {
+        key: "print",
+        onClick: () => printStatus(s)
+      })],
+      emptyMsg: "Belum ada status report"
+    }) : /*#__PURE__*/React.createElement(Table, {
       headers: ["Status Pekerjaan", "Kondisi Unit", "Tingkat Keparahan", "Catatan", "Rekomendasi Lanjutan", ""],
       rows: visitStatus(v.id).map(s => [/*#__PURE__*/React.createElement(Badge, {
         color: statusColor[s.statusPekerjaan]
@@ -11570,7 +11674,7 @@ function MekanikReport({
         onClick: () => printStatus(s)
       })]),
       emptyMsg: "Belum ada status report"
-    }), formType === "status" && React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+    })), formType === "status" && React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       flexDirection: "column",
