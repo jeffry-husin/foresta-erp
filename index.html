@@ -18,12 +18,118 @@
 <style>
   * { box-sizing: border-box; }
   body { margin: 0; padding: 0; font-family: 'Segoe UI', system-ui, sans-serif; }
+  /* ─── Mobile readability pass (Sep 2026) ───────────────────────────────────────────────────
+     Everything below only fires under 768px so desktop is completely untouched. It's applied
+     globally via CSS instead of editing every module individually — the app has hundreds of
+     ad-hoc inline `style={}` grids/tables/buttons across dozens of components, so touching each
+     one by hand would be slow and error-prone. CSS with !important can override React inline
+     styles regardless of specificity, so one small stylesheet block reaches all of them at once:
+     - Tables: bigger font + row padding so cells are readable/tappable, not touched on desktop.
+     - Any div using CSS Grid columns (forms, filter bars, stat-card rows, item-add rows, etc.)
+       collapses to a single column so fields aren't squeezed into slivers on a 375-430px screen.
+     - Inputs/selects/textareas get font-size 16px — below 16px, iOS Safari auto-zooms the page
+       every time a field is focused, which is its own readability problem on top of the small text.
+     - Buttons get a taller minimum tap target (~40px) per standard mobile touch-target guidance,
+       most relevant to the icon-only buttons (✏️🗑️💸 etc.) used throughout the app. */
+  @media (max-width: 768px) {
+    table { font-size: 14px !important; }
+    table td, table th { padding: 10px 8px !important; }
+    div[style*="grid-template-columns"] { grid-template-columns: 1fr !important; }
+    input, select, textarea { font-size: 16px !important; }
+    button { min-height: 40px; }
+  }
 </style>
 </head>
 <body>
 <div id="root"></div>
 <script>
 const { useState, useEffect, useRef } = React;
+
+// Shared mobile-breakpoint hook — any component can call useIsMobile() directly instead of having
+// isMobile threaded down as a prop from the App router. Used by the mobile "card view" alternative
+// to the standard Table in Mekanik Report and Sales Order (see MOBILE CARD LIST helper below),
+// requested after the app's tables proved hard to read/use on a phone screen.
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(() => typeof window !== "undefined" && window.innerWidth < 768);
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < 768);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  return isMobile;
+}
+// Generic mobile card list: renders `items` as stacked cards instead of a wide table. `fields` is
+// an array of { label, render(item) } describing which pieces of each row to surface and how (same
+// spirit as a Table's headers/rows, but label:value pairs stacked vertically fit a 375-430px screen
+// instead of forcing horizontal scroll through a dozen columns). `onClick(item)` opens the same
+// detail/edit view a table row's click would have. `actions(item)` optionally renders one or more
+// buttons per card (e.g. Detail/Edit) below the fields.
+function MobileCardList({
+  items,
+  fields,
+  keyFor,
+  onClick,
+  actions,
+  emptyMsg = "Tidak ada data"
+}) {
+  if (!items || items.length === 0) return /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: theme.muted,
+      padding: 24,
+      textAlign: "center"
+    }
+  }, emptyMsg);
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 10
+    }
+  }, items.map((item, i) => /*#__PURE__*/React.createElement("div", {
+    key: keyFor ? keyFor(item) : i,
+    onClick: onClick ? () => onClick(item) : undefined,
+    style: {
+      background: theme.card,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 12,
+      padding: 14,
+      display: "flex",
+      flexDirection: "column",
+      gap: 6,
+      cursor: onClick ? "pointer" : "default"
+    }
+  }, fields.map((f, fi) => /*#__PURE__*/React.createElement("div", {
+    key: fi,
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      gap: 10,
+      fontSize: fi === 0 ? 15 : 13,
+      fontWeight: fi === 0 ? 700 : 400,
+      color: fi === 0 ? theme.text : theme.muted
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      flexShrink: 0,
+      color: theme.muted,
+      fontWeight: 400,
+      fontSize: 12
+    }
+  }, fi === 0 ? "" : f.label), /*#__PURE__*/React.createElement("span", {
+    style: {
+      textAlign: "right",
+      color: fi === 0 ? theme.text : theme.text
+    }
+  }, f.render(item)))), actions && /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      display: "flex",
+      gap: 8,
+      marginTop: 4,
+      flexWrap: "wrap"
+    }
+  }, actions(item)))));
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 // APP BUILD / AUTO-UPDATE CHECK
@@ -35,7 +141,7 @@ const { useState, useEffect, useRef } = React;
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-09-03.6";
+const APP_BUILD = "2026-09-03.8";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -9654,6 +9760,11 @@ function MekanikReport({
     dinasCatatan,
     setDinasCatatan
   } = store;
+  // On a phone, the ON GOING Kunjungan table (14 columns) forces heavy horizontal scrolling per row
+  // — swap it for a stacked card list instead (see MobileCardList near the top of the file).
+  // Mekanik Report was flagged as a priority module for the mobile pass (field mekanik open this
+  // from their phone more than any other module).
+  const isMobile = useIsMobile();
   // Master Mill auto-fill from Mekanik Report (per Jef's request): whenever a BAPP is filled in with
   // Crane/SN Crane/Grapple/SN Grapple for a Mill that's still missing that field in Master Mill,
   // backfill it there automatically — never overwrites a field Master Mill already has a value for,
@@ -12590,7 +12701,37 @@ function MekanikReport({
     badgeColor: theme.cyan,
     storageKey: "mr_visits_ongoing",
     defaultOpen: true
-  }, /*#__PURE__*/React.createElement(Table, {
+  }, isMobile ? /*#__PURE__*/React.createElement(MobileCardList, {
+    items: myVisitsOngoing,
+    keyFor: v => v.id,
+    fields: [{
+      label: "No. Kunjungan",
+      render: v => v.id
+    }, {
+      label: "Client",
+      render: v => v.customerNama
+    }, {
+      label: "Tanggal",
+      render: v => v.tanggal
+    }, {
+      label: "Jenis",
+      render: v => v.jenisBeritaAcara
+    }, {
+      label: "Unit / Lokasi",
+      render: v => `${v.unitTerkait || "-"} · ${v.lokasi || "-"}`
+    }, {
+      label: "Mekanik",
+      render: v => v.mekanikNamaList && v.mekanikNamaList.length ? v.mekanikNamaList.join(", ") : v.mekanikNama
+    }],
+    actions: v => [openVisitPageBadge(v, "dar", visitDars(v.id).length ? theme.green : theme.muted, "DAR " + visitDars(v.id).length), openVisitPageBadge(v, "partrec", visitRecDoc(v.id) ? theme.purple : theme.muted, "Part Rec " + (visitRecDoc(v.id)?.items.length || 0)), openVisitPageBadge(v, "status", visitStatus(v.id).length ? theme.cyan : theme.muted, "Status " + visitStatus(v.id).length), openVisitPageBadge(v, "bast", visitBasts(v.id).length ? theme.green : theme.muted, "BAPP " + visitBasts(v.id).length), openVisitPageBadge(v, "inspection", visitInspections(v.id).length ? theme.cyan : theme.muted, "Inspection " + visitInspections(v.id).length), openVisitPageBadge(v, "surattugas", visitSuratTugas(v.id).length ? theme.purple : theme.muted, "ST " + visitSuratTugas(v.id).length)].map((el, idx) => /*#__PURE__*/React.cloneElement(el, {
+      key: idx
+    })).concat([/*#__PURE__*/React.createElement(Btn, {
+      key: "selesai",
+      size: "sm",
+      onClick: () => markVisitSelesai(v)
+    }, "✓ Selesai")]),
+    emptyMsg: "Belum ada kunjungan kerja on going"
+  }) : /*#__PURE__*/React.createElement(Table, {
     headers: ["No. Kunjungan", "Tanggal", "Jenis", "Client", "Unit Terkait", "Lokasi", "Mekanik", "DAR", "Part Rec.", "Status", "BAPP", "Inspection", "Surat Tugas", "Aksi"],
     rows: myVisitsOngoing.map(v => [visitIdCell(v), v.tanggal, /*#__PURE__*/React.createElement(Badge, {
       color: theme.purple
@@ -15569,6 +15710,7 @@ function QuotationPS({
   clearPendingSQClient
 }) {
   const {
+    quotationsUnit,
     quotationsPS,
     setQuotationsPS,
     customers,
@@ -17544,6 +17686,10 @@ function SalesOrderModule({
     dinasCatatan,
     setDinasCatatan
   } = store;
+  // On a phone, the ON GOING table (10 columns) forces heavy horizontal scrolling per row — swap it
+  // for a stacked card list instead (see MobileCardList near the top of the file). Scoped to just
+  // this one section for now (Sales Order was flagged as a priority module for the mobile pass).
+  const isMobile = useIsMobile();
   // Auto-create the "kind:project" Uang Dinas placeholder for a SO the moment it becomes MR
   // (fulfillmentType "MR") — either fresh via createSO("MR") or via changeFulfillmentType — per
   // Jef's request so Finance/Workshop can start tracking Biaya Lain2 before any mekanik is even
@@ -18400,7 +18546,42 @@ function SalesOrderModule({
     count: soOnGoingList.length,
     badgeColor: theme.accent,
     storageKey: "so_ongoing"
-  }, /*#__PURE__*/React.createElement(Table, {
+  }, isMobile ? /*#__PURE__*/React.createElement(MobileCardList, {
+    items: soOnGoingList,
+    keyFor: so => so.nomor,
+    onClick: so => setDetail(so),
+    fields: [{
+      label: "No. SO",
+      render: so => soLabel(so)
+    }, {
+      label: "Client",
+      render: so => so.customerNama
+    }, {
+      label: "Tanggal",
+      render: so => so.tanggal
+    }, {
+      label: "Tipe / Rute",
+      render: so => `${so.tipe} · ${fulfillmentLabel(so.fulfillmentType)}`
+    }, {
+      label: "Total",
+      render: so => fmt(so.total)
+    }, {
+      label: "Status",
+      render: so => so.status
+    }],
+    actions: (isEpy || isOwnerLike) ? so => [/*#__PURE__*/React.createElement(Btn, {
+      key: "selesai",
+      size: "sm",
+      variant: "ghost",
+      onClick: () => openSelesaiModal(so)
+    }, "✓ Tandai Selesai"), /*#__PURE__*/React.createElement(Btn, {
+      key: "edit",
+      size: "sm",
+      variant: "ghost",
+      onClick: () => openEditSO(so)
+    }, "✏️ Edit")] : undefined,
+    emptyMsg: "Belum ada Sales Order on going"
+  }) : /*#__PURE__*/React.createElement(Table, {
     headers: ["No. SO", "Tipe", "Rute", "Sumber Quotation", "No. PO Client", "Tanggal", "Client", "Total", "Status", "Selesai"],
     rows: soOnGoingList.map(so => [/*#__PURE__*/React.createElement("span", {
       style: {
