@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-09-03.9";
+const APP_BUILD = "2026-09-04.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -271,6 +271,14 @@ const fmtCur = (n, currency) => new Intl.NumberFormat("id-ID", {
 // isn't guaranteed to be IDR (e.g. Purchase Order Overseas), so the display always matches the
 // document's actual currency instead of silently falling back to Rupiah formatting.
 const fmtMoney = (n, currency) => !currency || currency === "IDR" ? fmt(n) : `${currency} ${fmtCur(n, currency)}`;
+// SECURITY (2026-09-04, external audit finding #1): printDocument/printSlipGaji build their HTML
+// via win.document.write() with raw template-literal interpolation of user-editable fields (item
+// names, catatan, party names, employee names, etc). Any of those fields containing HTML/script
+// (e.g. a part description someone typed as "<img src=x onerror=alert(1)>") would execute the
+// moment the document is printed/previewed — a stored-XSS vector. escapeHtml() neutralizes the 5
+// characters that matter for HTML text/attribute context; every user-controllable string passed
+// into those two print functions must be wrapped in it before interpolation.
+const escapeHtml = v => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 // Display-only label mapping — the stored value stays "TEMPO" internally (used in comparisons,
 // getDueStatus, etc.) but Purchase Order screens/prints show it in English as "CREDIT".
 const payLabel = tp => tp === "TEMPO" ? "CREDIT" : tp;
@@ -608,7 +616,23 @@ const fmtDateRev = dateStr => {
 // everything else (numbers, Badges, other elements, non-date strings) untouched.
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const autoFormatTableCell = cell => typeof cell === "string" && ISO_DATE_RE.test(cell) ? fmtDateRev(cell) : cell;
-const uid = () => Math.random().toString(36).slice(2, 9).toUpperCase();
+// SECURITY (2026-09-04, external audit finding #6): Math.random() is not cryptographically strong
+// and its output space here (7 base-36 chars ≈ 3.7e10 combinations) isn't collision-resistant
+// enough for record IDs used across many concurrent users/browsers. Prefer the browser's built-in
+// CSPRNG (crypto.getRandomValues) when available — same visible format (7 uppercase base-36
+// chars, no dashes, used everywhere as "PREFIX-" + uid()) so no caller or stored-ID format needs
+// to change, just a much stronger source of randomness feeding it. Falls back to the old
+// Math.random() approach only on a browser old enough to lack the Web Crypto API.
+const uid = () => {
+  if (typeof crypto !== "undefined" && crypto.getRandomValues) {
+    // 5 random bytes = 40 bits of entropy, more than enough to fill 7 base-36 chars (~36 bits).
+    const bytes = crypto.getRandomValues(new Uint8Array(5));
+    let n = 0n;
+    for (const b of bytes) n = n * 256n + BigInt(b);
+    return n.toString(36).toUpperCase().padStart(7, "0").slice(-7);
+  }
+  return Math.random().toString(36).slice(2, 9).toUpperCase();
+};
 // Compares a document's bomSnapshot (captured at creation time, {unitCode: bomUpdatedAt}) against
 // the CURRENT live Master Unit records. Returns the list of unitCodes whose BOM has since been
 // revised (empty array = nothing changed). Used to power a non-blocking warning badge on
@@ -32198,9 +32222,9 @@ function printDocument({
     alert("Popup diblokir browser. Izinkan popup untuk mencetak dokumen.");
     return;
   }
-  const rows = items.map(r => `<tr>${r.map(c => `<td style="padding:8px 10px;border-bottom:1px solid #ddd;font-size:${fs(13)}px;white-space:pre-wrap;word-break:break-word;">${c}</td>`).join("")}</tr>`).join("");
-  const headerCols = itemHeaders.map(h => `<th style="padding:8px 10px;text-align:left;font-size:${fs(12)}px;color:#555;border-bottom:2px solid #333;">${h}</th>`).join("");
-  const extraRowsHtml = (extraInfoRows || []).map(([k, v]) => `<div style="display:flex;justify-content:space-between;font-size:${fs(13)}px;padding:2px 0;"><span style="color:#666;">${k}</span><span style="font-weight:600;">${v}</span></div>`).join("");
+  const rows = items.map(r => `<tr>${r.map(c => `<td style="padding:8px 10px;border-bottom:1px solid #ddd;font-size:${fs(13)}px;white-space:pre-wrap;word-break:break-word;">${escapeHtml(c)}</td>`).join("")}</tr>`).join("");
+  const headerCols = itemHeaders.map(h => `<th style="padding:8px 10px;text-align:left;font-size:${fs(12)}px;color:#555;border-bottom:2px solid #333;">${escapeHtml(h)}</th>`).join("");
+  const extraRowsHtml = (extraInfoRows || []).map(([k, v]) => `<div style="display:flex;justify-content:space-between;font-size:${fs(13)}px;padding:2px 0;"><span style="color:#666;">${escapeHtml(k)}</span><span style="font-weight:600;">${escapeHtml(v)}</span></div>`).join("");
   // Task #176: the on-screen Term of Payment forms (Quotation/SO) always show each termin's Rupiah
   // nominal alongside its %, but the printed document only ever showed the % — so a client reading
   // the printed Quotation/SO had to do the math themselves. Add a Nominal column here, computed the
@@ -32215,14 +32239,14 @@ function printDocument({
             <th style="padding:6px 10px;text-align:left;font-size:${fs(12)}px;color:#555;border-bottom:2px solid #333;">Nominal</th>
             <th style="padding:6px 10px;text-align:left;font-size:${fs(12)}px;color:#555;border-bottom:2px solid #333;">Keterangan</th>
           </tr></thead>
-          <tbody>${paymentTerms.map(t => `<tr><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:${fs(13)}px;">${t.label}</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:${fs(13)}px;">${t.percent}%</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:${fs(13)}px;">${fmtMoney((total || 0) * (parseFloat(t.percent) || 0) / 100, currency)}</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:${fs(13)}px;">${t.note || "-"}</td></tr>`).join("")}</tbody>
+          <tbody>${paymentTerms.map(t => `<tr><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:${fs(13)}px;">${escapeHtml(t.label)}</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:${fs(13)}px;">${escapeHtml(t.percent)}%</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:${fs(13)}px;">${fmtMoney((total || 0) * (parseFloat(t.percent) || 0) / 100, currency)}</td><td style="padding:6px 10px;border-bottom:1px solid #ddd;font-size:${fs(13)}px;">${escapeHtml(t.note || "-")}</td></tr>`).join("")}</tbody>
         </table>
       </div>` : "";
   // skipTopSpace: when the caller already reserves vertical space above the signature line
   // (e.g. the materai stamp box), don't add the usual blank-line padding on top of that.
-  const sigBlock = (person, skipTopSpace) => person ? `${person.signature ? `<img src="${person.signature}" style="max-height:50px;display:block;margin:0 auto 6px;" />` : skipTopSpace ? "" : "<br/><br/><br/>"}____________________<br/>${person.nama}${person.jabatan ? `<br/><span style="font-size:${fs(11)}px;color:#666;">${person.jabatan}</span>` : ""}` : skipTopSpace ? "____________________" : "<br/><br/><br/>____________________";
+  const sigBlock = (person, skipTopSpace) => person ? `${person.signature ? `<img src="${person.signature}" style="max-height:50px;display:block;margin:0 auto 6px;" />` : skipTopSpace ? "" : "<br/><br/><br/>"}____________________<br/>${escapeHtml(person.nama)}${person.jabatan ? `<br/><span style="font-size:${fs(11)}px;color:#666;">${escapeHtml(person.jabatan)}</span>` : ""}` : skipTopSpace ? "____________________" : "<br/><br/><br/>____________________";
   win.document.write(`
-    <html><head><title>${docTitle} - ${nomor}</title>
+    <html><head><title>${escapeHtml(docTitle)} - ${escapeHtml(nomor)}</title>
     <style>
       @page { size: A4 portrait; margin: 12mm; }
       body { font-family: 'Segoe UI', Arial, sans-serif; margin: 20px; color: #1a1a1a; }
@@ -32241,20 +32265,20 @@ function printDocument({
         <div style="display:flex;gap:12px;align-items:flex-start;">
           ${co.logo ? `<img src="${co.logo}" style="max-height:56px;max-width:120px;object-fit:contain;" />` : ""}
           <div>
-            <div class="company">${co.nama}</div>
-            ${co.alamat ? `<div style="font-size:${fs(12)}px;color:#666;margin-top:2px;white-space:pre-line;">${co.alamat}</div>` : ""}
-            <div style="font-size:${fs(12)}px;color:#666;margin-top:2px;">${co.telepon} · ${co.email}${co.npwp ? ` · NPWP: ${co.npwp}` : ""}</div>
+            <div class="company">${escapeHtml(co.nama)}</div>
+            ${co.alamat ? `<div style="font-size:${fs(12)}px;color:#666;margin-top:2px;white-space:pre-line;">${escapeHtml(co.alamat)}</div>` : ""}
+            <div style="font-size:${fs(12)}px;color:#666;margin-top:2px;">${escapeHtml(co.telepon)} · ${escapeHtml(co.email)}${co.npwp ? ` · NPWP: ${escapeHtml(co.npwp)}` : ""}</div>
           </div>
         </div>
         <div>
-          <div class="doctitle">${docTitle}</div>
-          <div style="text-align:right;font-size:${fs(13)}px;margin-top:6px;">No: <strong>${nomor}</strong><br/>${tanggalLabel}: ${fmtDateRev(tanggal)}</div>
+          <div class="doctitle">${escapeHtml(docTitle)}</div>
+          <div style="text-align:right;font-size:${fs(13)}px;margin-top:6px;">No: <strong>${escapeHtml(nomor)}</strong><br/>${escapeHtml(tanggalLabel)}: ${fmtDateRev(tanggal)}</div>
         </div>
       </div>
       <div style="margin-bottom:20px;">
-        <div style="font-size:${fs(12)}px;color:#666;">${partyLabel}</div>
-        <div style="font-size:${fs(15)}px;font-weight:700;">${partyName}</div>
-        ${partyExtra ? `<div style="font-size:${fs(12)}px;color:#666;">${partyExtra}</div>` : ""}
+        <div style="font-size:${fs(12)}px;color:#666;">${escapeHtml(partyLabel)}</div>
+        <div style="font-size:${fs(15)}px;font-weight:700;">${escapeHtml(partyName)}</div>
+        ${partyExtra ? `<div style="font-size:${fs(12)}px;color:#666;">${escapeHtml(partyExtra)}</div>` : ""}
       </div>
       ${extraRowsHtml ? `<div style="background:#f5f5f5;border-radius:8px;padding:10px 14px;margin-bottom:16px;">${extraRowsHtml}</div>` : ""}
       <table>
@@ -32264,19 +32288,19 @@ function printDocument({
       ${showPrice ? `
       <div class="totals">
         <div class="row"><span>Subtotal</span><span>${fmtMoney(subtotal, currency)}</span></div>
-        ${(extraTotalRows || []).map(([k, v]) => `<div class="row"><span>${k}</span><span>${fmtMoney(v, currency)}</span></div>`).join("")}
-        ${diskon ? `<div class="row"><span>${diskonLabel}</span><span>-${fmtMoney(diskon, currency)}</span></div>` : ""}
-        ${pajak ? `<div class="row"><span>${pajakLabel}</span><span>${fmtMoney(pajak, currency)}</span></div>` : ""}
-        ${uangMuka ? `<div class="row"><span>${uangMukaLabel}</span><span>-${fmtMoney(uangMuka, currency)}</span></div>` : ""}
+        ${(extraTotalRows || []).map(([k, v]) => `<div class="row"><span>${escapeHtml(k)}</span><span>${fmtMoney(v, currency)}</span></div>`).join("")}
+        ${diskon ? `<div class="row"><span>${escapeHtml(diskonLabel)}</span><span>-${fmtMoney(diskon, currency)}</span></div>` : ""}
+        ${pajak ? `<div class="row"><span>${escapeHtml(pajakLabel)}</span><span>${fmtMoney(pajak, currency)}</span></div>` : ""}
+        ${uangMuka ? `<div class="row"><span>${escapeHtml(uangMukaLabel)}</span><span>-${fmtMoney(uangMuka, currency)}</span></div>` : ""}
         <div class="row final"><span>TOTAL</span><span>${fmtMoney(total, currency)}</span></div>
       </div>
       ${terbilangText ? `<div style="text-align:right;font-size:${fs(11)}px;color:#666;font-style:italic;margin-top:4px;">Terbilang: ${terbilangText}</div>` : ""}` : ""}
-      ${bankInfoText ? `<div style="margin-top:16px;background:#f5f5f5;border-radius:8px;padding:10px 14px;font-size:${fs(12)}px;"><strong>Informasi Pembayaran:</strong><br/>${bankInfoText}</div>` : ""}
+      ${bankInfoText ? `<div style="margin-top:16px;background:#f5f5f5;border-radius:8px;padding:10px 14px;font-size:${fs(12)}px;"><strong>Informasi Pembayaran:</strong><br/>${escapeHtml(bankInfoText)}</div>` : ""}
       ${paymentTermsHtml}
-      ${catatan ? `<div style="margin-top:24px;font-size:${fs(12)}px;color:#666;white-space:pre-wrap;word-break:break-word;"><strong>Catatan:</strong> ${String(catatan).replace(/</g, "&lt;")}</div>` : ""}
+      ${catatan ? `<div style="margin-top:24px;font-size:${fs(12)}px;color:#666;white-space:pre-wrap;word-break:break-word;"><strong>Catatan:</strong> ${escapeHtml(catatan)}</div>` : ""}
       <div style="margin-top:20px;display:flex;justify-content:${disetujuiAlign === "left" ? "flex-start" : hideCreatedBy ? "center" : "space-between"};font-size:${fs(12)}px;">
-        ${hideCreatedBy ? "" : `<div style="text-align:center;width:200px;">${dibuatOlehLabel}<br/><br/>${sigBlock(dibuatOleh)}</div>`}
-        <div style="text-align:center;width:200px;">${disetujuiLabel}${showMateraiSpace ? Array(materaiSpasi).fill("<br/>").join("") : "<br/>"}${sigBlock(disetujuiOleh, showMateraiSpace)}</div>
+        ${hideCreatedBy ? "" : `<div style="text-align:center;width:200px;">${escapeHtml(dibuatOlehLabel)}<br/><br/>${sigBlock(dibuatOleh)}</div>`}
+        <div style="text-align:center;width:200px;">${escapeHtml(disetujuiLabel)}${showMateraiSpace ? Array(materaiSpasi).fill("<br/>").join("") : "<br/>"}${sigBlock(disetujuiOleh, showMateraiSpace)}</div>
       </div>
       <div style="margin-top:40px;text-align:center;font-style:italic;font-size:${fs(7)}px;color:#888;border-top:1px solid #ddd;padding-top:10px;line-height:1.5;">
         DISCLAIMER<br/>
@@ -32317,7 +32341,7 @@ function printSlipGaji(r, periode, company) {
   const pendapatanRows = [row("Gaji Pokok", r.gajiPokok), row("Tunjangan", r.tunjangan), row("Lembur", r.lembur), row(`Uang Makan Harian (${r.uangMakanHari || 0} hari)`, r.uangMakan || 0), row("Komisi", r.komisi)].join("");
   const potonganRows = [row("Potongan Manual", r.potongan, true), row("Potongan Cuti Berlebih", r.potonganCuti, true), row("BPJS Tenaga Kerja", r.bpjsTk, true), row("BPJS Kesehatan", r.bpjsKes, true)].join("");
   win.document.write(`
-    <html><head><title>Slip Gaji - ${r.nama} - ${periode}</title>
+    <html><head><title>Slip Gaji - ${escapeHtml(r.nama)} - ${escapeHtml(periode)}</title>
     <style>
       @page { size: A4 portrait; margin: 12mm; }
       body { font-family: 'Segoe UI', Arial, sans-serif; margin: 20px; color: #1a1a1a; }
@@ -32341,23 +32365,23 @@ function printSlipGaji(r, periode, company) {
         <div style="display:flex;gap:12px;align-items:flex-start;">
           ${co.logo ? `<img src="${co.logo}" style="max-height:56px;max-width:120px;object-fit:contain;" />` : ""}
           <div>
-            <div class="company">${co.nama}</div>
-            ${co.alamat ? `<div style="font-size:12px;color:#666;margin-top:2px;white-space:pre-line;">${co.alamat}</div>` : ""}
-            <div style="font-size:12px;color:#666;margin-top:2px;">${co.telepon} · ${co.email}${co.npwp ? ` · NPWP: ${co.npwp}` : ""}</div>
+            <div class="company">${escapeHtml(co.nama)}</div>
+            ${co.alamat ? `<div style="font-size:12px;color:#666;margin-top:2px;white-space:pre-line;">${escapeHtml(co.alamat)}</div>` : ""}
+            <div style="font-size:12px;color:#666;margin-top:2px;">${escapeHtml(co.telepon)} · ${escapeHtml(co.email)}${co.npwp ? ` · NPWP: ${escapeHtml(co.npwp)}` : ""}</div>
           </div>
         </div>
         <div>
           <div class="doctitle">SLIP GAJI</div>
-          <div style="text-align:right;font-size:13px;margin-top:6px;">Periode: <strong>${periode}</strong></div>
+          <div style="text-align:right;font-size:13px;margin-top:6px;">Periode: <strong>${escapeHtml(periode)}</strong></div>
         </div>
       </div>
       <div style="text-align:center;font-size:16px;font-weight:700;text-decoration:underline;margin-bottom:18px;">SURAT KETERANGAN GAJI</div>
       <div class="opening">
         Kami yang bertandatangan dibawah ini, dengan ini menerangkan bahwa:
       </div>
-      <div class="info-row"><span class="info-label">Nama</span><span>: ${r.nama}</span></div>
-      <div class="info-row"><span class="info-label">Jabatan</span><span>: ${ROLE_DEFS[r.role]?.label || "-"}</span></div>
-      <div class="info-row"><span class="info-label">Periode</span><span>: ${periode}</span></div>
+      <div class="info-row"><span class="info-label">Nama</span><span>: ${escapeHtml(r.nama)}</span></div>
+      <div class="info-row"><span class="info-label">Jabatan</span><span>: ${escapeHtml(ROLE_DEFS[r.role]?.label || "-")}</span></div>
+      <div class="info-row"><span class="info-label">Periode</span><span>: ${escapeHtml(periode)}</span></div>
       <div class="breakdown">
         <div>
           <h4>PENDAPATAN</h4>
