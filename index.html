@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-09-04.1";
+const APP_BUILD = "2026-09-07.2";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -182,6 +182,24 @@ const APP_BUILD = "2026-09-04.1";
     if (document.visibilityState === "visible") tick();
   });
 })();
+
+// ════════════════════════════════════════════════════════════════════════════
+// GLOBAL BACKSPACE GUARD (2026-09-07) — some browsers treat Backspace as
+// "navigate back in history" whenever the key isn't consumed by a focused
+// editable field. If focus is ever on something non-editable (a button, a
+// div, or briefly nothing during a re-render) when the user hits Backspace,
+// the whole app would appear to "close"/reload — reported by user as
+// "backspace on first character closes the window". This capture-phase
+// listener blocks that browser fallback UNLESS focus is genuinely on a text
+// input, textarea, or contentEditable element, so normal backspace-to-delete
+// behavior inside real fields is completely unaffected.
+// ════════════════════════════════════════════════════════════════════════════
+document.addEventListener("keydown", function (e) {
+  if (e.key !== "Backspace") return;
+  const el = document.activeElement;
+  const isEditable = el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable) && !el.disabled && !el.readOnly;
+  if (!isEditable) e.preventDefault();
+}, true);
 
 // ════════════════════════════════════════════════════════════════════════════
 // SUPABASE — shared backend (replaces per-browser localStorage)
@@ -5043,6 +5061,15 @@ function Modal({
   width = 560
 }) {
   if (!open) return null;
+  // CORRECTNESS (2026-09-07): closing must require BOTH mousedown and the
+  // resulting click to land on the backdrop itself. Using only
+  // `e.target === e.currentTarget` on click is what a drag-selection (e.g.
+  // selecting text inside the modal and dragging past its edge) can also
+  // satisfy — the browser resolves the click's target to the nearest common
+  // ancestor of the mousedown/mouseup targets, which is the backdrop, so an
+  // innocent text selection was closing the modal. Tracking mousedown
+  // separately fixes that without changing real backdrop-click behavior.
+  let _downOnBackdrop = false;
   return /*#__PURE__*/React.createElement("div", {
     style: {
       position: "fixed",
@@ -5054,8 +5081,12 @@ function Modal({
       justifyContent: "center",
       padding: 20
     },
+    onMouseDown: e => {
+      _downOnBackdrop = e.target === e.currentTarget;
+    },
     onClick: e => {
-      if (e.target === e.currentTarget) onClose();
+      if (_downOnBackdrop && e.target === e.currentTarget) onClose();
+      _downOnBackdrop = false;
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -5158,12 +5189,23 @@ function DialogHost() {
     width: 440,
     maxWidth: "95vw"
   };
+  // CORRECTNESS (2026-09-07): see Modal() comment above — require mousedown
+  // AND click to both land on the backdrop, so drag-selecting text inside the
+  // dialog can't be misread as a backdrop click and close it.
+  let _dlgDownOnBackdrop = false;
+  const backdropClickHandlers = onBackdropClick => ({
+    onMouseDown: e => {
+      _dlgDownOnBackdrop = e.target === e.currentTarget;
+    },
+    onClick: e => {
+      if (_dlgDownOnBackdrop && e.target === e.currentTarget) onBackdropClick();
+      _dlgDownOnBackdrop = false;
+    }
+  });
   if (state.type === "confirm") {
     return /*#__PURE__*/React.createElement("div", {
       style: backdropStyle,
-      onClick: e => {
-        if (e.target === e.currentTarget) close(false);
-      }
+      ...backdropClickHandlers(() => close(false))
     }, /*#__PURE__*/React.createElement("div", {
       style: boxStyle
     }, /*#__PURE__*/React.createElement("p", {
@@ -5202,9 +5244,7 @@ function DialogHost() {
   if (state.type === "cutiType") {
     return /*#__PURE__*/React.createElement("div", {
       style: backdropStyle,
-      onClick: e => {
-        if (e.target === e.currentTarget) close(null);
-      }
+      ...backdropClickHandlers(() => close(null))
     }, /*#__PURE__*/React.createElement("div", {
       style: boxStyle
     }, /*#__PURE__*/React.createElement("p", {
@@ -5254,10 +5294,16 @@ function PromptModalBody({
 }) {
   const [val, setVal] = useState("");
   const trimmed = val.trim();
+  // CORRECTNESS (2026-09-07): see Modal() comment above.
+  let _downOnBackdrop = false;
   return /*#__PURE__*/React.createElement("div", {
     style: backdropStyle,
+    onMouseDown: e => {
+      _downOnBackdrop = e.target === e.currentTarget;
+    },
     onClick: e => {
-      if (e.target === e.currentTarget) onCancel();
+      if (_downOnBackdrop && e.target === e.currentTarget) onCancel();
+      _downOnBackdrop = false;
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: boxStyle
@@ -5318,10 +5364,16 @@ function BiayaLainModalBody({
   const [jumlah, setJumlah] = useState("");
   const [tanggal, setTanggal] = useState(today());
   const ketTrimmed = ket.trim();
+  // CORRECTNESS (2026-09-07): see Modal() comment above.
+  let _downOnBackdrop = false;
   return /*#__PURE__*/React.createElement("div", {
     style: backdropStyle,
+    onMouseDown: e => {
+      _downOnBackdrop = e.target === e.currentTarget;
+    },
     onClick: e => {
-      if (e.target === e.currentTarget) onCancel();
+      if (_downOnBackdrop && e.target === e.currentTarget) onCancel();
+      _downOnBackdrop = false;
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: boxStyle
@@ -16197,9 +16249,10 @@ function QuotationPS({
     const cust = customers.find(c => c.id === form.customerId);
     if (editingQ) {
       // In-place edit: same nomor, no new revision row. A Draft stays Draft unless explicitly
-      // submitted (asDraft = false flips a Draft to "Menunggu Approval GM"); a quotation already
-      // in the approval flow keeps its existing status either way.
-      const newStatus = asDraft ? "Draft" : editingQ.status === "Draft" ? "Menunggu Approval GM" : editingQ.status;
+      // submitted. CHANGE (2026-09-07): Parts & Service Quotation no longer needs GM approval —
+      // submitting a Draft goes straight to "Disetujui GM" (auto-approved) instead of parking in
+      // "Menunggu Approval GM". A quotation already further along in the flow keeps its status.
+      const newStatus = asDraft ? "Draft" : editingQ.status === "Draft" ? "Disetujui GM" : editingQ.status;
       const arr = [...quotationsPS];
       // Match by nomor, NOT object identity — see the matching note in QuotationUnit's save().
       // indexOf(editingQ) relies on reference equality, which breaks the moment the background
@@ -16223,7 +16276,12 @@ function QuotationPS({
           pajak: subtotalAfterClientDiskon * pajak / 100,
           total,
           salesDiscount: salesDiscount.aktif ? salesDiscount : editingQ.salesDiscount || null,
-          status: newStatus
+          status: newStatus,
+          ...(newStatus === "Disetujui GM" && editingQ.status === "Draft" ? {
+            approvedByNama: "Auto-Approve (Sistem)",
+            approvedDate: today(),
+            followUpExtendedAt: null
+          } : {})
         };
         setQuotationsPS(arr);
         logAudit(store, session, {
@@ -16260,7 +16318,13 @@ function QuotationPS({
       // siapa pun. Bisa diubah/di-assign ulang oleh Owner/GM lewat "🔁 Ubah Sales Manager".
       salesManagerUsername: session.username,
       salesManagerNama: session.nama,
-      status: asDraft ? "Draft" : "Menunggu Approval GM",
+      // CHANGE (2026-09-07): PS Quotation no longer requires GM approval — submitting goes
+      // straight to "Disetujui GM" (auto-approved) instead of "Menunggu Approval GM".
+      status: asDraft ? "Draft" : "Disetujui GM",
+      ...(!asDraft ? {
+        approvedByNama: "Auto-Approve (Sistem)",
+        approvedDate: today()
+      } : {}),
       revisiDari: baseNomor || null,
       salesDiscount: revisionOf && salesDiscount.aktif ? salesDiscount : null
     }]);
@@ -16300,14 +16364,19 @@ function QuotationPS({
     setModal(false);
     setRevisionOf(null);
   };
-  // Quick-submit a Draft straight to GM approval from the table, without reopening the form.
+  // Quick-submit a Draft from the table, without reopening the form. CHANGE (2026-09-07): PS
+  // Quotation no longer requires GM approval — this now auto-approves straight to "Disetujui GM"
+  // instead of parking in "Menunggu Approval GM".
   const submitDraft = q => {
     const arr = [...quotationsPS];
     const idx = quotationsPS.indexOf(q);
     if (idx >= 0) {
       arr[idx] = {
         ...q,
-        status: "Menunggu Approval GM"
+        status: "Disetujui GM",
+        approvedByNama: "Auto-Approve (Sistem)",
+        approvedDate: today(),
+        followUpExtendedAt: null
       };
       setQuotationsPS(arr);
       logSalesActivity(store, session, {
@@ -27556,7 +27625,7 @@ function InvoiceModule({
     style: {
       color: theme.green
     }
-  }, fmt(invoiceDisplayFinancials(inv).total)), " ", /*#__PURE__*/React.createElement("span", {
+  }, fmtMoney(invoiceDisplayFinancials(inv).total, inv.currency)), " ", /*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.muted,
       fontSize: 12
@@ -27674,7 +27743,7 @@ function InvoiceModule({
         cursor: "pointer"
       },
       onClick: () => setDetail(inv)
-    }, inv.nomor), inv.customerNama, fmt(invoiceDisplayFinancials(inv).total), fmt(invoiceDisplayFinancials(inv).total - (inv.terbayar || 0)), inv.tanggalJatuhTempo || "-", inv.longOverdueMarkedBy ? `${inv.longOverdueMarkedBy} (${inv.longOverdueMarkedAt})` : "-", canFlagOverdue ? /*#__PURE__*/React.createElement(Btn, {
+    }, inv.nomor), inv.customerNama, fmtMoney(invoiceDisplayFinancials(inv).total, inv.currency), fmtMoney(invoiceDisplayFinancials(inv).total - (inv.terbayar || 0), inv.currency), inv.tanggalJatuhTempo || "-", inv.longOverdueMarkedBy ? `${inv.longOverdueMarkedBy} (${inv.longOverdueMarkedAt})` : "-", canFlagOverdue ? /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "ghost",
       title: "Kembalikan ke Daftar Invoice normal",
@@ -28355,7 +28424,7 @@ function InvoiceModule({
     }
   }, detail.noFakturPajak)), /*#__PURE__*/React.createElement(Table, {
     headers: ["PN", "Nama Barang/Jasa", "Qty", "Harga", "Subtotal"],
-    rows: detail.items.map(it => [it.partNumber || it.unitCode || "-", it.unitName || it.partName, fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)])
+    rows: detail.items.map(it => [it.partNumber || it.unitCode || "-", it.unitName || it.partName, fmtNum(it.qty), fmtMoney(it.harga, detail.currency), fmtMoney(it.subtotal, detail.currency)])
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       background: theme.surface,
@@ -28369,14 +28438,14 @@ function InvoiceModule({
       color: theme.muted,
       fontSize: 13
     }
-  }, /*#__PURE__*/React.createElement("span", null, "Subtotal"), /*#__PURE__*/React.createElement("span", null, fmt(detail.terminLabel ? invoiceItemsSubtotal(detail) : detail.subtotal))), detail.terminLabel && /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("span", null, "Subtotal"), /*#__PURE__*/React.createElement("span", null, fmtMoney(detail.terminLabel ? invoiceItemsSubtotal(detail) : detail.subtotal, detail.currency))), detail.terminLabel && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
       color: theme.muted,
       fontSize: 13
     }
-  }, /*#__PURE__*/React.createElement("span", null, "Termin ", detail.terminLabel, detail.terminPercent != null ? ` (${detail.terminPercent}%)` : ""), /*#__PURE__*/React.createElement("span", null, fmt(detail.subtotal))), invoiceSoDiskonAmount(detail) > 0 && /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("span", null, "Termin ", detail.terminLabel, detail.terminPercent != null ? ` (${detail.terminPercent}%)` : ""), /*#__PURE__*/React.createElement("span", null, fmtMoney(detail.subtotal, detail.currency))), invoiceSoDiskonAmount(detail) > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
@@ -28387,7 +28456,7 @@ function InvoiceModule({
     style: {
       color: theme.red
     }
-  }, "-", fmt(invoiceSoDiskonAmount(detail)))), /*#__PURE__*/React.createElement("div", {
+  }, "-", fmtMoney(invoiceSoDiskonAmount(detail), detail.currency))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
@@ -28398,14 +28467,14 @@ function InvoiceModule({
     style: {
       color: theme.red
     }
-  }, "-", fmt(detail.diskon))), /*#__PURE__*/React.createElement("div", {
+  }, "-", fmtMoney(detail.diskon, detail.currency))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
       color: theme.muted,
       fontSize: 13
     }
-  }, /*#__PURE__*/React.createElement("span", null, "PPN (11%)"), /*#__PURE__*/React.createElement("span", null, fmt(invoiceDisplayFinancials(detail).pajak))), detail.uangMuka > 0 && /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("span", null, "PPN (11%)"), /*#__PURE__*/React.createElement("span", null, fmtMoney(invoiceDisplayFinancials(detail).pajak, detail.currency))), detail.uangMuka > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
@@ -28416,7 +28485,7 @@ function InvoiceModule({
     style: {
       color: theme.red
     }
-  }, "-", fmt(detail.uangMuka))), /*#__PURE__*/React.createElement("div", {
+  }, "-", fmtMoney(detail.uangMuka, detail.currency))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
@@ -28431,7 +28500,7 @@ function InvoiceModule({
     style: {
       color: theme.green
     }
-  }, fmt(invoiceDisplayFinancials(detail).total)))), detail.riwayatPembayaran?.length > 0 && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+  }, fmtMoney(invoiceDisplayFinancials(detail).total, detail.currency)))), detail.riwayatPembayaran?.length > 0 && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
     style: {
       margin: "0 0 6px",
       fontSize: 13,
@@ -28440,7 +28509,7 @@ function InvoiceModule({
     }
   }, "Riwayat Penerimaan Pembayaran"), /*#__PURE__*/React.createElement(Table, {
     headers: ["Tanggal", "Cash/Transfer", "PPh 2%", "Biaya Admin", "Total Pelunasan", "Dicatat Oleh", ""],
-    rows: detail.riwayatPembayaran.map((r, i) => [r.tanggal, fmt(r.jumlah), r.pph ? fmt(r.pph) : "-", r.biayaAdmin ? fmt(r.biayaAdmin) : "-", fmt(r.totalSettlement ?? r.jumlah), r.dicatatOleh, (isFinance || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+    rows: detail.riwayatPembayaran.map((r, i) => [r.tanggal, fmtMoney(r.jumlah, detail.currency), r.pph ? fmtMoney(r.pph, detail.currency) : "-", r.biayaAdmin ? fmtMoney(r.biayaAdmin, detail.currency) : "-", fmtMoney(r.totalSettlement ?? r.jumlah, detail.currency), r.dicatatOleh, (isFinance || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       onClick: () => {
         openEditPay(detail, i);
@@ -28462,7 +28531,8 @@ function InvoiceModule({
       partyName: detail.customerNama,
       partyExtra: customers.find(c => c.nama === detail.customerNama)?.alamat || "",
       itemHeaders: ["PN", "Nama Barang/Jasa", "Qty", "Harga", "Subtotal"],
-      items: detail.items.map(it => [it.partNumber || it.unitCode || "-", it.unitName || it.partName, fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)]),
+      items: detail.items.map(it => [it.partNumber || it.unitCode || "-", it.unitName || it.partName, fmtNum(it.qty), fmtMoney(it.harga, detail.currency), fmtMoney(it.subtotal, detail.currency)]),
+      currency: detail.currency,
       subtotal: detail.terminLabel ? invoiceItemsSubtotal(detail) : detail.subtotal,
       extraTotalRows: detail.terminLabel ? [[`Termin ${detail.terminLabel}${detail.terminPercent != null ? ` (${detail.terminPercent}%)` : ""}`, detail.subtotal]] : [],
       diskon: detail.diskon,
@@ -28472,8 +28542,8 @@ function InvoiceModule({
       uangMuka: detail.uangMuka,
       total: invoiceDisplayFinancials(detail).total,
       catatan: detail.catatan,
-      extraInfoRows: [["No. Purchase Order (dari Client)", detail.noPoClient || "-"], ["No. Sales Order", detail.soNomor || "-"], ...(invoiceSoDiskonAmount(detail) > 0 ? [["Diskon dari SO (sudah termasuk di harga item)", fmt(invoiceSoDiskonAmount(detail))]] : []), ["Term of Payment", detail.tipePembayaran], ...(detail.tipePembayaran === "TEMPO" ? [...(detail.jumlahHariTempo ? [["Jumlah Hari", `${detail.jumlahHariTempo} hari`]] : []), ["Jatuh Tempo", detail.tanggalJatuhTempo]] : [])],
-      terbilangText: terbilang(detail.total),
+      extraInfoRows: [["No. Purchase Order (dari Client)", detail.noPoClient || "-"], ["No. Sales Order", detail.soNomor || "-"], ...(invoiceSoDiskonAmount(detail) > 0 ? [["Diskon dari SO (sudah termasuk di harga item)", fmtMoney(invoiceSoDiskonAmount(detail), detail.currency)]] : []), ["Term of Payment", detail.tipePembayaran], ...(detail.tipePembayaran === "TEMPO" ? [...(detail.jumlahHariTempo ? [["Jumlah Hari", `${detail.jumlahHariTempo} hari`]] : []), ["Jatuh Tempo", detail.tanggalJatuhTempo]] : [])],
+      terbilangText: detail.currency && detail.currency !== "IDR" ? "" : terbilang(detail.total),
       bankInfoText: "BCA KCP Sunter Bisma<br/>A/N PT. FORESTA TRANSTEK<br/>A/C 5820822678",
       hideCreatedBy: true,
       disetujuiAlign: "left",
@@ -32530,8 +32600,12 @@ function ClientHistoryModule({
   const myDO = deliveryOrders.filter(d => d.customerNama === cust?.nama).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const myTickets = tickets.filter(t => mySO.some(so => t.soNomors.includes(so.nomor))).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const totalNilaiSO = mySO.reduce((s, so) => s + so.total, 0);
-  const totalTerbayar = myInv.reduce((s, i) => s + (i.terbayar || 0), 0);
-  const totalPiutang = myInv.reduce((s, i) => s + (i.total - (i.terbayar || 0)), 0);
+  // Same currency-mixing guard as FinancialDashboardModule (see comment there, added with the ARUSD
+  // import): only sum this client's IDR invoices here — a non-IDR invoice (e.g. legacy USD AR) would
+  // otherwise get added straight into these Rupiah totals as if $1 == Rp1.
+  const myInvIdr = myInv.filter(i => !i.currency || i.currency === "IDR");
+  const totalTerbayar = myInvIdr.reduce((s, i) => s + (i.terbayar || 0), 0);
+  const totalPiutang = myInvIdr.reduce((s, i) => s + (i.total - (i.terbayar || 0)), 0);
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -32684,7 +32758,7 @@ function ClientHistoryModule({
     }
   }, "💰 Invoice"), /*#__PURE__*/React.createElement(Table, {
     headers: ["No.", "Tanggal", "Total", "Terbayar", "Status"],
-    rows: myInv.map(i => [i.nomor, i.tanggal, fmt(invoiceDisplayFinancials(i).total), fmt(i.terbayar || 0), /*#__PURE__*/React.createElement(Badge, {
+    rows: myInv.map(i => [i.nomor, i.tanggal, fmtMoney(invoiceDisplayFinancials(i).total, i.currency), fmtMoney(i.terbayar || 0, i.currency), /*#__PURE__*/React.createElement(Badge, {
       color: i.statusBayar === "Lunas" ? theme.green : theme.yellow
     }, i.statusBayar)]),
     emptyMsg: "Tidak ada"
@@ -32724,10 +32798,19 @@ function FinancialDashboardModule({
     parts
   } = store;
   const poAll = [...poLocal, ...poOverseas];
-  const totalPiutang = invoices.reduce((s, i) => s + (i.total - (i.terbayar || 0)), 0);
-  const totalPiutangLunas = invoices.filter(i => i.statusBayar === "Lunas").reduce((s, i) => s + i.total, 0);
+  // SECURITY/CORRECTNESS (2026-09-07, ARUSD import): these dashboard totals used to sum every
+  // invoice's .total/.terbayar together assuming they're all Rupiah. That was true until the first
+  // non-IDR invoices (USD legacy AR migration) were added — summing USD numbers straight into a
+  // Rupiah total would silently understate/misstate this widget by treating $1 the same as Rp1.
+  // Per the explicit ask when importing those records ("jangan digabung ke total IDR di laporan
+  // lain"), every currency-bearing sum in this module now excludes any invoice whose currency isn't
+  // IDR/unset — non-IDR invoices are tracked and displayed on their own (Invoice module's Long
+  // Overdue tab, in their native currency) rather than folded into these Rupiah figures.
+  const idrInvoices = invoices.filter(i => !i.currency || i.currency === "IDR");
+  const totalPiutang = idrInvoices.reduce((s, i) => s + (i.total - (i.terbayar || 0)), 0);
+  const totalPiutangLunas = idrInvoices.filter(i => i.statusBayar === "Lunas").reduce((s, i) => s + i.total, 0);
   const totalHutang = poAll.filter(p => p.statusBayar !== "Sudah Dibayar").reduce((s, p) => s + p.total, 0);
-  const cashIn = invoices.reduce((s, i) => s + (i.terbayar || 0), 0);
+  const cashIn = idrInvoices.reduce((s, i) => s + (i.terbayar || 0), 0);
   const cashOut = poAll.reduce((s, p) => s + p.total, 0); // simplified: assumes all PO eventually paid
   const netCashFlow = cashIn - cashOut;
   const nilaiInventory = parts.filter(p => p.stok !== null).reduce((s, p) => s + p.stok * p.hargaBeli, 0);
@@ -40069,6 +40152,14 @@ function JurnalModule({
       });
     });
     (invoices || []).forEach(inv => {
+      // CORRECTNESS (2026-09-07, ARUSD import): this used to mirror every invoice into Jurnal
+      // unconditionally with a hardcoded currency:"IDR" — fine while every invoice really was Rupiah,
+      // but the first non-IDR invoice (legacy USD AR archive) would've been auto-posted here as if it
+      // were the same number of Rupiah, silently corrupting Jurnal's cash-flow totals. Per the
+      // explicit "keep it separate, don't mix into IDR reports" requirement for that import, skip
+      // non-IDR invoices here entirely — they're archival records that were never going to go through
+      // the normal Jurnal payment-confirmation flow anyway.
+      if (inv.currency && inv.currency !== "IDR") return;
       if (!existingSourceIds.has(inv.nomor)) autoEntries.push({
         id: "JRN-" + uid(),
         tanggal: inv.tanggal,
