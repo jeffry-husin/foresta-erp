@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-09-08.4";
+const APP_BUILD = "2026-09-08.5";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -6219,7 +6219,15 @@ function MasterPart({
     partName: "partName",
     description: "description"
   };
-  const filtered = parts.filter(p => {
+  // PERF FIX (2026-09-07, "Master Part getting slow again"): filtered/sorted used to be a plain
+  // const rebuilt via .filter().sort() on every single render of this module — including renders
+  // caused by typing in the Tambah/Edit Part modal's own form fields, opening the BOM sub-modal, or
+  // any unrelated store update ticking in via revalidateStore. With 2900+ parts (and growing),
+  // re-filtering and re-sorting the WHOLE list plus the localeCompare-based sort on every keystroke
+  // elsewhere on the page is real, avoidable work — this is the exact same class of bug already
+  // fixed in Sales Order (see salesOrdersFiltered's PERF FIX comment there). Memoizing on the actual
+  // inputs (parts/search/subKatFilter/sortBy) means it's only recomputed when one of those changes.
+  const filtered = React.useMemo(() => parts.filter(p => {
     const q = search.toLowerCase();
     return (p.partNumber.toLowerCase().includes(q) || p.partName.toLowerCase().includes(q) || (p.description || "").toLowerCase().includes(q)) && (subKatFilter === "Semua" || p.subKategori === subKatFilter);
   }).slice().sort((a, b) => {
@@ -6228,12 +6236,60 @@ function MasterPart({
       numeric: true,
       sensitivity: "base"
     });
-  });
+  }), [parts, search, subKatFilter, sortBy]);
   // Teralokasi/Free Stock needs every active SO's FIFO allocation for every part on screen — computed
   // once here via the bulk O(activeSOs) variant instead of once per part (see stockAllocationForAllParts
   // for why the per-part version froze this page). Memoized on the underlying data so it's only
   // recomputed when parts/SOs/Parts Use actually change, not on every keystroke in the search box.
   const allocationByPart = React.useMemo(() => stockAllocationForAllParts(store), [store.parts, store.salesOrders, store.partsUse]);
+  // PERF FIX (2026-09-07, same root cause as `filtered` above): this table-rows array (one
+  // React.createElement per cell × ~13 columns × every part) used to be rebuilt inline as part of
+  // the JSX return on every render, regardless of whether `filtered`/`canSeePrice`/`allocationByPart`
+  // had actually changed. Memoizing it means typing in the Tambah/Edit Part modal, or any unrelated
+  // store update elsewhere in the app, no longer re-does this work for all 2900+ parts.
+  const partRows = React.useMemo(() => filtered.map(p => {
+    const base = [/*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.accentLight,
+        fontWeight: 600
+      }
+    }, p.partNumber), (p.bom && p.bom.length > 0) ? /*#__PURE__*/React.createElement("span", null, p.partName, " ", /*#__PURE__*/React.createElement(Badge, {
+      color: theme.cyan,
+      title: `BOM: ${p.bom.length} komponen`
+    }, "BOM")) : p.partName, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.muted,
+        fontSize: 12
+      }
+    }, p.description), /*#__PURE__*/React.createElement(Badge, {
+      color: p.kategori === "Service" ? theme.cyan : theme.purple
+    }, p.kategori), p.subKategori ? /*#__PURE__*/React.createElement(Badge, {
+      color: theme.accent
+    }, p.subKategori) : "-", p.satuan, p.brand || "-", /*#__PURE__*/React.createElement(Badge, {
+      color: p.asal === "Overseas" ? theme.yellow : theme.green
+    }, p.asal)];
+    const priceCols = canSeePrice ? [fmt(p.hargaBeli), fmt(p.hargaJual)] : [];
+    const stokCol = p.stok === null ? "-" : /*#__PURE__*/React.createElement(Badge, {
+      color: p.stok > 10 ? theme.green : p.stok > 0 ? theme.yellow : theme.red
+    }, fmtNum(p.stok));
+    let teralokasiCol = "-";
+    let freeStockCol = "-";
+    if (p.kategori !== "Service" && p.stok !== null) {
+      const teralokasi = reservedQtyForAll(allocationByPart, p.partNumber);
+      const freeStock = Math.max(0, (p.stok || 0) - teralokasi);
+      const allocEntries = Object.entries(allocationByPart[p.partNumber] || {}).filter(([, a]) => a.allocated > 0);
+      const teralokasiTitle = allocEntries.length ? `Teralokasi ke:\n${allocEntries.map(([so, a]) => `${so}: ${a.allocated}`).join("\n")}` : "";
+      teralokasiCol = teralokasi > 0 ? /*#__PURE__*/React.createElement("span", {
+        title: teralokasiTitle
+      }, /*#__PURE__*/React.createElement(Badge, {
+        color: theme.yellow
+      }, fmtNum(teralokasi))) : "-";
+      freeStockCol = /*#__PURE__*/React.createElement(Badge, {
+        color: freeStock > 10 ? theme.green : freeStock > 0 ? theme.yellow : theme.red
+      }, fmtNum(freeStock));
+    }
+    return [...base, ...priceCols, stokCol, teralokasiCol, freeStockCol];
+  }), [filtered, canSeePrice, allocationByPart]);
   const wipeAllParts = () => {
     setParts([]);
     setWipeConfirm(false);
@@ -6675,62 +6731,7 @@ function MasterPart({
     onClick: () => rejectEditRequest(req)
   }, "✗ Tolak"))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
     headers: canSeePrice ? ["Part Number", "Part Name", "Description", "Kategori", "Sub-Kategori", "Satuan", "Brand", "Asal", "Harga Beli", "Harga Jual", "Stok", "Teralokasi", "Free Stock"] : ["Part Number", "Part Name", "Description", "Kategori", "Sub-Kategori", "Satuan", "Brand", "Asal", "Stok", "Teralokasi", "Free Stock"],
-    rows: filtered.map(p => {
-      const base = [/*#__PURE__*/React.createElement("span", {
-        style: {
-          color: theme.accentLight,
-          fontWeight: 600
-        }
-      }, p.partNumber), (p.bom && p.bom.length > 0) ? /*#__PURE__*/React.createElement("span", null, p.partName, " ", /*#__PURE__*/React.createElement(Badge, {
-        color: theme.cyan,
-        title: `BOM: ${p.bom.length} komponen`
-      }, "BOM")) : p.partName, /*#__PURE__*/React.createElement("span", {
-        style: {
-          color: theme.muted,
-          fontSize: 12
-        }
-      }, p.description), /*#__PURE__*/React.createElement(Badge, {
-        color: p.kategori === "Service" ? theme.cyan : theme.purple
-      }, p.kategori), p.subKategori ? /*#__PURE__*/React.createElement(Badge, {
-        color: theme.accent
-      }, p.subKategori) : "-", p.satuan, p.brand || "-", /*#__PURE__*/React.createElement(Badge, {
-        color: p.asal === "Overseas" ? theme.yellow : theme.green
-      }, p.asal)];
-      const priceCols = canSeePrice ? [fmt(p.hargaBeli), fmt(p.hargaJual)] : [];
-      const stokCol = p.stok === null ? "-" : /*#__PURE__*/React.createElement(Badge, {
-        color: p.stok > 10 ? theme.green : p.stok > 0 ? theme.yellow : theme.red
-      }, fmtNum(p.stok));
-      // Teralokasi / Free Stock — dihitung dinamis dari SEMUA SO Aktif yang butuh part ini (baik
-      // sudah ada IR maupun belum, dikurangi qty yang sudah di-release lewat Parts Use), bukan
-      // hanya dari IR — supaya part yang sudah "diklaim" satu SO langsung dari stock (tanpa IR)
-      // tetap terlihat sudah teralokasi untuk SO lain. Lihat reservedQtyFor.
-      let teralokasiCol = "-";
-      let freeStockCol = "-";
-      if (p.kategori !== "Service" && p.stok !== null) {
-        const teralokasi = reservedQtyForAll(allocationByPart, p.partNumber);
-        const freeStock = Math.max(0, (p.stok || 0) - teralokasi);
-        // Per-SO breakdown as a native hover tooltip — Teralokasi is a single combined number (sum
-        // across every active SO competing for this part), which on its own looks inconsistent with
-        // the per-SO "Stok Tersedia" shown when creating an Item Requisition (that one only reflects
-        // ONE SO's share of the same pool). Root cause of a reported confusion: Master Part showed
-        // "Teralokasi 2" while SO-010's IR screen showed "Stok Tersedia 1" for the same part — both
-        // were correct, just showing different slices of the same FIFO allocation with no way to see
-        // the breakdown. Object.entries here is already in FIFO order (earliest SO tanggal first —
-        // see stockAllocationForAllParts, which builds the allocation object in that same claim
-        // order), so the tooltip doubles as a quick view of who's first in the queue.
-        const allocEntries = Object.entries(allocationByPart[p.partNumber] || {}).filter(([, a]) => a.allocated > 0);
-        const teralokasiTitle = allocEntries.length ? `Teralokasi ke:\n${allocEntries.map(([so, a]) => `${so}: ${a.allocated}`).join("\n")}` : "";
-        teralokasiCol = teralokasi > 0 ? /*#__PURE__*/React.createElement("span", {
-          title: teralokasiTitle
-        }, /*#__PURE__*/React.createElement(Badge, {
-          color: theme.yellow
-        }, fmtNum(teralokasi))) : "-";
-        freeStockCol = /*#__PURE__*/React.createElement(Badge, {
-          color: freeStock > 10 ? theme.green : freeStock > 0 ? theme.yellow : theme.red
-        }, fmtNum(freeStock));
-      }
-      return [...base, ...priceCols, stokCol, teralokasiCol, freeStockCol];
-    }),
+    rows: partRows,
     onEdit: onEdit,
     onDelete: onDelete
   })), /*#__PURE__*/React.createElement(Modal, {
