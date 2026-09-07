@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-09-07.2";
+const APP_BUILD = "2026-09-08.4";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -1504,7 +1504,7 @@ const ROLE_DEFS = {
   finance_director: {
     label: "Finance Director",
     color: "#f59e0b",
-    modules: ["dashboard", "invoice", "payroll", "customer", "supplier", "financial_dashboard", "client_history", "attendance", "jurnal", "bank_recon", "price_analysis", "price_analysis_purchase", "client_analysis", "komisi"]
+    modules: ["dashboard", "invoice", "payroll", "customer", "supplier", "financial_dashboard", "client_history", "attendance", "jurnal", "bank_recon", "laporan_keuangan", "price_analysis", "price_analysis_purchase", "client_analysis", "komisi"]
   },
   sales_manager: {
     label: "Sales Manager",
@@ -1945,6 +1945,10 @@ const ALL_MODULES = [{
   icon: "🏦",
   label: "Rekonsiliasi Bank"
 }, {
+  id: "laporan_keuangan",
+  icon: "📑",
+  label: "Laporan Keuangan"
+}, {
   id: "audit_trail",
   icon: "📜",
   label: "Audit Trail"
@@ -1997,7 +2001,7 @@ const SIDEBAR_GROUPS = [{
 }, {
   key: "finance",
   label: "FINANCE",
-  moduleIds: ["invoice", "jurnal", "bank_recon"]
+  moduleIds: ["invoice", "jurnal", "bank_recon", "laporan_keuangan"]
 }, {
   key: "hr",
   label: "HR",
@@ -2711,6 +2715,43 @@ const seedCOA = [{
   kategori: "Lainnya",
   perOrang: false
 }];
+// ════════════════════════════════════════════════════════════════════════════
+// LAPORAN KEUANGAN — Bagan Akun (Chart of Accounts) seed, comprehensive-from-the-start per explicit
+// request (2026-09-08): rather than starting minimal and restructuring later, this covers every
+// account category a trading + workshop-service company like Foresta normally needs, so growth
+// only ever means ADDING rows (fully editable in the module's own Bagan Akun tab) — never changing
+// the top-level structure. `saldoNormal` is stored explicitly per account (not derived purely from
+// `tipe`) because contra accounts — Akumulasi Penyusutan, Cadangan Kerugian Piutang, Prive, Retur
+// Penjualan — sit under an Aset/Ekuitas/Pendapatan tipe but carry the OPPOSITE normal balance.
+// ════════════════════════════════════════════════════════════════════════════
+const seedLKCOA = [
+// ASET — Lancar
+{ kode: "1101", nama: "Kas Kecil", tipe: "Aset", subTipe: "Aset Lancar", saldoNormal: "Debit" }, { kode: "1102", nama: "Kas Besar", tipe: "Aset", subTipe: "Aset Lancar", saldoNormal: "Debit" }, { kode: "1111", nama: "Bank BCA", tipe: "Aset", subTipe: "Aset Lancar", saldoNormal: "Debit" }, { kode: "1112", nama: "Bank Mandiri", tipe: "Aset", subTipe: "Aset Lancar", saldoNormal: "Debit" }, { kode: "1113", nama: "Bank Lainnya", tipe: "Aset", subTipe: "Aset Lancar", saldoNormal: "Debit" }, { kode: "1120", nama: "Piutang Usaha", tipe: "Aset", subTipe: "Aset Lancar", saldoNormal: "Debit" }, { kode: "1121", nama: "Cadangan Kerugian Piutang", tipe: "Aset", subTipe: "Aset Lancar", saldoNormal: "Kredit" }, { kode: "1130", nama: "Piutang Karyawan", tipe: "Aset", subTipe: "Aset Lancar", saldoNormal: "Debit" }, { kode: "1140", nama: "Persediaan Spare Parts", tipe: "Aset", subTipe: "Aset Lancar", saldoNormal: "Debit" }, { kode: "1141", nama: "Persediaan Barang Dalam Perjalanan", tipe: "Aset", subTipe: "Aset Lancar", saldoNormal: "Debit" }, { kode: "1150", nama: "PPN Masukan", tipe: "Aset", subTipe: "Aset Lancar", saldoNormal: "Debit" }, { kode: "1160", nama: "Uang Muka Pembelian", tipe: "Aset", subTipe: "Aset Lancar", saldoNormal: "Debit" }, { kode: "1170", nama: "Biaya Dibayar Dimuka", tipe: "Aset", subTipe: "Aset Lancar", saldoNormal: "Debit" },
+// ASET — Tetap
+{ kode: "1210", nama: "Tanah", tipe: "Aset", subTipe: "Aset Tetap", saldoNormal: "Debit" }, { kode: "1220", nama: "Bangunan", tipe: "Aset", subTipe: "Aset Tetap", saldoNormal: "Debit" }, { kode: "1221", nama: "Akumulasi Penyusutan Bangunan", tipe: "Aset", subTipe: "Aset Tetap", saldoNormal: "Kredit" }, { kode: "1230", nama: "Kendaraan", tipe: "Aset", subTipe: "Aset Tetap", saldoNormal: "Debit" }, { kode: "1231", nama: "Akumulasi Penyusutan Kendaraan", tipe: "Aset", subTipe: "Aset Tetap", saldoNormal: "Kredit" }, { kode: "1240", nama: "Mesin & Peralatan Workshop", tipe: "Aset", subTipe: "Aset Tetap", saldoNormal: "Debit" }, { kode: "1241", nama: "Akumulasi Penyusutan Mesin & Peralatan", tipe: "Aset", subTipe: "Aset Tetap", saldoNormal: "Kredit" }, { kode: "1250", nama: "Peralatan Kantor & Komputer", tipe: "Aset", subTipe: "Aset Tetap", saldoNormal: "Debit" }, { kode: "1251", nama: "Akumulasi Penyusutan Peralatan Kantor", tipe: "Aset", subTipe: "Aset Tetap", saldoNormal: "Kredit" }, { kode: "1260", nama: "Aset Tetap Lainnya", tipe: "Aset", subTipe: "Aset Tetap", saldoNormal: "Debit" }, { kode: "1261", nama: "Akumulasi Penyusutan Aset Tetap Lainnya", tipe: "Aset", subTipe: "Aset Tetap", saldoNormal: "Kredit" },
+// ASET — Lain-lain
+{ kode: "1310", nama: "Uang Jaminan / Deposit", tipe: "Aset", subTipe: "Aset Lain-lain", saldoNormal: "Debit" }, { kode: "1320", nama: "Aset Tidak Berwujud", tipe: "Aset", subTipe: "Aset Lain-lain", saldoNormal: "Debit" },
+// LIABILITAS — Jangka Pendek
+{ kode: "2110", nama: "Hutang Usaha (Supplier Lokal)", tipe: "Liabilitas", subTipe: "Liabilitas Jangka Pendek", saldoNormal: "Kredit" }, { kode: "2111", nama: "Hutang Usaha (Supplier Overseas)", tipe: "Liabilitas", subTipe: "Liabilitas Jangka Pendek", saldoNormal: "Kredit" }, { kode: "2120", nama: "Uang Muka Penjualan", tipe: "Liabilitas", subTipe: "Liabilitas Jangka Pendek", saldoNormal: "Kredit" }, { kode: "2130", nama: "Hutang Gaji", tipe: "Liabilitas", subTipe: "Liabilitas Jangka Pendek", saldoNormal: "Kredit" }, { kode: "2131", nama: "Hutang Komisi", tipe: "Liabilitas", subTipe: "Liabilitas Jangka Pendek", saldoNormal: "Kredit" }, { kode: "2132", nama: "Hutang Biaya Lain", tipe: "Liabilitas", subTipe: "Liabilitas Jangka Pendek", saldoNormal: "Kredit" }, { kode: "2140", nama: "PPN Keluaran", tipe: "Liabilitas", subTipe: "Liabilitas Jangka Pendek", saldoNormal: "Kredit" }, { kode: "2141", nama: "PPh 21 Terhutang", tipe: "Liabilitas", subTipe: "Liabilitas Jangka Pendek", saldoNormal: "Kredit" }, { kode: "2142", nama: "PPh 23 Terhutang", tipe: "Liabilitas", subTipe: "Liabilitas Jangka Pendek", saldoNormal: "Kredit" }, { kode: "2143", nama: "PPh Final Terhutang", tipe: "Liabilitas", subTipe: "Liabilitas Jangka Pendek", saldoNormal: "Kredit" }, { kode: "2150", nama: "Hutang Bank Jangka Pendek", tipe: "Liabilitas", subTipe: "Liabilitas Jangka Pendek", saldoNormal: "Kredit" }, { kode: "2160", nama: "Biaya Masih Harus Dibayar", tipe: "Liabilitas", subTipe: "Liabilitas Jangka Pendek", saldoNormal: "Kredit" },
+// LIABILITAS — Jangka Panjang
+{ kode: "2210", nama: "Hutang Bank Jangka Panjang", tipe: "Liabilitas", subTipe: "Liabilitas Jangka Panjang", saldoNormal: "Kredit" }, { kode: "2220", nama: "Hutang Leasing Kendaraan/Alat", tipe: "Liabilitas", subTipe: "Liabilitas Jangka Panjang", saldoNormal: "Kredit" }, { kode: "2230", nama: "Hutang Pihak Berelasi", tipe: "Liabilitas", subTipe: "Liabilitas Jangka Panjang", saldoNormal: "Kredit" },
+// EKUITAS
+{ kode: "3100", nama: "Modal Disetor", tipe: "Ekuitas", subTipe: "Ekuitas", saldoNormal: "Kredit" }, { kode: "3200", nama: "Laba Ditahan", tipe: "Ekuitas", subTipe: "Ekuitas", saldoNormal: "Kredit" }, { kode: "3300", nama: "Laba/Rugi Tahun Berjalan", tipe: "Ekuitas", subTipe: "Ekuitas", saldoNormal: "Kredit" }, { kode: "3400", nama: "Prive / Pengambilan Pribadi Pemilik", tipe: "Ekuitas", subTipe: "Ekuitas", saldoNormal: "Debit" },
+// PENDAPATAN
+{ kode: "4100", nama: "Penjualan Spare Parts", tipe: "Pendapatan", subTipe: "Pendapatan", saldoNormal: "Kredit" }, { kode: "4200", nama: "Jasa Service / Workshop", tipe: "Pendapatan", subTipe: "Pendapatan", saldoNormal: "Kredit" }, { kode: "4300", nama: "Penjualan Unit", tipe: "Pendapatan", subTipe: "Pendapatan", saldoNormal: "Kredit" }, { kode: "4900", nama: "Pendapatan Lain-lain", tipe: "Pendapatan", subTipe: "Pendapatan", saldoNormal: "Kredit" }, { kode: "4910", nama: "Retur & Potongan Penjualan", tipe: "Pendapatan", subTipe: "Pendapatan", saldoNormal: "Debit" },
+// BEBAN — HPP
+{ kode: "5100", nama: "HPP Spare Parts", tipe: "Beban", subTipe: "Harga Pokok Penjualan", saldoNormal: "Debit" }, { kode: "5110", nama: "HPP Jasa / Service", tipe: "Beban", subTipe: "Harga Pokok Penjualan", saldoNormal: "Debit" },
+// BEBAN — Gaji & Karyawan
+{ kode: "5210", nama: "Beban Gaji Pokok", tipe: "Beban", subTipe: "Beban Gaji & Karyawan", saldoNormal: "Debit" }, { kode: "5211", nama: "Beban Lembur", tipe: "Beban", subTipe: "Beban Gaji & Karyawan", saldoNormal: "Debit" }, { kode: "5212", nama: "Beban Komisi", tipe: "Beban", subTipe: "Beban Gaji & Karyawan", saldoNormal: "Debit" }, { kode: "5213", nama: "Beban Tunjangan (Uang Makan/Harian)", tipe: "Beban", subTipe: "Beban Gaji & Karyawan", saldoNormal: "Debit" }, { kode: "5214", nama: "Beban BPJS / Asuransi Karyawan", tipe: "Beban", subTipe: "Beban Gaji & Karyawan", saldoNormal: "Debit" }, { kode: "5215", nama: "Beban Uang Dinas / Perjalanan", tipe: "Beban", subTipe: "Beban Gaji & Karyawan", saldoNormal: "Debit" },
+// BEBAN — Operasional Kantor (memetakan kategori COA lama Biaya Lain: OPS-001..012)
+{ kode: "5310", nama: "Beban Utilitas (Listrik/Air/IPL)", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5320", nama: "Beban Bensin & Transportasi", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5330", nama: "Beban Parkir & Tol", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5340", nama: "Beban Service Kendaraan", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5350", nama: "Beban Entertain / Jamuan", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5360", nama: "Beban ATK & Perlengkapan Kantor", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5370", nama: "Beban Telepon & Internet", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5380", nama: "Beban Sewa", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5390", nama: "Beban Operasional Lainnya", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" },
+// BEBAN — Penyusutan
+{ kode: "5410", nama: "Beban Penyusutan Bangunan", tipe: "Beban", subTipe: "Beban Penyusutan", saldoNormal: "Debit" }, { kode: "5420", nama: "Beban Penyusutan Kendaraan", tipe: "Beban", subTipe: "Beban Penyusutan", saldoNormal: "Debit" }, { kode: "5430", nama: "Beban Penyusutan Mesin & Peralatan", tipe: "Beban", subTipe: "Beban Penyusutan", saldoNormal: "Debit" }, { kode: "5440", nama: "Beban Penyusutan Peralatan Kantor", tipe: "Beban", subTipe: "Beban Penyusutan", saldoNormal: "Debit" },
+// BEBAN — Pajak & Keuangan & Lain-lain
+{ kode: "5510", nama: "Beban PPh Badan", tipe: "Beban", subTipe: "Beban Pajak", saldoNormal: "Debit" }, { kode: "5520", nama: "Beban Pajak Lainnya", tipe: "Beban", subTipe: "Beban Pajak", saldoNormal: "Debit" }, { kode: "5610", nama: "Beban Bunga Bank / Leasing", tipe: "Beban", subTipe: "Beban Keuangan", saldoNormal: "Debit" }, { kode: "5620", nama: "Beban Administrasi Bank", tipe: "Beban", subTipe: "Beban Keuangan", saldoNormal: "Debit" }, { kode: "5630", nama: "Beban Selisih Kurs (Rugi)", tipe: "Beban", subTipe: "Beban Keuangan", saldoNormal: "Debit" }, { kode: "5910", nama: "Beban Piutang Tak Tertagih", tipe: "Beban", subTipe: "Beban Lain-lain", saldoNormal: "Debit" }, { kode: "5920", nama: "Beban Lain-lain", tipe: "Beban", subTipe: "Beban Lain-lain", saldoNormal: "Debit" }].map(a => ({
+  ...a,
+  aktif: true
+}));
 // PERFORMANCE — browser cache-then-revalidate: the app used to block every module's first paint on
 // a fresh Supabase round-trip for all ~46 top-level keys in parallel, every single time the app was
 // opened (measured: up to ~9.7s for the slowest key to resolve, even though the JS bundle itself
@@ -3085,6 +3126,15 @@ function useStore() {
   const [userActivityLog, setUserActivityLog] = usePersisted("erp_user_activity_log", []); // Analisa User: login + module-navigation events per user, for usage/adoption analysis (HR/Owner/GM only)
   const [editRequests, setEditRequests] = usePersisted("erp_edit_requests", []); // Pending edit/add/delete requests needing GM approval (Client, Master Part)
   const [coa, setCoa] = usePersisted("erp_coa", seedCOA); // Master COA - office operational cost accounts
+  // LAPORAN KEUANGAN (2026-09-08) — separate from the `coa` above on purpose: that one is a flat
+  // expense-tagging list for Biaya Lain/Jurnal selisih-kurs, this one is a real Chart of Accounts
+  // (Aset/Liabilitas/Ekuitas/Pendapatan/Beban with normal balances) that the LK module's own
+  // General Ledger posts against. Kept as three independent keys so the module is usable
+  // incrementally — COA can be set up before Saldo Awal is known, entries can be posted before
+  // every account has an opening balance, etc.
+  const [lkCoa, setLkCoa] = usePersisted("erp_lk_coa", seedLKCOA);
+  const [lkSaldoAwal, setLkSaldoAwal] = usePersisted("erp_lk_saldo_awal", []);
+  const [lkJurnal, setLkJurnal] = usePersisted("erp_lk_jurnal", []);
   const [salesActivities, setSalesActivities] = usePersisted("erp_sales_activities", []); // Daily sales activity log: visits, calls, operational costs
   const [komisiOverrides, setKomisiOverrides] = usePersisted("erp_komisi", []); // Komisi Sales: sparse per-SO overrides { soNomor, salesDiscountOverride, rateOverride, dibayar, dibayarTanggal, dibayarOleh } — standalone from Payroll's calcKomisi
   const [attendance, setAttendance] = usePersisted("erp_attendance", []); // Absensi: daily check-in records for uang makan/harian + lembur calc
@@ -3350,6 +3400,12 @@ function useStore() {
     setEditRequests,
     coa,
     setCoa,
+    lkCoa,
+    setLkCoa,
+    lkSaldoAwal,
+    setLkSaldoAwal,
+    lkJurnal,
+    setLkJurnal,
     salesActivities,
     setSalesActivities,
     komisiOverrides,
@@ -25076,6 +25132,14 @@ function PartsUseModule({
   const [returnModal, setReturnModal] = useState(null);
   const [returnQty, setReturnQty] = useState({});
   const [returnReason, setReturnReason] = useState("Tidak Terpakai Semua");
+  // Edit Release (2026-09-08, requested by Jef: "berikan fungsi edit barang yang sudah direlease,
+  // tapi berikan juga tanda bahwa sudah pernah ada revisi") — lets Logistic/Owner-like correct a
+  // mistaken release qty directly (e.g. mis-typed quantity, wrong part) without going through the
+  // slower Ajukan Return -> Konfirmasi Return round trip. Every use marks pu.direvisi + appends to
+  // pu.revisiLog so the correction is always visible, never silent.
+  const [editReleaseModal, setEditReleaseModal] = useState(null);
+  const [editReleaseQty, setEditReleaseQty] = useState({});
+  const [editReleaseReason, setEditReleaseReason] = useState("");
   // Release Tanpa SO (per request): consumables (ATK/Consumable) get used up in day-to-day
   // workshop operation without ever being tied to a specific Sales Order — office supplies, rags,
   // grease, etc. Forcing every one of these through the SO-bound release flow above was blocking
@@ -25409,6 +25473,88 @@ function PartsUseModule({
       return newParts;
     });
   };
+  // Edit Release: direct correction of an already-released item's qty (e.g. Stefanus fat-fingered
+  // a quantity, or handed out the wrong amount) — separate from the Ajukan Return/Konfirmasi Return
+  // flow above, which is for the MEKANIK deciding not to use parts they already received. This is
+  // for LOGISTIC/OWNER fixing the release RECORD itself. Every save marks pu.direvisi + appends a
+  // revisiLog entry so the correction is always visible on the document, never silent.
+  const openEditRelease = pu => {
+    const init = {};
+    pu.items.forEach(it => init[it.partNumber] = it.qtyReleased || 0);
+    setEditReleaseQty(init);
+    setEditReleaseReason("");
+    setEditReleaseModal(pu);
+  };
+  const saveEditRelease = () => {
+    const pu = editReleaseModal;
+    if (!editReleaseReason.trim()) return alert("Alasan revisi wajib diisi.");
+    const changes = pu.items.map(it => {
+      const qtyBaru = Number(editReleaseQty[it.partNumber]);
+      return {
+        partNumber: it.partNumber,
+        partName: it.partName,
+        qtyLama: it.qtyReleased || 0,
+        qtyBaru: isNaN(qtyBaru) ? it.qtyReleased || 0 : qtyBaru
+      };
+    }).filter(c => c.qtyBaru !== c.qtyLama);
+    if (changes.length === 0) return alert("Tidak ada qty yang diubah.");
+    const negatif = changes.find(c => c.qtyBaru < 0);
+    if (negatif) return alert(`Qty ${negatif.partNumber} tidak boleh negatif.`);
+    const dibawahReturn = pu.items.find(it => {
+      const c = changes.find(x => x.partNumber === it.partNumber);
+      return c && c.qtyBaru < (it.qtyReturned || 0);
+    });
+    if (dibawahReturn) return alert(`Qty baru untuk ${dibawahReturn.partNumber} tidak boleh lebih kecil dari qty yang sudah diretur (${dibawahReturn.qtyReturned}).`);
+    // Stock check: only the NET increase across all changed parts needs to be covered by current
+    // stock — a decrease on one part doesn't free up stock for a different part number.
+    const overStock = changes.find(c => {
+      if (c.qtyBaru <= c.qtyLama) return false;
+      const p = (parts || []).find(x => x.partNumber === c.partNumber);
+      return (c.qtyBaru - c.qtyLama) > (p?.stok || 0);
+    });
+    if (overStock) return alert(`Menambah qty ${overStock.partNumber} melebihi stock tersedia saat ini.`);
+    const revisiEntry = {
+      tanggal: today(),
+      oleh: session.nama,
+      alasan: editReleaseReason.trim(),
+      changes
+    };
+    setPartsUse(prev => prev.map(x => {
+      if (x.nomor !== pu.nomor) return x;
+      const newItems = x.items.map(it => {
+        const c = changes.find(ch => ch.partNumber === it.partNumber);
+        return c ? {
+          ...it,
+          qtyReleased: c.qtyBaru
+        } : it;
+      });
+      return {
+        ...x,
+        items: newItems,
+        status: x.status === "Menunggu Konfirmasi Return" ? x.status : isFullyReleased({
+          ...x,
+          items: newItems
+        }) ? "Selesai" : "ON GOING",
+        direvisi: true,
+        revisiLog: [...(x.revisiLog || []), revisiEntry]
+      };
+    }));
+    setParts(prev => (prev || []).map(p => {
+      const c = changes.find(ch => ch.partNumber === p.partNumber);
+      return c ? {
+        ...p,
+        stok: (p.stok || 0) - (c.qtyBaru - c.qtyLama)
+      } : p;
+    }));
+    logAudit(store, session, {
+      module: "Parts Use",
+      docNomor: pu.nomor,
+      action: "Revisi Release",
+      detail: `${editReleaseReason.trim()} — ${changes.map(c => `${c.partNumber} ${c.qtyLama}→${c.qtyBaru}`).join(", ")}`
+    });
+    setEditReleaseModal(null);
+    setDetail(null);
+  };
   const statusColor = {
     "ON GOING": theme.accent,
     "Menunggu Konfirmasi Return": theme.yellow,
@@ -25578,6 +25724,439 @@ function PartsUseModule({
       onClick: save
     }, "Release Parts")))));
   }
+  // FIX (2026-09-08): "Release Tanpa SO" used to be a <Modal> popup, but clicking its trigger
+  // button reliably updated React state (confirmed nonSOModal flips to true) while the popup
+  // itself never painted on screen — a "bug" reported by Jef ("+ Release Tanpa SO tidak dapat
+  // diklik"). Rather than chase the exact rendering quirk further, this switches to the SAME
+  // full-page early-return pattern already used just above for the SO-based "Release Parts" flow
+  // (task #178 converted that one away from a popup for reliability too) — proven to work
+  // reliably in this exact component. The old <Modal> block further below is left in place but is
+  // now unreachable dead code whenever nonSOModal is true, since this early return fires first;
+  // when nonSOModal is false it just renders null as always, so nothing else needed to change.
+  if (nonSOModal) {
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 16
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        flexWrap: "wrap"
+      }
+    }, /*#__PURE__*/React.createElement(Btn, {
+      variant: "ghost",
+      onClick: () => setNonSOModal(false)
+    }, "← Kembali ke Parts Use"), /*#__PURE__*/React.createElement("h2", {
+      style: {
+        margin: 0,
+        color: theme.text
+      }
+    }, "Release Tanpa SO (ATK/Consumable)")), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 14
+      }
+    }, /*#__PURE__*/React.createElement("p", {
+      style: {
+        margin: 0,
+        fontSize: 12,
+        color: theme.muted
+      }
+    }, "Khusus part dengan Sub Kategori ATK atau Consumable — dipakai untuk barang habis pakai sehari-hari yang tidak terkait Sales Order manapun (misal: lap majun, oli gemuk, alat tulis). Stock langsung dikurangi begitu disimpan."), /*#__PURE__*/React.createElement(Select, {
+      label: "Nama Mekanik/Staff Penerima",
+      value: nonSOMekanik,
+      onChange: setNonSOMekanik,
+      options: [{
+        value: "",
+        label: "-- Pilih --"
+      }, {
+        value: "SEMENTARA",
+        label: "⏳ SEMENTARA — belum tahu, isi nanti"
+      }, ...(employees || []).map(e => ({
+        value: e.nama,
+        label: e.nama
+      }))],
+      required: true
+    }), /*#__PURE__*/React.createElement(Input, {
+      label: "Catatan (opsional)",
+      value: nonSOCatatan,
+      onChange: setNonSOCatatan,
+      placeholder: "Alasan/keperluan release"
+    }), /*#__PURE__*/React.createElement(Input, {
+      placeholder: "Cari part number / nama part...",
+      value: nonSOSearch,
+      onChange: setNonSOSearch
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+        maxHeight: 420,
+        overflowY: "auto"
+      }
+    }, nonSOFilteredParts.length === 0 ? /*#__PURE__*/React.createElement("p", {
+      style: {
+        color: theme.muted,
+        fontSize: 13
+      }
+    }, "Tidak ada part dengan Sub Kategori ATK/Consumable yang cocok.") : nonSOFilteredParts.map(p => /*#__PURE__*/React.createElement("div", {
+      key: p.partNumber,
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "6px 10px",
+        background: theme.surface,
+        borderRadius: 8
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        fontSize: 13,
+        color: theme.text
+      }
+    }, /*#__PURE__*/React.createElement("strong", null, p.partNumber), " — ", p.partName, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.muted,
+        marginLeft: 6
+      }
+    }, "(Stok: ", fmtNum(p.stok || 0), ")")), /*#__PURE__*/React.createElement("input", {
+      type: "number",
+      min: "0",
+      max: p.stok || 0,
+      value: nonSOPicked[p.partNumber] || "",
+      placeholder: "0",
+      onChange: e => setNonSOPicked({
+        ...nonSOPicked,
+        [p.partNumber]: parseInt(e.target.value) || 0
+      }),
+      style: {
+        background: theme.card,
+        border: `1px solid ${theme.border}`,
+        borderRadius: 6,
+        padding: "5px 8px",
+        color: theme.text,
+        width: 80,
+        fontFamily: "inherit"
+      }
+    })))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 10,
+        justifyContent: "flex-end"
+      }
+    }, /*#__PURE__*/React.createElement(Btn, {
+      variant: "ghost",
+      onClick: () => setNonSOModal(false)
+    }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+      variant: "success",
+      onClick: saveNonSORelease
+    }, "💾 Simpan Release")))));
+  }
+  // FIX (2026-09-08): converted to the same full-page early-return pattern as nonSOModal above —
+  // Jef reported "tidak ada tombol untuk retur barang yang sudah direlease", and while the Ajukan
+  // Return button/flow did already exist in code, it lived two <Modal> levels deep (list -> Detail
+  // Modal -> Ajukan Return Modal) in this exact component where a Modal has already been shown to
+  // silently fail to render (see the nonSOModal fix above). Converting Detail, Ajukan Return, and
+  // the new Edit Release screen to full pages removes that risk entirely and makes the retur/edit
+  // actions immediately visible instead of buried.
+  if (returnModal) {
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 16
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        flexWrap: "wrap"
+      }
+    }, /*#__PURE__*/React.createElement(Btn, {
+      variant: "ghost",
+      onClick: () => setReturnModal(null)
+    }, "← Batal"), /*#__PURE__*/React.createElement("h2", {
+      style: {
+        margin: 0,
+        color: theme.text
+      }
+    }, "Ajukan Return Sisa Part — ", returnModal.nomor)), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 14
+      }
+    }, /*#__PURE__*/React.createElement(Select, {
+      label: "Alasan Return",
+      value: returnReason,
+      onChange: setReturnReason,
+      options: ["Tidak Terpakai Semua", "Tidak Cocok / Salah Spesifikasi", "Rusak / Cacat", "Lainnya"].map(r => ({
+        value: r,
+        label: r
+      }))
+    }), /*#__PURE__*/React.createElement("p", {
+      style: {
+        margin: 0,
+        fontSize: 13,
+        color: theme.muted
+      }
+    }, "Isi qty sisa part yang tidak terpakai dan akan dikembalikan:"), returnModal.items.filter(it => (it.qtyReleased || 0) - (it.qtyReturned || 0) > 0).map(it => /*#__PURE__*/React.createElement("div", {
+      key: it.partNumber,
+      style: {
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        padding: "6px 0",
+        borderBottom: `1px solid ${theme.border}22`
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.text,
+        fontSize: 13
+      }
+    }, it.partName, " ", /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.muted
+      }
+    }, "(sisa direlease: ", (it.qtyReleased || 0) - (it.qtyReturned || 0), ")")), /*#__PURE__*/React.createElement("input", {
+      type: "number",
+      min: "0",
+      max: (it.qtyReleased || 0) - (it.qtyReturned || 0),
+      value: returnQty[it.partNumber] || 0,
+      onChange: e => setReturnQty({
+        ...returnQty,
+        [it.partNumber]: parseInt(e.target.value) || 0
+      }),
+      style: {
+        background: theme.surface,
+        border: `1px solid ${theme.border}`,
+        borderRadius: 6,
+        padding: "5px 8px",
+        color: theme.text,
+        width: 80,
+        fontFamily: "inherit"
+      }
+    }))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 10,
+        justifyContent: "flex-end",
+        marginTop: 6
+      }
+    }, /*#__PURE__*/React.createElement(Btn, {
+      variant: "ghost",
+      onClick: () => setReturnModal(null)
+    }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+      variant: "warning",
+      onClick: submitReturnRequest
+    }, "Ajukan Return")))));
+  }
+  if (editReleaseModal) {
+    const pu = editReleaseModal;
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 16
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        flexWrap: "wrap"
+      }
+    }, /*#__PURE__*/React.createElement(Btn, {
+      variant: "ghost",
+      onClick: () => setEditReleaseModal(null)
+    }, "← Batal"), /*#__PURE__*/React.createElement("h2", {
+      style: {
+        margin: 0,
+        color: theme.text
+      }
+    }, "Edit Release — ", pu.nomor)), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 14
+      }
+    }, /*#__PURE__*/React.createElement("p", {
+      style: {
+        margin: 0,
+        fontSize: 12,
+        color: theme.muted
+      }
+    }, "Koreksi langsung qty yang sudah direlease (mis. salah input jumlah). Stock disesuaikan otomatis, dan perubahan ini dicatat sebagai revisi pada dokumen ini — akan tampil sebagai tanda \"Direvisi\" pada daftar Parts Use."), pu.items.map(it => /*#__PURE__*/React.createElement("div", {
+      key: it.partNumber,
+      style: {
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        padding: "6px 0",
+        borderBottom: `1px solid ${theme.border}22`
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.text,
+        fontSize: 13
+      }
+    }, it.partName, " ", /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.muted
+      }
+    }, "(qty butuh: ", it.qtyButuh, it.qtyReturned ? `, sudah diretur: ${it.qtyReturned}` : "", ")")), /*#__PURE__*/React.createElement("input", {
+      type: "number",
+      min: it.qtyReturned || 0,
+      value: editReleaseQty[it.partNumber] ?? (it.qtyReleased || 0),
+      onChange: e => setEditReleaseQty({
+        ...editReleaseQty,
+        [it.partNumber]: parseInt(e.target.value)
+      }),
+      style: {
+        background: theme.surface,
+        border: `1px solid ${theme.border}`,
+        borderRadius: 6,
+        padding: "5px 8px",
+        color: theme.text,
+        width: 90,
+        fontFamily: "inherit"
+      }
+    }))), /*#__PURE__*/React.createElement(Input, {
+      label: "Alasan Revisi",
+      value: editReleaseReason,
+      onChange: setEditReleaseReason,
+      required: true,
+      placeholder: "mis. salah input qty saat release awal"
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 10,
+        justifyContent: "flex-end"
+      }
+    }, /*#__PURE__*/React.createElement(Btn, {
+      variant: "ghost",
+      onClick: () => setEditReleaseModal(null)
+    }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+      variant: "warning",
+      onClick: saveEditRelease
+    }, "💾 Simpan Revisi")))));
+  }
+  if (detail) {
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 16
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        flexWrap: "wrap"
+      }
+    }, /*#__PURE__*/React.createElement(Btn, {
+      variant: "ghost",
+      onClick: () => setDetail(null)
+    }, "← Kembali ke Parts Use"), /*#__PURE__*/React.createElement("h2", {
+      style: {
+        margin: 0,
+        color: theme.text
+      }
+    }, "Detail ", detail.nomor), detail.direvisi && /*#__PURE__*/React.createElement(Badge, {
+      color: theme.yellow
+    }, "✏️ Direvisi (", (detail.revisiLog || []).length, "x)")), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 14
+      }
+    }, /*#__PURE__*/React.createElement(Table, {
+      headers: ["Part Number", "Part Name", "Qty Butuh", "Qty Direlease", "Qty Return"],
+      rows: detail.items.map(it => [it.partNumber, it.partName, fmtNum(it.qtyButuh), fmtNum(it.qtyReleased || 0), fmtNum(it.qtyReturned || 0)])
+    }), detail.releaseLog && detail.releaseLog.length > 0 && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
+      style: {
+        margin: "10px 0 8px",
+        color: theme.muted,
+        fontSize: 13
+      }
+    }, "RIWAYAT RELEASE"), detail.releaseLog.map((log, i) => /*#__PURE__*/React.createElement("p", {
+      key: i,
+      style: {
+        margin: "0 0 6px",
+        fontSize: 12,
+        color: theme.muted
+      }
+    }, log.tanggal, " — ", log.mekanikNama, " · ", log.items.map(it => `${it.partNumber} (${it.qty})`).join(", "), " — oleh ", log.by))), (isMekanik || isOwnerLike) && detail.status !== "Selesai" && !isFullyReleased(detail) && /*#__PURE__*/React.createElement("p", {
+      style: {
+        margin: "4px 0 0",
+        fontSize: 12,
+        color: theme.accentLight
+      }
+    }, "Masih ada sisa part yang belum direlease — gunakan tombol \"Lanjut Release\" pada daftar SO Siap Direlease di atas."), detail.direvisi && detail.revisiLog && detail.revisiLog.length > 0 && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
+      style: {
+        margin: "10px 0 8px",
+        color: theme.yellow,
+        fontSize: 13
+      }
+    }, "RIWAYAT REVISI"), detail.revisiLog.map((rev, i) => /*#__PURE__*/React.createElement("p", {
+      key: i,
+      style: {
+        margin: "0 0 6px",
+        fontSize: 12,
+        color: theme.muted
+      }
+    }, rev.tanggal, " — ", rev.oleh, " · ", rev.alasan, " · ", rev.changes.map(c => `${c.partNumber} ${c.qtyLama}→${c.qtyBaru}`).join(", ")))), detail.returnRequest && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h4", {
+      style: {
+        margin: "10px 0 8px",
+        color: theme.muted,
+        fontSize: 13
+      }
+    }, "PENGAJUAN RETURN"), detail.returnReason && /*#__PURE__*/React.createElement("p", {
+      style: {
+        margin: "0 0 8px",
+        fontSize: 12,
+        color: theme.muted
+      }
+    }, "Alasan: ", /*#__PURE__*/React.createElement(Badge, {
+      color: theme.yellow
+    }, detail.returnReason)), /*#__PURE__*/React.createElement(Table, {
+      headers: ["Part Number", "Qty Diajukan Return"],
+      rows: detail.returnRequest.map(it => [it.partNumber, fmtNum(it.qtyReturnDiajukan)])
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 10,
+        justifyContent: "flex-end",
+        flexWrap: "wrap"
+      }
+    }, (isStefanus || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+      variant: "ghost",
+      size: "sm",
+      onClick: () => openEditRelease(detail)
+    }, "✏️ Edit Release"), (isMekanik || isStefanus || isOwnerLike) && detail.status !== "Menunggu Konfirmasi Return" && (detail.items || []).some(it => (it.qtyReleased || 0) - (it.qtyReturned || 0) > 0) && /*#__PURE__*/React.createElement(Btn, {
+      variant: "warning",
+      size: "sm",
+      onClick: () => {
+        requestReturn(detail);
+        setDetail(null);
+      }
+    }, "↩ Ajukan Return Sisa Part"), (isStefanus || isOwnerLike) && detail.status === "Menunggu Konfirmasi Return" && /*#__PURE__*/React.createElement(Btn, {
+      variant: "success",
+      size: "sm",
+      onClick: () => {
+        confirmReturn(detail);
+        setDetail(null);
+      }
+    }, "✓ Konfirmasi Return (Update Stock)")))));
+  }
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -25702,9 +26281,15 @@ function PartsUseModule({
       onClick: () => setDetail(pu)
     }, pu.nomor), pu.tanggal, pu.soNomor, mekanikCell(pu), /*#__PURE__*/React.createElement(Badge, {
       color: theme.purple
-    }, pu.items.length, " part"), /*#__PURE__*/React.createElement(Badge, {
+    }, pu.items.length, " part"), /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement(Badge, {
       color: statusColor[pu.status]
-    }, pu.status)]),
+    }, pu.status), pu.direvisi && /*#__PURE__*/React.createElement("span", {
+      style: {
+        marginLeft: 4
+      }
+    }, /*#__PURE__*/React.createElement(Badge, {
+      color: theme.yellow
+    }, "✏️ Direvisi")))]),
     onDelete: isOwnerLike ? async i => {
       const pu = partsUseOngoing[i];
       await gatedDelete({
@@ -25744,9 +26329,15 @@ function PartsUseModule({
       onClick: () => setDetail(pu)
     }, pu.nomor), pu.tanggal, pu.soNomor, mekanikCell(pu), /*#__PURE__*/React.createElement(Badge, {
       color: theme.purple
-    }, pu.items.length, " part"), /*#__PURE__*/React.createElement(Badge, {
+    }, pu.items.length, " part"), /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement(Badge, {
       color: statusColor[pu.status]
-    }, pu.status)]),
+    }, pu.status), pu.direvisi && /*#__PURE__*/React.createElement("span", {
+      style: {
+        marginLeft: 4
+      }
+    }, /*#__PURE__*/React.createElement(Badge, {
+      color: theme.yellow
+    }, "✏️ Direvisi")))]),
     onDelete: isOwnerLike ? async i => {
       const pu = partsUseDone[i];
       await gatedDelete({
@@ -27191,13 +27782,50 @@ function InvoiceModule({
     const preTaxBase = soAdhocPreTaxBase(so);
     if (!t) return preTaxBase;
     const isLastRemaining = remainingTermin(so).filter(x => x.label !== label).length === 0;
-    // The last remaining termin always bills the true pre-tax remainder (base − sum of DP already
-    // billed via earlier termin invoices on this SO) rather than its nominal percent, so rounding
-    // drift never leaves a stray balance. "Billed so far" reads each earlier termin invoice's own
-    // `subtotal` field, which stores exactly this same pre-tax DP slice (see save() below).
-    const billedSoFar = soInvoices(so.nomor).filter(i => i.terminLabel).reduce((s, i) => s + (i.subtotal || 0), 0);
+    // BUG FIX (2026-09-08, reported by Jef: SO-061/SO-062 Pelunasan invoices INV-012/INV-013 showed
+    // Rp 0 as their total even though the prior DP1 30% invoices — INV-004/INV-005 — were correctly
+    // paid). Root cause: "billed so far" used to be read from each earlier termin invoice's own
+    // stored `.subtotal` field. That field is only trustworthy for invoices created AFTER the
+    // pre-tax DP formula fix (#182/#183, 2026-08-05/06) — any termin invoice created before that
+    // (like INV-004/INV-005 here) stored `.subtotal` using the OLD, incorrect formula (tax baked in
+    // / a much larger nominal than the true 30% pre-tax slice — see invoiceDisplayFinancials'
+    // comment above for the same legacy-formula issue on the display side). That inflated legacy
+    // number made `preTaxBase - billedSoFar` come out <= 0, which Math.max(0, ...) then silently
+    // clamped to exactly Rp 0 for the final Pelunasan invoice — with no warning to whoever created it.
+    // Fix: derive "billed so far" from the SO's own termOfPayment percentages (the authoritative
+    // billing plan) for whichever termin labels have already been invoiced, instead of trusting each
+    // old invoice's possibly-corrupted stored amount. This is correct for brand-new SOs too (a
+    // 30%-then-70% split still nets out to preTaxBase either way) and is immune to whatever formula
+    // was in effect when the earlier invoice happened to be created.
+    const usedLabels = soInvoices(so.nomor).filter(i => i.terminLabel).map(i => i.terminLabel);
+    const billedSoFar = top.filter(x => usedLabels.includes(x.label)).reduce((s, x) => s + preTaxBase * (parseFloat(x.percent) || 0) / 100, 0);
     if (isLastRemaining) return Math.max(0, preTaxBase - billedSoFar);
     return preTaxBase * (parseFloat(t.percent) || 0) / 100;
+  };
+  // One-click retroactive repair for termin invoices already saved with the Rp 0 bug above (e.g.
+  // INV-012/INV-013 for SO-061/SO-062) — recomputes this ONE invoice's subtotal/pajak/total using
+  // the now-fixed computeTerminAmount, exactly as if it were being created fresh today, and
+  // overwrites only that invoice's financial fields. Never touches items/terminLabel/other invoices.
+  const fixStuckTerminInvoice = async inv => {
+    const so = salesOrders.find(s => s.nomor === inv.soNomor);
+    if (!so) return alert("SO sumber tidak ditemukan — tidak bisa hitung ulang.");
+    const recomputedSubtotal = computeTerminAmount(so, inv.terminLabel);
+    const afterDiskon = Math.max(0, recomputedSubtotal - (inv.diskon || 0));
+    const recomputedPajak = afterDiskon * 0.11;
+    const recomputedTotal = afterDiskon + recomputedPajak;
+    if (!(await askConfirm(`Hitung ulang ${inv.nomor} (${inv.terminLabel})?\n\nSubtotal lama: Rp ${fmt(inv.subtotal || 0)} → baru: Rp ${fmt(recomputedSubtotal)}\nTotal lama: Rp ${fmt(inv.total || 0)} → baru: Rp ${fmt(recomputedTotal)}`))) return;
+    setInvoices(prev => prev.map(x => x.nomor === inv.nomor ? {
+      ...x,
+      subtotal: recomputedSubtotal,
+      pajak: recomputedPajak,
+      total: recomputedTotal
+    } : x));
+    logAudit(store, session, {
+      module: "Invoice",
+      docNomor: inv.nomor,
+      action: "Perbaiki Nominal Termin",
+      detail: `Total lama Rp ${fmt(inv.total || 0)} -> Rp ${fmt(recomputedTotal)} (bug perhitungan Pelunasan Rp 0, diperbaiki 2026-09-08)`
+    });
   };
   // Invoice numbering now follows the unified app-wide format: INV-000-FRT-ROMAN-YEAR.
   const newNomor = (arr = invoices) => genDocNumber(arr, "INV");
@@ -27804,7 +28432,12 @@ function InvoiceModule({
         size: "sm",
         variant: "ghost",
         onClick: () => openFaktur(inv)
-      }, "+ Input"), fmt(invoiceDisplayFinancials(inv).total), fmt(inv.terbayar || 0), /*#__PURE__*/React.createElement(Badge, {
+      }, "+ Input"), /*#__PURE__*/React.createElement("span", null, fmt(invoiceDisplayFinancials(inv).total), isOwnerLike && inv.terminLabel && !invoiceDisplayFinancials(inv).total && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(Btn, {
+        size: "sm",
+        variant: "warning",
+        title: "Invoice ini Rp 0 karena bug perhitungan Pelunasan (sudah diperbaiki) — klik untuk hitung ulang nominal yang benar",
+        onClick: () => fixStuckTerminInvoice(inv)
+      }, "🔧 Hitung Ulang"))), fmt(inv.terbayar || 0), /*#__PURE__*/React.createElement(Badge, {
         color: approvalColor[inv.statusApproval]
       }, inv.statusApproval), /*#__PURE__*/React.createElement(Badge, {
         color: inv.statusBayar === "Lunas" ? theme.green : inv.statusBayar === "Sebagian" ? theme.yellow : theme.red
@@ -36099,6 +36732,31 @@ function UserAnalysisModule({
     const ts = Date.parse(e.timestamp);
     return !isNaN(ts) && ts >= cutoffMs && ts <= endMs;
   }), [store.userActivityLog, cutoffMs, endMs]);
+  // "Aktivitas Nyata" (2026-09-08): erp_user_activity_log only ever records login/navigate — it
+  // cannot tell "opened the module once" apart from "opened it once and created 10 quotations
+  // inside it" (see chat discussion). erp_audit_log DOES capture every real write/approval action
+  // app-wide, so we pull it in here purely for that count. There's no username on audit entries
+  // (logAudit only stores actorNama/actorRole), so matching back to a user is by display name —
+  // fine in practice here, but two accounts sharing the exact same nama would be merged together.
+  const auditInPeriod = React.useMemo(() => (store.auditLog || []).filter(e => {
+    const ts = Date.parse(e.timestamp);
+    return !isNaN(ts) && ts >= cutoffMs && ts <= endMs;
+  }), [store.auditLog, cutoffMs, endMs]);
+  const auditByNama = React.useMemo(() => {
+    const map = new Map();
+    auditInPeriod.forEach(e => {
+      const key = (e.actorNama || "").trim();
+      if (!key) return;
+      if (!map.has(key)) map.set(key, {
+        count: 0,
+        moduleCounts: {}
+      });
+      const rec = map.get(key);
+      rec.count++;
+      if (e.module) rec.moduleCounts[e.module] = (rec.moduleCounts[e.module] || 0) + 1;
+    });
+    return map;
+  }, [auditInPeriod]);
   const moduleLabelMap = React.useMemo(() => {
     const map = {};
     ALL_MODULES.forEach(m => {
@@ -36115,7 +36773,9 @@ function UserAnalysisModule({
       loginCount: 0,
       navigateCount: 0,
       lastActive: null,
-      moduleCounts: {}
+      moduleCounts: {},
+      auditCount: 0,
+      auditModuleCounts: {}
     });
     (store.authUsers || []).forEach(u => map.set(u.username, blank(u.username, u.nama, u.role)));
     logInPeriod.forEach(e => {
@@ -36126,8 +36786,17 @@ function UserAnalysisModule({
       if (e.moduleId) u.moduleCounts[e.moduleId] = (u.moduleCounts[e.moduleId] || 0) + 1;
       if (!u.lastActive || Date.parse(e.timestamp) > Date.parse(u.lastActive)) u.lastActive = e.timestamp;
     });
+    // Merge in real write/approval activity counts by matching display name (see auditByNama note
+    // above — audit entries don't carry a username to join on directly).
+    map.forEach(u => {
+      const rec = auditByNama.get((u.nama || "").trim());
+      if (rec) {
+        u.auditCount = rec.count;
+        u.auditModuleCounts = rec.moduleCounts;
+      }
+    });
     return [...map.values()].sort((a, b) => b.loginCount + b.navigateCount - (a.loginCount + a.navigateCount));
-  }, [logInPeriod, store.authUsers]);
+  }, [logInPeriod, store.authUsers, auditByNama]);
   const filteredUsers = search.trim() ? perUser.filter(u => (u.nama || "").toLowerCase().includes(search.trim().toLowerCase()) || (u.username || "").toLowerCase().includes(search.trim().toLowerCase())) : perUser;
   const moduleStats = React.useMemo(() => {
     const counts = {};
@@ -36175,7 +36844,7 @@ function UserAnalysisModule({
     value: "custom",
     label: "Rentang Tanggal Kustom..."
   }];
-  const summaryCards = [["User Aktif (dari total akun)", activeUserCount + " / " + perUser.length, theme.text], ["Total Login", totalLogins, theme.green], ["Total Aktivitas Navigasi", logInPeriod.filter(e => e.type === "navigate").length, theme.text], ["Modul Berbeda yang Disentuh", moduleStats.length, theme.text]].map(([label, val, color], i) => /*#__PURE__*/React.createElement("div", {
+  const summaryCards = [["User Aktif (dari total akun)", activeUserCount + " / " + perUser.length, theme.text], ["Total Login", totalLogins, theme.green], ["Total Aktivitas Navigasi", logInPeriod.filter(e => e.type === "navigate").length, theme.text], ["Total Aktivitas Nyata (Audit Trail)", auditInPeriod.length, theme.accentLight], ["Modul Berbeda yang Disentuh", moduleStats.length, theme.text]].map(([label, val, color], i) => /*#__PURE__*/React.createElement("div", {
     key: i,
     style: {
       background: theme.surface,
@@ -36205,10 +36874,15 @@ function UserAnalysisModule({
         cursor: "pointer"
       },
       onClick: () => setSelectedUser(u.username)
-    }, u.nama || u.username), roleLabel, u.loginCount, u.navigateCount, Object.keys(u.moduleCounts).length, topModule ? moduleLabelMap[topModule[0]] || topModule[0] : "-", fmtDateTime(u.lastActive)];
+    }, u.nama || u.username), roleLabel, u.loginCount, u.navigateCount, u.auditCount, Object.keys(u.moduleCounts).length, topModule ? moduleLabelMap[topModule[0]] || topModule[0] : "-", fmtDateTime(u.lastActive)];
   });
   const moduleStatRows = moduleStats.map(m => [moduleLabelMap[m.moduleId] || m.moduleId, m.count, m.userCount]);
   const detailRows = detailModules.map(m => [moduleLabelMap[m.moduleId] || m.moduleId, m.count]);
+  const detailAuditModules = detail ? Object.entries(detail.auditModuleCounts || {}).map(([module, count]) => ({
+    module,
+    count
+  })).sort((a, b) => b.count - a.count) : [];
+  const detailAuditRows = detailAuditModules.map(m => [m.module, m.count]);
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -36240,7 +36914,7 @@ function UserAnalysisModule({
       borderRadius: 8,
       border: `1px dashed ${theme.border}`
     }
-  }, "ℹ️ Menghitung seberapa sering setiap user login dan berpindah antar modul ERP — dasar untuk menilai modul mana yang benar-benar dipakai per role. Pelacakan baru mulai berjalan sejak fitur ini diaktifkan (02-Sep-2026) — data login/navigasi SEBELUM tanggal itu tidak tersedia (tidak bisa ditarik dari awal tahun). Data disimpan maks. 180 hari ke belakang dari hari ini."), !detail && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+  }, "ℹ️ Menghitung seberapa sering setiap user login dan berpindah antar modul ERP, DITAMBAH jumlah aktivitas nyata (create/edit/approve dari Audit Trail) — jadi bisa dibedakan antara \"cuma buka modul\" vs \"benar-benar mengerjakan sesuatu di dalamnya\" (mis. bikin 10 quotation dalam 1x kunjungan tetap kehitung 10 aktivitas nyata, bukan cuma 1). Pelacakan Login/Navigasi baru mulai berjalan sejak fitur ini diaktifkan (02-Sep-2026) — data SEBELUM tanggal itu tidak tersedia. Aktivitas Nyata ikut riwayat Audit Trail yang sudah ada dari lama. Data disimpan maks. 180 hari ke belakang dari hari ini."), !detail && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 12,
@@ -36292,8 +36966,14 @@ function UserAnalysisModule({
       color: theme.text,
       fontSize: 15
     }
-  }, "Per User"), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Nama", "Role", "Jumlah Login", "Aktivitas Navigasi", "Modul Unik Disentuh", "Modul Paling Sering", "Terakhir Aktif"],
+  }, "Per User"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "-8px 0 12px",
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "\"Aktivitas Navigasi\" = jumlah kunjungan ke modul (bisa cuma 1x meski di dalamnya user bikin banyak dokumen). \"Aktivitas Nyata\" = jumlah tindakan create/edit/approve sungguhan dari Audit Trail, dicocokkan berdasarkan nama — jauh lebih dekat ke gambaran \"berapa banyak yang dikerjakan\"."), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Nama", "Role", "Jumlah Login", "Aktivitas Navigasi", "Aktivitas Nyata (Audit Trail)", "Modul Unik Disentuh", "Modul Paling Sering", "Terakhir Aktif"],
     rows: userTableRows,
     emptyMsg: "Belum ada data aktivitas user."
   })), !detail && moduleStats.length > 0 && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
@@ -36326,7 +37006,7 @@ function UserAnalysisModule({
       gap: 12,
       marginTop: 14
     }
-  }, [["Jumlah Login", detail.loginCount, theme.green], ["Aktivitas Navigasi", detail.navigateCount, theme.text], ["Modul Unik Disentuh", detailModules.length, theme.text], ["Terakhir Aktif", fmtDateTime(detail.lastActive), theme.text]].map(([label, val, color], i) => /*#__PURE__*/React.createElement("div", {
+  }, [["Jumlah Login", detail.loginCount, theme.green], ["Aktivitas Navigasi", detail.navigateCount, theme.text], ["Aktivitas Nyata (Audit Trail)", detail.auditCount, theme.accentLight], ["Modul Unik Disentuh", detailModules.length, theme.text], ["Terakhir Aktif", fmtDateTime(detail.lastActive), theme.text]].map(([label, val, color], i) => /*#__PURE__*/React.createElement("div", {
     key: i,
     style: {
       background: theme.surface,
@@ -36355,6 +37035,22 @@ function UserAnalysisModule({
     headers: ["Modul", "Jumlah Kunjungan"],
     rows: detailRows,
     emptyMsg: "Belum ada aktivitas modul untuk user ini pada periode ini."
+  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 4px",
+      color: theme.text,
+      fontSize: 15
+    }
+  }, "Rincian Aktivitas Nyata (Audit Trail)"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 12px",
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Create/edit/approve sungguhan per modul — dicocokkan dari Audit Trail berdasarkan nama."), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Modul", "Jumlah Aktivitas"],
+    rows: detailAuditRows,
+    emptyMsg: "Belum ada aktivitas tercatat di Audit Trail untuk user ini pada periode ini."
   }))));
 }
 
@@ -41109,6 +41805,731 @@ function JurnalModule({
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// LAPORAN KEUANGAN (2026-09-08) — Fase 1 MVP (Task #389). Build the module now, ahead of having
+// complete historical data, per Jef's instruction: "apakah bisa dibuatkan modulenya terlebih
+// dahulu, dan data bisa diisi secara berkala lewat erp?" — so COA / Saldo Awal / Jurnal can be
+// filled in incrementally over time rather than waiting for a single complete data dump.
+// Deliberately separate from the operational `coa` (Master COA) used by Workshop Ops / Biaya
+// Lain — that one is a simple per-category expense tag list, this is a real chart of accounts
+// with tipe/subTipe/saldoNormal needed for actual financial statements.
+// Fase 1 scope: manual double-entry only (one Debit account + one Kredit account per jurnal
+// entry, same amount on both sides) — no auto-posting from other modules (SO/Invoice/PO/Payroll
+// etc.) yet. That auto-posting engine is Fase 2 (Task #390). Fase 1 exists so Finance can start
+// recording Saldo Awal and day-to-day jurnal entries by hand right away, and the numbers carry
+// forward once Fase 2 wires up automatic posting.
+// ════════════════════════════════════════════════════════════════════════════
+function LKModule({
+  store,
+  session
+}) {
+  const {
+    lkCoa,
+    setLkCoa,
+    lkSaldoAwal,
+    setLkSaldoAwal,
+    lkJurnal,
+    setLkJurnal
+  } = store;
+  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director"; // standardized 2026-08-21
+  const [tab, setTab] = useState("coa");
+  const TIPE_OPTIONS = ["Aset", "Liabilitas", "Ekuitas", "Pendapatan", "Beban"];
+  const tipeToNormal = {
+    Aset: "Debit",
+    Beban: "Debit",
+    Liabilitas: "Kredit",
+    Ekuitas: "Kredit",
+    Pendapatan: "Kredit"
+  };
+  const normalOf = c => c.saldoNormal || tipeToNormal[c.tipe] || "Debit";
+  // Heuristic used only by the Arus Kas tab to identify which COA accounts represent Kas/Bank —
+  // an explicit `isKas` checkbox on the account (for custom accounts with unusual names) OR a
+  // name match, so the seeded Kas Kecil/Kas Besar/Bank BCA/etc. accounts work out of the box
+  // without requiring Jef to go tick a box on each one first.
+  const isKasAccount = c => c.isKas === true || /kas|bank/i.test(c.nama || "");
+
+  // ---------------- TAB: Bagan Akun (COA) ----------------
+  const [coaModal, setCoaModal] = useState(false);
+  const [coaForm, setCoaForm] = useState({
+    kode: "",
+    nama: "",
+    tipe: "Aset",
+    subTipe: "",
+    saldoNormal: "Debit",
+    isKas: false,
+    aktif: true
+  });
+  const [coaEditIdx, setCoaEditIdx] = useState(null);
+  const [coaSearch, setCoaSearch] = useState("");
+  const lkCoaFiltered = coaSearch.trim() ? lkCoa.filter(c => [c.kode, c.nama, c.tipe, c.subTipe].filter(Boolean).some(x => String(x).toLowerCase().includes(coaSearch.trim().toLowerCase()))) : lkCoa;
+  const openAddCoa = () => {
+    setCoaForm({
+      kode: "",
+      nama: "",
+      tipe: "Aset",
+      subTipe: "",
+      saldoNormal: "Debit",
+      isKas: false,
+      aktif: true
+    });
+    setCoaEditIdx(null);
+    setCoaModal(true);
+  };
+  const onEditCoa = i => {
+    setCoaForm({
+      isKas: false,
+      ...lkCoa[i]
+    });
+    setCoaEditIdx(i);
+    setCoaModal(true);
+  };
+  const saveCoa = () => {
+    if (!coaForm.kode || !coaForm.nama) return alert("Kode dan Nama akun wajib diisi");
+    if (coaEditIdx === null && lkCoa.find(c => c.kode === coaForm.kode)) return alert("Kode akun sudah ada");
+    const item = {
+      ...coaForm
+    };
+    if (coaEditIdx !== null) {
+      const a = [...lkCoa];
+      a[coaEditIdx] = item;
+      setLkCoa(a);
+    } else {
+      setLkCoa([...lkCoa, item]);
+    }
+    setCoaModal(false);
+  };
+  const onDeleteCoa = async i => {
+    const target = lkCoa[i];
+    const inUse = lkSaldoAwal.some(s => s.kode === target.kode) || lkJurnal.some(j => (j.lines || []).some(l => l.kode === target.kode));
+    if (inUse) return alert("Akun ini sudah dipakai di Saldo Awal atau Jurnal Umum — tidak bisa dihapus. Nonaktifkan saja lewat Edit jika sudah tidak dipakai.");
+    await gatedDelete({
+      isOwnerLike,
+      store,
+      session,
+      module: "LK COA",
+      targetId: target.kode,
+      targetLabel: `${target.kode} - ${target.nama}`,
+      payload: target,
+      confirmMsg: "Hapus akun ini dari Bagan Akun Laporan Keuangan?",
+      onDeleteNow: () => setLkCoa(prev => prev.filter(x => x.kode !== target.kode))
+    });
+  };
+  const coaTab = /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement(PendingHapusCard, {
+    module: "LK COA",
+    editRequests: store.editRequests,
+    store,
+    session,
+    applyDelete: payload => setLkCoa(prev => prev.filter(x => x.kode !== payload.kode))
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      flexWrap: "wrap",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari kode / nama akun...",
+    value: coaSearch,
+    onChange: setCoaSearch,
+    style: {
+      maxWidth: 320
+    }
+  }), /*#__PURE__*/React.createElement(Btn, {
+    onClick: openAddCoa
+  }, "+ Tambah Akun")), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
+    headers: ["Kode", "Nama Akun", "Tipe", "Sub Tipe", "Saldo Normal", "Aktif"],
+    rows: lkCoaFiltered.map(c => [c.kode, c.nama, /*#__PURE__*/React.createElement(Badge, {
+      color: c.tipe === "Aset" ? theme.cyan : c.tipe === "Liabilitas" ? theme.red : c.tipe === "Ekuitas" ? theme.purple : c.tipe === "Pendapatan" ? theme.green : theme.accent
+    }, c.tipe), c.subTipe || "-", normalOf(c), c.aktif === false ? /*#__PURE__*/React.createElement(Badge, {
+      color: theme.muted
+    }, "Nonaktif") : /*#__PURE__*/React.createElement(Badge, {
+      color: theme.green
+    }, "Aktif")]),
+    onEdit: i => onEditCoa(lkCoa.indexOf(lkCoaFiltered[i])),
+    onDelete: i => onDeleteCoa(lkCoa.indexOf(lkCoaFiltered[i])),
+    search: false
+  })), /*#__PURE__*/React.createElement(Modal, {
+    open: coaModal,
+    title: coaEditIdx !== null ? "Edit Akun" : "Tambah Akun",
+    onClose: () => setCoaModal(false)
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Kode Akun",
+    value: coaForm.kode,
+    onChange: v => setCoaForm({
+      ...coaForm,
+      kode: v
+    }),
+    required: true,
+    placeholder: "1101",
+    disabled: coaEditIdx !== null
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Nama Akun",
+    value: coaForm.nama,
+    onChange: v => setCoaForm({
+      ...coaForm,
+      nama: v
+    }),
+    required: true
+  }), /*#__PURE__*/React.createElement(Select, {
+    label: "Tipe",
+    value: coaForm.tipe,
+    onChange: v => setCoaForm({
+      ...coaForm,
+      tipe: v,
+      saldoNormal: tipeToNormal[v]
+    }),
+    options: TIPE_OPTIONS.map(t => ({
+      value: t,
+      label: t
+    }))
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Sub Tipe (opsional)",
+    value: coaForm.subTipe,
+    onChange: v => setCoaForm({
+      ...coaForm,
+      subTipe: v
+    }),
+    placeholder: "mis. Aset Lancar, Beban Operasional Kantor"
+  }), /*#__PURE__*/React.createElement(Select, {
+    label: "Saldo Normal",
+    value: coaForm.saldoNormal,
+    onChange: v => setCoaForm({
+      ...coaForm,
+      saldoNormal: v
+    }),
+    options: ["Debit", "Kredit"].map(k => ({
+      value: k,
+      label: k
+    }))
+  }), /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      fontSize: 13,
+      color: theme.text,
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: !!coaForm.isKas,
+    onChange: e => setCoaForm({
+      ...coaForm,
+      isKas: e.target.checked
+    })
+  }), "Akun Kas/Bank (dihitung di tab Arus Kas)"), /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      fontSize: 13,
+      color: theme.text,
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: coaForm.aktif !== false,
+    onChange: e => setCoaForm({
+      ...coaForm,
+      aktif: e.target.checked
+    })
+  }), "Aktif"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setCoaModal(false)
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: saveCoa
+  }, "Simpan")))));
+
+  // ---------------- TAB: Saldo Awal ----------------
+  const [saldoTanggal, setSaldoTanggal] = useState(lkSaldoAwal[0]?.tanggal || "2026-01-01");
+  const [saldoDraft, setSaldoDraft] = useState(() => {
+    const map = {};
+    lkSaldoAwal.forEach(s => {
+      map[s.kode] = String(s.saldo ?? "");
+    });
+    return map;
+  });
+  useEffect(() => {
+    const map = {};
+    lkSaldoAwal.forEach(s => {
+      map[s.kode] = String(s.saldo ?? "");
+    });
+    setSaldoDraft(map);
+    if (lkSaldoAwal[0]?.tanggal) setSaldoTanggal(lkSaldoAwal[0].tanggal);
+  }, [lkSaldoAwal]);
+  const aktifCoa = lkCoa.filter(c => c.aktif !== false);
+  const sumDebitNormalDraft = aktifCoa.filter(c => normalOf(c) === "Debit").reduce((s, c) => s + (Number(saldoDraft[c.kode]) || 0), 0);
+  const sumKreditNormalDraft = aktifCoa.filter(c => normalOf(c) === "Kredit").reduce((s, c) => s + (Number(saldoDraft[c.kode]) || 0), 0);
+  const saldoDraftBalanced = Math.abs(sumDebitNormalDraft - sumKreditNormalDraft) < 1;
+  const saveSaldoAwal = () => {
+    if (!saldoTanggal) return alert("Tanggal cutover Saldo Awal wajib diisi");
+    if (!saldoDraftBalanced) {
+      if (!window.confirm(`Total sisi Debit (Rp ${fmtNum(sumDebitNormalDraft)}) tidak sama dengan sisi Kredit (Rp ${fmtNum(sumKreditNormalDraft)}). Tetap simpan?`)) return;
+    }
+    const rows = lkCoa.filter(c => Number(saldoDraft[c.kode]) !== 0 && saldoDraft[c.kode] !== undefined && saldoDraft[c.kode] !== "").map(c => ({
+      kode: c.kode,
+      tanggal: saldoTanggal,
+      saldo: Number(saldoDraft[c.kode]) || 0
+    }));
+    setLkSaldoAwal(rows);
+    alert("Saldo Awal tersimpan.");
+  };
+  const saldoTab = /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 14px",
+      fontSize: 13,
+      color: theme.muted
+    }
+  }, "Saldo pembukaan per akun pada tanggal cutover (mis. per 01-Jan-2026, sebelum ERP mulai mencatat transaksi berjalan). Isi dalam nilai positif sesuai posisi normal akun tersebut (Aset/Beban = Debit, Liabilitas/Ekuitas/Pendapatan = Kredit). Bisa diisi bertahap — akun yang belum ada datanya boleh dikosongkan dulu."), /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal Cutover",
+    type: "date",
+    value: saldoTanggal,
+    onChange: setSaldoTanggal,
+    style: {
+      maxWidth: 220,
+      marginBottom: 16
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 2
+    }
+  }, aktifCoa.map(c => /*#__PURE__*/React.createElement("div", {
+    key: c.kode,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 12,
+      padding: "6px 0",
+      borderBottom: `1px solid ${theme.border}22`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: "0 0 90px",
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, c.kode), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      color: theme.text,
+      fontSize: 13
+    }
+  }, c.nama, " ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted
+    }
+  }, "(", normalOf(c), ")")), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    value: saldoDraft[c.kode] ?? "",
+    onChange: e => setSaldoDraft({
+      ...saldoDraft,
+      [c.kode]: e.target.value
+    }),
+    placeholder: "0",
+    style: {
+      flex: "0 0 200px",
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8,
+      padding: "7px 10px",
+      color: theme.text,
+      fontSize: 13,
+      fontFamily: "inherit",
+      textAlign: "right"
+    }
+  })))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginTop: 16,
+      paddingTop: 14,
+      borderTop: `2px solid ${theme.border}`,
+      flexWrap: "wrap",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: saldoDraftBalanced ? theme.green : theme.red,
+      fontWeight: 600
+    }
+  }, saldoDraftBalanced ? "✓ Balance" : "⚠", " Debit: Rp ", fmtNum(sumDebitNormalDraft), " — Kredit: Rp ", fmtNum(sumKreditNormalDraft)), /*#__PURE__*/React.createElement(Btn, {
+    onClick: saveSaldoAwal
+  }, "💾 Simpan Saldo Awal"))));
+
+  // ---------------- TAB: Jurnal Umum ----------------
+  const [jurnalModal, setJurnalModal] = useState(false);
+  const emptyJForm = () => ({
+    tanggal: new Date().toISOString().slice(0, 10),
+    keterangan: "",
+    debitKode: "",
+    kreditKode: "",
+    jumlah: ""
+  });
+  const [jForm, setJForm] = useState(emptyJForm());
+  const openAddJurnal = () => {
+    setJForm(emptyJForm());
+    setJurnalModal(true);
+  };
+  const saveJurnal = () => {
+    if (!jForm.tanggal || !jForm.keterangan.trim()) return alert("Tanggal dan Keterangan wajib diisi");
+    if (!jForm.debitKode || !jForm.kreditKode) return alert("Akun Debit dan Akun Kredit wajib dipilih");
+    if (jForm.debitKode === jForm.kreditKode) return alert("Akun Debit dan Akun Kredit tidak boleh sama");
+    const jumlah = Number(jForm.jumlah);
+    if (!jumlah || jumlah <= 0) return alert("Jumlah harus lebih besar dari 0");
+    const entry = {
+      id: "JU-" + uid(),
+      tanggal: jForm.tanggal,
+      keterangan: jForm.keterangan.trim(),
+      lines: [{
+        kode: jForm.debitKode,
+        debit: jumlah,
+        kredit: 0
+      }, {
+        kode: jForm.kreditKode,
+        debit: 0,
+        kredit: jumlah
+      }],
+      createdBy: session.username,
+      createdAt: new Date().toISOString()
+    };
+    setLkJurnal([...lkJurnal, entry]);
+    setJurnalModal(false);
+  };
+  const onDeleteJurnal = async entry => {
+    if (!isOwnerLike) return alert("Hanya Owner/GM/Finance Director yang bisa menghapus entri jurnal.");
+    if (!(await askConfirm(`Hapus entri jurnal "${entry.keterangan}"?`, {
+      danger: true,
+      confirmLabel: "Hapus"
+    }))) return;
+    setLkJurnal(lkJurnal.filter(j => j.id !== entry.id));
+  };
+  const jurnalSorted = [...lkJurnal].sort((a, b) => a.tanggal < b.tanggal ? 1 : a.tanggal > b.tanggal ? -1 : 0);
+  const coaLabel = kode => {
+    const c = lkCoa.find(x => x.kode === kode);
+    return c ? `${c.kode} - ${c.nama}` : kode;
+  };
+  const jurnalTab = /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    onClick: openAddJurnal
+  }, "+ Tambah Jurnal")), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
+    headers: ["Tanggal", "Keterangan", "Akun Debit", "Akun Kredit", "Jumlah"],
+    rows: jurnalSorted.map(j => [fmtDateRev(j.tanggal), j.keterangan, coaLabel(j.lines.find(l => l.debit > 0)?.kode), coaLabel(j.lines.find(l => l.kredit > 0)?.kode), "Rp " + fmtNum(j.lines.find(l => l.debit > 0)?.debit || 0)]),
+    onDelete: i => onDeleteJurnal(jurnalSorted[i]),
+    search: true,
+    emptyMsg: "Belum ada entri jurnal"
+  })), /*#__PURE__*/React.createElement(Modal, {
+    open: jurnalModal,
+    title: "Tambah Jurnal Umum",
+    onClose: () => setJurnalModal(false)
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal",
+    type: "date",
+    value: jForm.tanggal,
+    onChange: v => setJForm({
+      ...jForm,
+      tanggal: v
+    }),
+    required: true
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Keterangan",
+    value: jForm.keterangan,
+    onChange: v => setJForm({
+      ...jForm,
+      keterangan: v
+    }),
+    required: true,
+    placeholder: "mis. Pembayaran listrik kantor bulan Sep"
+  }), /*#__PURE__*/React.createElement(Select, {
+    label: "Akun Debit",
+    value: jForm.debitKode,
+    onChange: v => setJForm({
+      ...jForm,
+      debitKode: v
+    }),
+    required: true,
+    options: lkCoa.filter(c => c.aktif !== false).map(c => ({
+      value: c.kode,
+      label: `${c.kode} - ${c.nama}`
+    }))
+  }), /*#__PURE__*/React.createElement(Select, {
+    label: "Akun Kredit",
+    value: jForm.kreditKode,
+    onChange: v => setJForm({
+      ...jForm,
+      kreditKode: v
+    }),
+    required: true,
+    options: lkCoa.filter(c => c.aktif !== false).map(c => ({
+      value: c.kode,
+      label: `${c.kode} - ${c.nama}`
+    }))
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Jumlah (Rp)",
+    type: "number",
+    value: jForm.jumlah,
+    onChange: v => setJForm({
+      ...jForm,
+      jumlah: v
+    }),
+    required: true
+  }), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted,
+      fontStyle: "italic"
+    }
+  }, "Fase 1: satu akun Debit dan satu akun Kredit dengan jumlah yang sama. Jurnal multi-baris akan ditambahkan di Fase 2."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setJurnalModal(false)
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: saveJurnal
+  }, "💾 Simpan"))))
+  );
+
+  // ---------------- TAB: Laporan ----------------
+  // Ending balance per account = Saldo Awal + pergerakan Jurnal Umum, dihitung sesuai posisi
+  // normal akun (akun Debit-normal naik oleh Debit turun oleh Kredit, dan sebaliknya untuk akun
+  // Kredit-normal). Ini standar akuntansi dasar, bukan simplifikasi.
+  const endingBalances = React.useMemo(() => {
+    const bal = {};
+    lkCoa.forEach(c => {
+      bal[c.kode] = 0;
+    });
+    lkSaldoAwal.forEach(s => {
+      bal[s.kode] = (bal[s.kode] || 0) + Number(s.saldo || 0);
+    });
+    lkJurnal.forEach(j => (j.lines || []).forEach(l => {
+      const c = lkCoa.find(x => x.kode === l.kode);
+      if (!c) return;
+      const delta = normalOf(c) === "Debit" ? (l.debit || 0) - (l.kredit || 0) : (l.kredit || 0) - (l.debit || 0);
+      bal[l.kode] = (bal[l.kode] || 0) + delta;
+    }));
+    return bal;
+  }, [lkCoa, lkSaldoAwal, lkJurnal]);
+  const balByTipe = tipe => lkCoa.filter(c => c.tipe === tipe).reduce((s, c) => s + (endingBalances[c.kode] || 0), 0);
+  const totalAset = balByTipe("Aset");
+  const totalLiabilitas = balByTipe("Liabilitas");
+  const totalEkuitasPokok = balByTipe("Ekuitas");
+  const totalPendapatan = balByTipe("Pendapatan");
+  const totalBeban = balByTipe("Beban");
+  const labaRugiBerjalan = totalPendapatan - totalBeban;
+  const totalEkuitas = totalEkuitasPokok + labaRugiBerjalan;
+  const neracaBalanced = Math.abs(totalAset - (totalLiabilitas + totalEkuitas)) < 1;
+  const kasAccounts = lkCoa.filter(isKasAccount);
+  const totalKas = kasAccounts.reduce((s, c) => s + (endingBalances[c.kode] || 0), 0);
+  const kasAwal = kasAccounts.reduce((s, c) => s + Number((lkSaldoAwal.find(x => x.kode === c.kode) || {}).saldo || 0), 0);
+  const kasMovement = totalKas - kasAwal;
+  const reportRow = (label, val, bold) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      padding: "6px 0",
+      borderBottom: `1px solid ${theme.border}22`,
+      fontWeight: bold ? 700 : 400,
+      color: theme.text,
+      fontSize: 13
+    }
+  }, /*#__PURE__*/React.createElement("span", null, label), /*#__PURE__*/React.createElement("span", null, "Rp ", fmtNum(val)));
+  const laporanTab = /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 20
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted,
+      fontStyle: "italic"
+    }
+  }, "Fase 1: dihitung langsung dari Saldo Awal + Jurnal Umum manual. Arus Kas di bawah adalah pergerakan kas sederhana (belum metode tidak langsung penuh) — akan disempurnakan di Fase 2/4."), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.text
+    }
+  }, "Neraca (Balance Sheet)"), /*#__PURE__*/React.createElement("h4", {
+    style: {
+      margin: "10px 0 4px",
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "ASET"), lkCoa.filter(c => c.tipe === "Aset").map(c => reportRow(c.nama, endingBalances[c.kode] || 0)), reportRow("Total Aset", totalAset, true), /*#__PURE__*/React.createElement("h4", {
+    style: {
+      margin: "16px 0 4px",
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "LIABILITAS"), lkCoa.filter(c => c.tipe === "Liabilitas").map(c => reportRow(c.nama, endingBalances[c.kode] || 0)), reportRow("Total Liabilitas", totalLiabilitas, true), /*#__PURE__*/React.createElement("h4", {
+    style: {
+      margin: "16px 0 4px",
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "EKUITAS"), lkCoa.filter(c => c.tipe === "Ekuitas").map(c => reportRow(c.nama, endingBalances[c.kode] || 0)), reportRow("Laba/Rugi Tahun Berjalan", labaRugiBerjalan), reportRow("Total Ekuitas", totalEkuitas, true), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 14,
+      paddingTop: 10,
+      borderTop: `2px solid ${theme.border}`,
+      fontSize: 13,
+      fontWeight: 700,
+      color: neracaBalanced ? theme.green : theme.red
+    }
+  }, neracaBalanced ? "✓ Balance" : "⚠ Tidak Balance", " — Aset: Rp ", fmtNum(totalAset), " vs Liabilitas+Ekuitas: Rp ", fmtNum(totalLiabilitas + totalEkuitas))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.text
+    }
+  }, "Laba Rugi (Income Statement)"), /*#__PURE__*/React.createElement("h4", {
+    style: {
+      margin: "10px 0 4px",
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "PENDAPATAN"), lkCoa.filter(c => c.tipe === "Pendapatan").map(c => reportRow(c.nama, endingBalances[c.kode] || 0)), reportRow("Total Pendapatan", totalPendapatan, true), /*#__PURE__*/React.createElement("h4", {
+    style: {
+      margin: "16px 0 4px",
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "BEBAN"), lkCoa.filter(c => c.tipe === "Beban").map(c => reportRow(c.nama, endingBalances[c.kode] || 0)), reportRow("Total Beban", totalBeban, true), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 14,
+      paddingTop: 10,
+      borderTop: `2px solid ${theme.border}`,
+      fontSize: 14,
+      fontWeight: 700,
+      color: labaRugiBerjalan >= 0 ? theme.green : theme.red
+    }
+  }, labaRugiBerjalan >= 0 ? "Laba Bersih: Rp " : "Rugi Bersih: Rp ", fmtNum(Math.abs(labaRugiBerjalan)))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.text
+    }
+  }, "Arus Kas (Sederhana)"), kasAccounts.length === 0 ? /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 13,
+      color: theme.muted
+    }
+  }, "Belum ada akun yang ditandai sebagai Kas/Bank. Tandai lewat centang \"Akun Kas/Bank\" di tab Bagan Akun.") : /*#__PURE__*/React.createElement(React.Fragment, null, kasAccounts.map(c => reportRow(c.nama, endingBalances[c.kode] || 0)), reportRow("Total Kas & Bank (Saldo Akhir)", totalKas, true), reportRow("Saldo Kas & Bank Awal", kasAwal), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 10,
+      paddingTop: 10,
+      borderTop: `2px solid ${theme.border}`,
+      fontSize: 13,
+      fontWeight: 700,
+      color: kasMovement >= 0 ? theme.green : theme.red
+    }
+  }, "Kenaikan/(Penurunan) Kas Bersih: Rp ", fmtNum(kasMovement)))));
+
+  const tabs = [{
+    key: "coa",
+    label: "Bagan Akun"
+  }, {
+    key: "saldo",
+    label: "Saldo Awal"
+  }, {
+    key: "jurnal",
+    label: "Jurnal Umum"
+  }, {
+    key: "laporan",
+    label: "Laporan"
+  }];
+  if (!isOwnerLike) {
+    return /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("p", {
+      style: {
+        margin: 0,
+        color: theme.muted
+      }
+    }, "Modul Laporan Keuangan hanya bisa diakses oleh Owner, GM, atau Finance Director."));
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 20
+    }
+  }, /*#__PURE__*/React.createElement("h2", {
+    style: {
+      margin: 0,
+      color: theme.text
+    }
+  }, "Laporan Keuangan"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      borderBottom: `1px solid ${theme.border}`,
+      flexWrap: "wrap"
+    }
+  }, tabs.map(t => /*#__PURE__*/React.createElement("button", {
+    key: t.key,
+    onClick: () => setTab(t.key),
+    style: {
+      padding: "10px 18px",
+      border: "none",
+      borderBottom: tab === t.key ? `2px solid ${theme.accent}` : "2px solid transparent",
+      background: "none",
+      color: tab === t.key ? theme.accent : theme.muted,
+      cursor: "pointer",
+      fontWeight: tab === t.key ? 700 : 400,
+      fontSize: 14,
+      fontFamily: "inherit"
+    }
+  }, t.label))), tab === "coa" && coaTab, tab === "saldo" && saldoTab, tab === "jurnal" && jurnalTab, tab === "laporan" && laporanTab);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // WORKSHOP OPS — operational expenses for workshop (Epy inputs, from Master COA)
 // ════════════════════════════════════════════════════════════════════════════
 function WorkshopOpsModule({
@@ -43423,6 +44844,11 @@ function App() {
         });
       case "bank_recon":
         return /*#__PURE__*/React.createElement(BankReconModule, {
+          store: store,
+          session: session
+        });
+      case "laporan_keuangan":
+        return /*#__PURE__*/React.createElement(LKModule, {
           store: store,
           session: session
         });
