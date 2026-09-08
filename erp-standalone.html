@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-09-08.5";
+const APP_BUILD = "2026-09-08.8";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -2746,7 +2746,7 @@ const seedLKCOA = [
 // BEBAN — Operasional Kantor (memetakan kategori COA lama Biaya Lain: OPS-001..012)
 { kode: "5310", nama: "Beban Utilitas (Listrik/Air/IPL)", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5320", nama: "Beban Bensin & Transportasi", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5330", nama: "Beban Parkir & Tol", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5340", nama: "Beban Service Kendaraan", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5350", nama: "Beban Entertain / Jamuan", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5360", nama: "Beban ATK & Perlengkapan Kantor", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5370", nama: "Beban Telepon & Internet", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5380", nama: "Beban Sewa", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5390", nama: "Beban Operasional Lainnya", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" },
 // BEBAN — Penyusutan
-{ kode: "5410", nama: "Beban Penyusutan Bangunan", tipe: "Beban", subTipe: "Beban Penyusutan", saldoNormal: "Debit" }, { kode: "5420", nama: "Beban Penyusutan Kendaraan", tipe: "Beban", subTipe: "Beban Penyusutan", saldoNormal: "Debit" }, { kode: "5430", nama: "Beban Penyusutan Mesin & Peralatan", tipe: "Beban", subTipe: "Beban Penyusutan", saldoNormal: "Debit" }, { kode: "5440", nama: "Beban Penyusutan Peralatan Kantor", tipe: "Beban", subTipe: "Beban Penyusutan", saldoNormal: "Debit" },
+{ kode: "5410", nama: "Beban Penyusutan Bangunan", tipe: "Beban", subTipe: "Beban Penyusutan", saldoNormal: "Debit" }, { kode: "5420", nama: "Beban Penyusutan Kendaraan", tipe: "Beban", subTipe: "Beban Penyusutan", saldoNormal: "Debit" }, { kode: "5430", nama: "Beban Penyusutan Mesin & Peralatan", tipe: "Beban", subTipe: "Beban Penyusutan", saldoNormal: "Debit" }, { kode: "5440", nama: "Beban Penyusutan Peralatan Kantor", tipe: "Beban", subTipe: "Beban Penyusutan", saldoNormal: "Debit" }, { kode: "5450", nama: "Beban Penyusutan Aset Tetap Lainnya", tipe: "Beban", subTipe: "Beban Penyusutan", saldoNormal: "Debit" },
 // BEBAN — Pajak & Keuangan & Lain-lain
 { kode: "5510", nama: "Beban PPh Badan", tipe: "Beban", subTipe: "Beban Pajak", saldoNormal: "Debit" }, { kode: "5520", nama: "Beban Pajak Lainnya", tipe: "Beban", subTipe: "Beban Pajak", saldoNormal: "Debit" }, { kode: "5610", nama: "Beban Bunga Bank / Leasing", tipe: "Beban", subTipe: "Beban Keuangan", saldoNormal: "Debit" }, { kode: "5620", nama: "Beban Administrasi Bank", tipe: "Beban", subTipe: "Beban Keuangan", saldoNormal: "Debit" }, { kode: "5630", nama: "Beban Selisih Kurs (Rugi)", tipe: "Beban", subTipe: "Beban Keuangan", saldoNormal: "Debit" }, { kode: "5910", nama: "Beban Piutang Tak Tertagih", tipe: "Beban", subTipe: "Beban Lain-lain", saldoNormal: "Debit" }, { kode: "5920", nama: "Beban Lain-lain", tipe: "Beban", subTipe: "Beban Lain-lain", saldoNormal: "Debit" }].map(a => ({
   ...a,
@@ -3135,6 +3135,21 @@ function useStore() {
   const [lkCoa, setLkCoa] = usePersisted("erp_lk_coa", seedLKCOA);
   const [lkSaldoAwal, setLkSaldoAwal] = usePersisted("erp_lk_saldo_awal", []);
   const [lkJurnal, setLkJurnal] = usePersisted("erp_lk_jurnal", []);
+  // LK Fase 2 — maps semantic roles (Piutang Usaha, Pendapatan Unit, PPN Keluaran, etc.) to actual
+  // COA kode chosen by Jef, so the auto-posting engine (lkAutoPost, see below) never hardcodes a
+  // kode string — every company's chart of accounts uses different numbering. Empty object until
+  // Owner/Finance configures it via LKModule's "Pemetaan Akun" tab; auto-posting silently no-ops
+  // for any role left unmapped (see lkAutoPost's SAFETY note).
+  const [lkAccountMapping, setLkAccountMapping] = usePersisted("erp_lk_account_mapping", {});
+  // LK Fase 3 — Aset Tetap (fixed assets) register + automatic straight-line depreciation. Each
+  // record carries its OWN three COA references (aset/akumulasi/beban) rather than a single global
+  // mapping like invoices use, since different asset categories legitimately post to different
+  // accounts (Beban Penyusutan Kendaraan vs ...Mesin & Peralatan, etc. — see seedLKCOA's "BEBAN —
+  // Penyusutan" section). `tanggalMulaiPenyusutanOtomatis` deliberately defaults to whenever the
+  // asset is entered here (not its real acquisition date) — depreciation from before that point is
+  // assumed to already be baked into Saldo Awal's opening balances (Fase 1), so auto-posting only
+  // ever adds NEW periods going forward and never risks double-counting historical depreciation.
+  const [lkAsetTetap, setLkAsetTetap] = usePersisted("erp_lk_aset_tetap", []);
   const [salesActivities, setSalesActivities] = usePersisted("erp_sales_activities", []); // Daily sales activity log: visits, calls, operational costs
   const [komisiOverrides, setKomisiOverrides] = usePersisted("erp_komisi", []); // Komisi Sales: sparse per-SO overrides { soNomor, salesDiscountOverride, rateOverride, dibayar, dibayarTanggal, dibayarOleh } — standalone from Payroll's calcKomisi
   const [attendance, setAttendance] = usePersisted("erp_attendance", []); // Absensi: daily check-in records for uang makan/harian + lembur calc
@@ -3406,6 +3421,10 @@ function useStore() {
     setLkSaldoAwal,
     lkJurnal,
     setLkJurnal,
+    lkAccountMapping,
+    setLkAccountMapping,
+    lkAsetTetap,
+    setLkAsetTetap,
     salesActivities,
     setSalesActivities,
     komisiOverrides,
@@ -3688,6 +3707,78 @@ function logUserActivity(store, session, {
     role: session.role
   };
   store.setUserActivityLog(prev => pruneOldEntries([...prev, entry]));
+}
+
+// LK Fase 2 — auto-posting engine. Turns a business event (Invoice approved, payment received,
+// etc.) into a Jurnal Umum entry automatically, tagged with its source (sourceType/sourceId) so a
+// re-fired event (e.g. a payment being revised) REPLACES its own prior auto-entry instead of piling
+// up duplicates. Every auto-posted entry lands in the exact same `lkJurnal` array Fase 1's manual
+// Jurnal Umum tab already writes to — it's a normal, fully editable/deletable entry, just pre-filled
+// and flagged (`auto: true`) so LKModule can show where it came from and who/what to fix if it looks
+// wrong.
+//
+// SAFETY (read before calling this from a new module): this must NEVER throw or block the caller's
+// real business action — approving an invoice, recording a payment, running payroll — just because
+// the accounting side isn't configured yet. If `lkAccountMapping` hasn't been set up, a mapped
+// account was later deleted from the LK COA, or the computed lines don't balance, this silently
+// no-ops and returns false. It is a best-effort convenience layer on top of Fase 1's manual entry,
+// never a gate on the underlying transaction.
+//
+// `lines`: [{ kode, debit, kredit }, ...] — caller resolves each role to a kode via
+// store.lkAccountMapping BEFORE calling (so callers can decide what to do — usually nothing visible
+// — when a role is unmapped). Must have at least 2 lines and total debit === total kredit.
+function lkAutoPost(store, {
+  sourceType,
+  sourceId,
+  tanggal,
+  keterangan,
+  lines
+}) {
+  if (!store || !store.setLkJurnal || !Array.isArray(lines)) return false;
+  const coa = store.lkCoa || [];
+  // A zero-amount line (e.g. no PPh withheld on this particular payment) is simply dropped — it's
+  // not an error. A NON-zero line with no kode, or a kode that isn't mapped/doesn't exist in the LK
+  // COA, means the whole entry aborts rather than posting a partial/unbalanced one.
+  const nonZero = lines.filter(l => (l.debit || 0) > 0 || (l.kredit || 0) > 0);
+  if (nonZero.length < 2) return false;
+  if (nonZero.some(l => !l.kode || !coa.some(c => c.kode === l.kode))) return false;
+  const totalDebit = nonZero.reduce((s, l) => s + (l.debit || 0), 0);
+  const totalKredit = nonZero.reduce((s, l) => s + (l.kredit || 0), 0);
+  if (Math.abs(totalDebit - totalKredit) > 1) return false; // never post an unbalanced entry
+  const entry = {
+    id: "JU-" + uid(),
+    tanggal: tanggal || today(),
+    keterangan,
+    lines: nonZero.map(l => ({
+      kode: l.kode,
+      debit: l.debit || 0,
+      kredit: l.kredit || 0
+    })),
+    auto: true,
+    sourceType,
+    sourceId,
+    createdBy: "SYSTEM",
+    createdAt: new Date().toISOString()
+  };
+  store.setLkJurnal(prev => {
+    const arr = prev || [];
+    const idx = arr.findIndex(j => j.auto && j.sourceType === sourceType && j.sourceId === sourceId);
+    if (idx >= 0) {
+      const next = [...arr];
+      next[idx] = entry;
+      return next;
+    }
+    return [...arr, entry];
+  });
+  return true;
+}
+// Removes any auto-posted lkJurnal entry for a given source — used when the underlying business
+// event is undone (e.g. an invoice rejected after approval, if that path is ever added) so the
+// General Ledger doesn't keep a stale entry for something that no longer happened. Safe no-op if
+// nothing was ever posted for that source.
+function lkAutoUnpost(store, sourceType, sourceId) {
+  if (!store || !store.setLkJurnal) return;
+  store.setLkJurnal(prev => (prev || []).filter(j => !(j.auto && j.sourceType === sourceType && j.sourceId === sourceId)));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -27958,6 +28049,35 @@ function InvoiceModule({
       ...x,
       statusApproval: "Disetujui GM"
     } : x));
+    // LK Fase 2 auto-posting — revenue recognition at the moment of GM approval (not at the earlier
+    // `save()` / creation step, since a not-yet-approved invoice can still be rejected and should
+    // never have hit the books). Dr Piutang Usaha for the full invoice total; Cr Pendapatan (Unit or
+    // Parts & Service, based on inv.tipe) for the pre-tax amount; Cr PPN Keluaran for the tax. See
+    // lkAutoPost's SAFETY note — this silently no-ops if "Pemetaan Akun" hasn't been configured yet.
+    {
+      const m = store.lkAccountMapping || {};
+      const pendapatanKode = inv.tipe === "Unit" ? m.pendapatanUnit : m.pendapatanJasa;
+      const pendapatanAmount = Math.max(0, (inv.total || 0) - (inv.pajak || 0));
+      lkAutoPost(store, {
+        sourceType: "invoice_approve",
+        sourceId: inv.nomor,
+        tanggal: today(),
+        keterangan: `Pengakuan Pendapatan Invoice ${inv.nomor} — ${inv.customerNama || ""}`,
+        lines: [{
+          kode: m.piutangUsaha,
+          debit: inv.total || 0,
+          kredit: 0
+        }, {
+          kode: pendapatanKode,
+          debit: 0,
+          kredit: pendapatanAmount
+        }, {
+          kode: m.ppnKeluaran,
+          debit: 0,
+          kredit: inv.pajak || 0
+        }]
+      });
+    }
     logAudit(store, session, {
       module: "Invoice",
       docNomor: inv.nomor,
@@ -28112,6 +28232,42 @@ function InvoiceModule({
       riwayatPembayaran,
       statusBayar: terbayar >= inv.total ? "Lunas" : "Sebagian"
     } : x));
+    // LK Fase 2 auto-posting — cash clearing entry. Reposted as ONE cumulative entry covering the
+    // invoice's ENTIRE payment history so far (mirroring how `terbayar` itself is always re-derived
+    // as a sum, not incremented) rather than one journal line per payment row — so revising an
+    // earlier payment entry (editingPayIdx) automatically corrects this journal entry too instead of
+    // leaving a stale duplicate alongside it. Dr Kas/Bank for cash actually received, Dr Beban PPh
+    // Dipotong + Dr Beban Admin Bank for amounts that never hit the bank but still settle the
+    // invoice, all against Cr Piutang Usaha for the full cumulative settlement.
+    {
+      const m = store.lkAccountMapping || {};
+      const cumJml = riwayatPembayaran.reduce((s, r) => s + (r.jumlah || 0), 0);
+      const cumPph = riwayatPembayaran.reduce((s, r) => s + (r.pph || 0), 0);
+      const cumBiayaAdmin = riwayatPembayaran.reduce((s, r) => s + (r.biayaAdmin || 0), 0);
+      lkAutoPost(store, {
+        sourceType: "invoice_payment",
+        sourceId: inv.nomor,
+        tanggal: bayarForm.tanggalPenerimaan,
+        keterangan: `Pelunasan Invoice ${inv.nomor} — ${inv.customerNama || ""}`,
+        lines: [{
+          kode: m.kasBank,
+          debit: cumJml,
+          kredit: 0
+        }, {
+          kode: m.bebanPajakDipotong,
+          debit: cumPph,
+          kredit: 0
+        }, {
+          kode: m.bebanAdminBank,
+          debit: cumBiayaAdmin,
+          kredit: 0
+        }, {
+          kode: m.piutangUsaha,
+          debit: 0,
+          kredit: cumJml + cumPph + cumBiayaAdmin
+        }]
+      });
+    }
     logAudit(store, session, {
       module: "Invoice",
       docNomor: inv.nomor,
@@ -41829,7 +41985,11 @@ function LKModule({
     lkSaldoAwal,
     setLkSaldoAwal,
     lkJurnal,
-    setLkJurnal
+    setLkJurnal,
+    lkAccountMapping,
+    setLkAccountMapping,
+    lkAsetTetap,
+    setLkAsetTetap
   } = store;
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director"; // standardized 2026-08-21
   const [tab, setTab] = useState("coa");
@@ -42224,8 +42384,19 @@ function LKModule({
     setLkJurnal([...lkJurnal, entry]);
     setJurnalModal(false);
   };
+  // LK Fase 2: auto-posted entries (lkAutoPost, tagged `auto: true`) are never deleted straight from
+  // here — the whole point of tagging them by source is that they should be corrected by fixing the
+  // source transaction (which re-posts and replaces this entry automatically), not by hand-editing
+  // the General Ledger out from under it. Manual (Fase 1) entries are unaffected.
+  const jurnalSourceLabel = j => {
+    if (!j.auto) return null;
+    if (j.sourceType === "invoice_approve") return `Approval Invoice ${j.sourceId}`;
+    if (j.sourceType === "invoice_payment") return `Pembayaran Invoice ${j.sourceId}`;
+    return `${j.sourceType} ${j.sourceId}`;
+  };
   const onDeleteJurnal = async entry => {
     if (!isOwnerLike) return alert("Hanya Owner/GM/Finance Director yang bisa menghapus entri jurnal.");
+    if (entry.auto) return alert(`Entri ini dibuat otomatis dari ${jurnalSourceLabel(entry)} — tidak bisa dihapus manual di sini agar Jurnal Umum selalu konsisten dengan dokumen sumbernya. Untuk mengubahnya, koreksi transaksi sumbernya di modulnya masing-masing (mis. koreksi nominal pembayaran di Invoice) — entri ini akan ikut terupdate otomatis.`);
     if (!(await askConfirm(`Hapus entri jurnal "${entry.keterangan}"?`, {
       danger: true,
       confirmLabel: "Hapus"
@@ -42237,6 +42408,13 @@ function LKModule({
     const c = lkCoa.find(x => x.kode === kode);
     return c ? `${c.kode} - ${c.nama}` : kode;
   };
+  // Generalized for multi-line entries (Fase 2 auto-posted entries can have 3+ lines, e.g. Dr Kas +
+  // Dr Beban Pajak + Dr Beban Admin / Cr Piutang Usaha) — lists every debit/kredit line instead of
+  // assuming exactly one of each, which still renders identically to before for simple 2-line
+  // manual entries.
+  const jurnalDebitLines = j => (j.lines || []).filter(l => (l.debit || 0) > 0);
+  const jurnalKreditLines = j => (j.lines || []).filter(l => (l.kredit || 0) > 0);
+  const jurnalTotalAmount = j => jurnalDebitLines(j).reduce((s, l) => s + (l.debit || 0), 0);
   const jurnalTab = /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -42251,8 +42429,13 @@ function LKModule({
   }, /*#__PURE__*/React.createElement(Btn, {
     onClick: openAddJurnal
   }, "+ Tambah Jurnal")), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
-    headers: ["Tanggal", "Keterangan", "Akun Debit", "Akun Kredit", "Jumlah"],
-    rows: jurnalSorted.map(j => [fmtDateRev(j.tanggal), j.keterangan, coaLabel(j.lines.find(l => l.debit > 0)?.kode), coaLabel(j.lines.find(l => l.kredit > 0)?.kode), "Rp " + fmtNum(j.lines.find(l => l.debit > 0)?.debit || 0)]),
+    headers: ["Sumber", "Tanggal", "Keterangan", "Akun Debit", "Akun Kredit", "Jumlah"],
+    rows: jurnalSorted.map(j => [j.auto ? /*#__PURE__*/React.createElement(Badge, {
+      color: theme.cyan,
+      title: jurnalSourceLabel(j)
+    }, "🤖 Auto") : /*#__PURE__*/React.createElement(Badge, {
+      color: theme.muted
+    }, "✍ Manual"), fmtDateRev(j.tanggal), j.keterangan, jurnalDebitLines(j).map(l => coaLabel(l.kode)).join(", "), jurnalKreditLines(j).map(l => coaLabel(l.kode)).join(", "), "Rp " + fmtNum(jurnalTotalAmount(j))]),
     onDelete: i => onDeleteJurnal(jurnalSorted[i]),
     search: true,
     emptyMsg: "Belum ada entri jurnal"
@@ -42338,11 +42521,12 @@ function LKModule({
   }, "💾 Simpan"))))
   );
 
-  // ---------------- TAB: Laporan ----------------
-  // Ending balance per account = Saldo Awal + pergerakan Jurnal Umum, dihitung sesuai posisi
-  // normal akun (akun Debit-normal naik oleh Debit turun oleh Kredit, dan sebaliknya untuk akun
-  // Kredit-normal). Ini standar akuntansi dasar, bukan simplifikasi.
-  const endingBalances = React.useMemo(() => {
+  // ---------------- TAB: Laporan (Fase 4 — formal statements) ----------------
+  // balancesAsOf(asOfDate): cumulative account balance (Saldo Awal + every Jurnal Umum line dated on
+  // or before asOfDate), in each account's OWN normal-balance sign. Correct basis for Neraca, since
+  // Aset/Liabilitas/Ekuitas are permanent accounts that carry forward indefinitely. Pass "" for
+  // all-time/latest.
+  const balancesAsOfFn = React.useMemo(() => asOfDate => {
     const bal = {};
     lkCoa.forEach(c => {
       bal[c.kode] = 0;
@@ -42350,27 +42534,164 @@ function LKModule({
     lkSaldoAwal.forEach(s => {
       bal[s.kode] = (bal[s.kode] || 0) + Number(s.saldo || 0);
     });
-    lkJurnal.forEach(j => (j.lines || []).forEach(l => {
-      const c = lkCoa.find(x => x.kode === l.kode);
-      if (!c) return;
-      const delta = normalOf(c) === "Debit" ? (l.debit || 0) - (l.kredit || 0) : (l.kredit || 0) - (l.debit || 0);
-      bal[l.kode] = (bal[l.kode] || 0) + delta;
-    }));
+    lkJurnal.forEach(j => {
+      if (asOfDate && j.tanggal > asOfDate) return;
+      (j.lines || []).forEach(l => {
+        const c = lkCoa.find(x => x.kode === l.kode);
+        if (!c) return;
+        const delta = normalOf(c) === "Debit" ? (l.debit || 0) - (l.kredit || 0) : (l.kredit || 0) - (l.debit || 0);
+        bal[l.kode] = (bal[l.kode] || 0) + delta;
+      });
+    });
     return bal;
   }, [lkCoa, lkSaldoAwal, lkJurnal]);
-  const balByTipe = tipe => lkCoa.filter(c => c.tipe === tipe).reduce((s, c) => s + (endingBalances[c.kode] || 0), 0);
-  const totalAset = balByTipe("Aset");
-  const totalLiabilitas = balByTipe("Liabilitas");
-  const totalEkuitasPokok = balByTipe("Ekuitas");
-  const totalPendapatan = balByTipe("Pendapatan");
-  const totalBeban = balByTipe("Beban");
-  const labaRugiBerjalan = totalPendapatan - totalBeban;
-  const totalEkuitas = totalEkuitasPokok + labaRugiBerjalan;
+  // periodMovements(start,end): net movement per account from ONLY the Jurnal Umum lines dated
+  // within [start,end] — the correct basis for Pendapatan/Beban (nominal/temporary accounts), whose
+  // Laba Rugi figure must reflect a specific period, never an all-time cumulative total (an all-time
+  // total would keep growing forever and never reset, which is what Fase 1's simple version did).
+  const periodMovementsFn = React.useMemo(() => (start, end) => {
+    const mov = {};
+    lkCoa.forEach(c => {
+      mov[c.kode] = 0;
+    });
+    lkJurnal.forEach(j => {
+      if (start && j.tanggal < start) return;
+      if (end && j.tanggal > end) return;
+      (j.lines || []).forEach(l => {
+        const c = lkCoa.find(x => x.kode === l.kode);
+        if (!c) return;
+        const delta = normalOf(c) === "Debit" ? (l.debit || 0) - (l.kredit || 0) : (l.kredit || 0) - (l.debit || 0);
+        mov[l.kode] = (mov[l.kode] || 0) + delta;
+      });
+    });
+    return mov;
+  }, [lkCoa, lkJurnal]);
+  // FIX (Fase 4, 2026-09-08): summing a tipe's accounts by simply adding each one's OWN
+  // normal-balance figure silently OVERSTATED totals whenever a contra account was involved (e.g.
+  // Akumulasi Penyusutan under Aset, or Prive under Ekuitas — both explicitly called out in
+  // seedLKCOA's own comment as carrying the OPPOSITE normal balance from their tipe). A contra
+  // account's balance must be SUBTRACTED from its tipe's total, not added — `contribution()` flips
+  // the sign whenever an account's own saldoNormal differs from what's typical for its tipe. This
+  // had no visible effect until Fase 3 started actually posting to Akumulasi Penyusutan accounts —
+  // Total Aset would have quietly come out too HIGH by 2× the accumulated depreciation the moment
+  // "Proses Penyusutan" was first run, had this not been fixed here first.
+  const TIPE_NORMAL = {
+    Aset: "Debit",
+    Beban: "Debit",
+    Liabilitas: "Kredit",
+    Ekuitas: "Kredit",
+    Pendapatan: "Kredit"
+  };
+  const contribution = (c, balMap) => {
+    const own = (balMap && balMap[c.kode]) || 0;
+    return normalOf(c) === TIPE_NORMAL[c.tipe] ? own : -own;
+  };
+  const sumByTipe = (balMap, tipe, subTipe) => lkCoa.filter(c => c.tipe === tipe && (subTipe === undefined || (c.subTipe || "") === subTipe)).reduce((s, c) => s + contribution(c, balMap), 0);
+  // ---- Period selector (governs Laba Rugi / Perubahan Ekuitas / Arus Kas) ----
+  const firstDayOfMonthOf = d => (d || today()).slice(0, 7) + "-01";
+  const firstDayOfYearOf = d => (d || today()).slice(0, 4) + "-01-01";
+  const dayBefore = d => {
+    const dt = new Date(d);
+    dt.setDate(dt.getDate() - 1);
+    return dt.toISOString().slice(0, 10);
+  };
+  const [periodePreset, setPeriodePreset] = useState("bulan_ini"); // "bulan_ini" | "tahun_ini" | "custom"
+  const [customStart, setCustomStart] = useState(firstDayOfMonthOf(today()));
+  const [customEnd, setCustomEnd] = useState(today());
+  const periodeRange = periodePreset === "bulan_ini" ? {
+    start: firstDayOfMonthOf(today()),
+    end: today()
+  } : periodePreset === "tahun_ini" ? {
+    start: firstDayOfYearOf(today()),
+    end: today()
+  } : {
+    start: customStart,
+    end: customEnd
+  };
+  const [neracaAsOf, setNeracaAsOf] = useState(today());
+  const neracaBal = React.useMemo(() => balancesAsOfFn(neracaAsOf), [balancesAsOfFn, neracaAsOf]);
+  const totalAset = sumByTipe(neracaBal, "Aset");
+  const totalLiabilitas = sumByTipe(neracaBal, "Liabilitas");
+  const totalEkuitasPokok = sumByTipe(neracaBal, "Ekuitas");
+  // Laba/Rugi baked into the Neraca is measured from cutover (Saldo Awal date) through neracaAsOf —
+  // i.e. every period's profit since the books opened, all-time — since account 3300 ("Laba/Rugi
+  // Tahun Berjalan") is never itself journaled to directly in this system; it's always a live
+  // computed figure, same convention Fase 1 used.
+  const labaRugiSejakCutover = sumByTipe(neracaBal, "Pendapatan") - sumByTipe(neracaBal, "Beban");
+  const totalEkuitas = totalEkuitasPokok + labaRugiSejakCutover;
   const neracaBalanced = Math.abs(totalAset - (totalLiabilitas + totalEkuitas)) < 1;
   const kasAccounts = lkCoa.filter(isKasAccount);
-  const totalKas = kasAccounts.reduce((s, c) => s + (endingBalances[c.kode] || 0), 0);
-  const kasAwal = kasAccounts.reduce((s, c) => s + Number((lkSaldoAwal.find(x => x.kode === c.kode) || {}).saldo || 0), 0);
-  const kasMovement = totalKas - kasAwal;
+  const totalKas = kasAccounts.reduce((s, c) => s + (neracaBal[c.kode] || 0), 0);
+  // ---- Laba Rugi (period-based, multi-step) ----
+  const plMov = React.useMemo(() => periodMovementsFn(periodeRange.start, periodeRange.end), [periodMovementsFn, periodeRange.start, periodeRange.end]);
+  const periodPendapatan = sumByTipe(plMov, "Pendapatan");
+  const periodHPP = sumByTipe(plMov, "Beban", "Harga Pokok Penjualan");
+  const labaKotor = periodPendapatan - periodHPP;
+  const periodBebanGaji = sumByTipe(plMov, "Beban", "Beban Gaji & Karyawan");
+  const periodBebanOpsKantor = sumByTipe(plMov, "Beban", "Beban Operasional Kantor");
+  const periodBebanPenyusutan = sumByTipe(plMov, "Beban", "Beban Penyusutan");
+  const totalBebanUsaha = periodBebanGaji + periodBebanOpsKantor + periodBebanPenyusutan;
+  const labaUsaha = labaKotor - totalBebanUsaha;
+  const periodBebanPajak = sumByTipe(plMov, "Beban", "Beban Pajak");
+  const periodBebanKeuangan = sumByTipe(plMov, "Beban", "Beban Keuangan");
+  const periodBebanLain = sumByTipe(plMov, "Beban", "Beban Lain-lain");
+  const totalBebanLainLain = periodBebanPajak + periodBebanKeuangan + periodBebanLain;
+  const labaBersihPeriode = labaUsaha - totalBebanLainLain;
+  const periodTotalBeban = periodHPP + totalBebanUsaha + totalBebanLainLain;
+  // ---- Laporan Perubahan Ekuitas (new in Fase 4) ----
+  // Prive (drawings) is any Ekuitas-tipe account carrying the contra (Debit) normal balance — per
+  // seedLKCOA's own convention rather than a hardcoded kode, so this keeps working if Jef ever adds
+  // a second Prive-style account. Every other Ekuitas account (Modal Disetor, Laba Ditahan, and
+  // 3300 if it's ever journaled to directly) is treated as a normal equity contribution.
+  const balAtPeriodStart = React.useMemo(() => balancesAsOfFn(dayBefore(periodeRange.start)), [balancesAsOfFn, periodeRange.start]);
+  const priveAccounts = lkCoa.filter(c => c.tipe === "Ekuitas" && normalOf(c) === "Debit");
+  const modalAccounts = lkCoa.filter(c => c.tipe === "Ekuitas" && normalOf(c) !== "Debit");
+  const modalAwalPeriode = modalAccounts.reduce((s, c) => s + (balAtPeriodStart[c.kode] || 0), 0) - priveAccounts.reduce((s, c) => s + (balAtPeriodStart[c.kode] || 0), 0);
+  const setoranModalPeriode = modalAccounts.reduce((s, c) => s + (plMov[c.kode] || 0), 0);
+  const privePeriode = priveAccounts.reduce((s, c) => s + (plMov[c.kode] || 0), 0);
+  const modalAkhirPeriode = modalAwalPeriode + setoranModalPeriode + labaBersihPeriode - privePeriode;
+  // ---- Arus Kas (per kategori Operasi/Investasi/Pendanaan, diturunkan langsung dari baris jurnal
+  // yang menyentuh akun Kas/Bank — bukan metode tidak langsung penuh, tapi karena setiap entri jurnal
+  // di sistem ini selalu punya sisi lawan yang jelas, ini otomatis MENGECUALIKAN item non-kas seperti
+  // Beban Penyusutan atau pengakuan Piutang saat Invoice di-approve — keduanya tidak pernah
+  // menyentuh baris Kas sama sekali, jadi tidak perlu koreksi manual seperti metode tidak langsung. ----
+  const arusKasKategoriFor = c => {
+    if (!c || isKasAccount(c)) return null;
+    if (c.tipe === "Aset" && (c.subTipe === "Aset Tetap" || c.subTipe === "Aset Lain-lain")) return "Investasi";
+    if (c.tipe === "Liabilitas" && c.subTipe === "Liabilitas Jangka Panjang") return "Pendanaan";
+    if (c.tipe === "Ekuitas") return "Pendanaan";
+    return "Operasi"; // Aset Lancar non-kas, Liabilitas Jangka Pendek, Pendapatan, Beban
+  };
+  const arusKasByKategori = React.useMemo(() => {
+    const totals = {
+      Operasi: 0,
+      Investasi: 0,
+      Pendanaan: 0
+    };
+    lkJurnal.forEach(j => {
+      if (periodeRange.start && j.tanggal < periodeRange.start) return;
+      if (periodeRange.end && j.tanggal > periodeRange.end) return;
+      const lines = j.lines || [];
+      const cashLines = lines.filter(l => isKasAccount(lkCoa.find(c => c.kode === l.kode)));
+      if (cashLines.length === 0) return; // no cash impact at all (e.g. depreciation, revenue recognition)
+      const cashDelta = cashLines.reduce((s, l) => s + (l.debit || 0) - (l.kredit || 0), 0);
+      const nonCashLines = lines.filter(l => !isKasAccount(lkCoa.find(c => c.kode === l.kode)));
+      const totalNonCash = nonCashLines.reduce((s, l) => s + (l.debit || 0) + (l.kredit || 0), 0) || 1;
+      nonCashLines.forEach(l => {
+        const kategori = arusKasKategoriFor(lkCoa.find(c => c.kode === l.kode));
+        if (!kategori) return;
+        const share = ((l.debit || 0) + (l.kredit || 0)) / totalNonCash;
+        totals[kategori] = (totals[kategori] || 0) + cashDelta * share;
+      });
+    });
+    return totals;
+  }, [lkJurnal, lkCoa, periodeRange.start, periodeRange.end]);
+  const balAtPeriodEnd = React.useMemo(() => balancesAsOfFn(periodeRange.end), [balancesAsOfFn, periodeRange.end]);
+  const kasAwalPeriode = kasAccounts.reduce((s, c) => s + (balAtPeriodStart[c.kode] || 0), 0);
+  const arusKasBersih = (arusKasByKategori.Operasi || 0) + (arusKasByKategori.Investasi || 0) + (arusKasByKategori.Pendanaan || 0);
+  const kasAkhirPeriode = kasAwalPeriode + arusKasBersih;
+  const kasAkhirAktual = kasAccounts.reduce((s, c) => s + (balAtPeriodEnd[c.kode] || 0), 0);
+  const arusKasCocok = Math.abs(kasAkhirPeriode - kasAkhirAktual) < 1;
   const reportRow = (label, val, bold) => /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -42382,6 +42703,954 @@ function LKModule({
       fontSize: 13
     }
   }, /*#__PURE__*/React.createElement("span", null, label), /*#__PURE__*/React.createElement("span", null, "Rp ", fmtNum(val)));
+  const reportSectionHeader = label => /*#__PURE__*/React.createElement("h4", {
+    style: {
+      margin: "16px 0 4px",
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, label);
+  // ---------------- TAB: Pemetaan Akun (Fase 2 — auto-posting config) ----------------
+  // Every transaction type the auto-posting engine (lkAutoPost) knows how to post needs its own
+  // COA accounts chosen here — since lkCoa's kode are whatever Jef set up, nothing about which
+  // account is "Piutang Usaha" or "PPN Keluaran" can be hardcoded. A role left unmapped simply
+  // means that slice of auto-posting stays off (see lkAutoPost's SAFETY note) — Jurnal Umum manual
+  // entry keeps working exactly as in Fase 1 regardless of how much of this is filled in.
+  const LK_MAPPING_ROLES = [{
+    key: "piutangUsaha",
+    label: "Piutang Usaha (AR)",
+    group: "Invoice — Pengakuan Pendapatan & Pelunasan"
+  }, {
+    key: "pendapatanUnit",
+    label: "Pendapatan Penjualan Unit",
+    group: "Invoice — Pengakuan Pendapatan & Pelunasan"
+  }, {
+    key: "pendapatanJasa",
+    label: "Pendapatan Parts & Service",
+    group: "Invoice — Pengakuan Pendapatan & Pelunasan"
+  }, {
+    key: "ppnKeluaran",
+    label: "PPN Keluaran (Hutang Pajak Keluaran)",
+    group: "Invoice — Pengakuan Pendapatan & Pelunasan"
+  }, {
+    key: "kasBank",
+    label: "Kas/Bank (penerimaan pembayaran default)",
+    group: "Invoice — Pengakuan Pendapatan & Pelunasan"
+  }, {
+    key: "bebanPajakDipotong",
+    label: "Beban PPh Dipotong Pelanggan (PPh 2%)",
+    group: "Invoice — Pengakuan Pendapatan & Pelunasan"
+  }, {
+    key: "bebanAdminBank",
+    label: "Beban Administrasi Bank",
+    group: "Invoice — Pengakuan Pendapatan & Pelunasan"
+  }];
+  // Best-effort name-match guess against whatever's already in the LK COA (works out of the box for
+  // the seeded chart of accounts) — Jef reviews/overrides before saving, this never auto-saves.
+  const guessMapping = () => {
+    const findBy = re => lkCoa.find(c => re.test(c.nama || ""))?.kode || "";
+    const guess = {
+      piutangUsaha: findBy(/piutang usaha/i),
+      pendapatanUnit: findBy(/pendapatan.*unit/i),
+      pendapatanJasa: findBy(/pendapatan.*(jasa|parts|service)/i),
+      ppnKeluaran: findBy(/ppn keluaran/i),
+      kasBank: findBy(/kas besar|bank/i),
+      bebanPajakDipotong: findBy(/pph|pajak dibayar/i),
+      bebanAdminBank: findBy(/admin.*bank|biaya bank/i)
+    };
+    setLkAccountMapping(prev => ({
+      ...guess,
+      ...prev
+    }));
+  };
+  const mappingGroups = [...new Set(LK_MAPPING_ROLES.map(r => r.group))];
+  const invoicePostingReady = ["piutangUsaha", "pendapatanUnit", "pendapatanJasa", "ppnKeluaran", "kasBank"].every(k => lkAccountMapping[k]);
+  const mappingTab = /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement(Card, {
+    style: {
+      background: (invoicePostingReady ? theme.green : theme.yellow) + "11",
+      border: `1px solid ${(invoicePostingReady ? theme.green : theme.yellow)}44`
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 13,
+      color: theme.text
+    }
+  }, invoicePostingReady ? "✓ Auto-posting Invoice aktif — setiap Invoice yang di-approve GM dan setiap pembayaran yang dicatat akan otomatis membuat entri Jurnal Umum." : "⚠ Auto-posting Invoice BELUM aktif — lengkapi minimal Piutang Usaha, Pendapatan Unit, Pendapatan Parts & Service, PPN Keluaran, dan Kas/Bank di bawah. Jurnal Umum manual (Fase 1) tetap bisa dipakai seperti biasa.")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    size: "sm",
+    onClick: guessMapping
+  }, "🪄 Coba Isi Otomatis (dari nama akun)")), mappingGroups.map(group => /*#__PURE__*/React.createElement(Card, {
+    key: group
+  }, /*#__PURE__*/React.createElement("h4", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, group), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 14
+    }
+  }, LK_MAPPING_ROLES.filter(r => r.group === group).map(r => /*#__PURE__*/React.createElement(Select, {
+    key: r.key,
+    label: r.label,
+    value: lkAccountMapping[r.key] || "",
+    onChange: v => setLkAccountMapping({
+      ...lkAccountMapping,
+      [r.key]: v
+    }),
+    options: [{
+      value: "",
+      label: "-- Belum dipetakan --"
+    }, ...lkCoa.filter(c => c.aktif !== false).map(c => ({
+      value: c.kode,
+      label: `${c.kode} - ${c.nama}`
+    }))]
+  }))))));
+
+  // ---------------- TAB: Aset Tetap (Fase 3) ----------------
+  // Straight-line depreciation only for now (the standard method and what PSAK/tax practice defaults
+  // to for a trading + workshop company like this) — declining-balance or units-of-production can be
+  // added later as an extra `metodePenyusutan` option without touching this data model.
+  // Each category's default COA trio mirrors seedLKCOA's "ASET — Tetap" / "BEBAN — Penyusutan"
+  // sections exactly, so a freshly-added asset auto-fills sensible accounts out of the box — still a
+  // normal editable dropdown, never hardcoded into the posting logic itself.
+  const ASET_KATEGORI_DEFAULTS = {
+    "Tanah": {
+      akunAset: "1210",
+      akunAkumulasi: "",
+      akunBeban: ""
+    },
+    "Bangunan": {
+      akunAset: "1220",
+      akunAkumulasi: "1221",
+      akunBeban: "5410"
+    },
+    "Kendaraan": {
+      akunAset: "1230",
+      akunAkumulasi: "1231",
+      akunBeban: "5420"
+    },
+    "Mesin & Peralatan Workshop": {
+      akunAset: "1240",
+      akunAkumulasi: "1241",
+      akunBeban: "5430"
+    },
+    "Peralatan Kantor & Komputer": {
+      akunAset: "1250",
+      akunAkumulasi: "1251",
+      akunBeban: "5440"
+    },
+    "Aset Tetap Lainnya": {
+      akunAset: "1260",
+      akunAkumulasi: "1261",
+      akunBeban: "5450"
+    }
+  };
+  const ASET_KATEGORI = Object.keys(ASET_KATEGORI_DEFAULTS);
+  const akumulasiPenyusutan = asset => (asset.depresiasiLog || []).reduce((s, d) => s + (d.jumlah || 0), 0);
+  const nilaiBukuAset = asset => Math.max(Number(asset.nilaiResidu) || 0, (Number(asset.nilaiPerolehan) || 0) - akumulasiPenyusutan(asset));
+  const straightLineMonthly = asset => {
+    const bulan = (Number(asset.umurManfaatTahun) || 0) * 12;
+    if (bulan <= 0) return 0;
+    return Math.max(0, ((Number(asset.nilaiPerolehan) || 0) - (Number(asset.nilaiResidu) || 0)) / bulan);
+  };
+  const [asetModal, setAsetModal] = useState(false);
+  const [asetEditId, setAsetEditId] = useState(null);
+  const emptyAsetForm = () => ({
+    kode: "",
+    nama: "",
+    kategori: "",
+    tanggalPerolehan: today(),
+    nilaiPerolehan: "",
+    nilaiResidu: "0",
+    umurManfaatTahun: "",
+    akunAset: "",
+    akunAkumulasi: "",
+    akunBeban: "",
+    tanggalMulaiPenyusutanOtomatis: today(),
+    catatan: ""
+  });
+  const [asetForm, setAsetForm] = useState(emptyAsetForm());
+  const genAsetKode = () => {
+    let n = lkAsetTetap.length + 1;
+    let candidate;
+    do {
+      candidate = "AT-" + new Date().getFullYear() + "-" + String(n).padStart(4, "0");
+      n++;
+    } while (lkAsetTetap.find(a => a.kode === candidate));
+    return candidate;
+  };
+  const openAddAset = () => {
+    setAsetForm({
+      ...emptyAsetForm(),
+      kode: genAsetKode()
+    });
+    setAsetEditId(null);
+    setAsetModal(true);
+  };
+  const onEditAset = asset => {
+    setAsetForm({
+      kode: asset.kode,
+      nama: asset.nama,
+      kategori: asset.kategori,
+      tanggalPerolehan: asset.tanggalPerolehan,
+      nilaiPerolehan: String(asset.nilaiPerolehan ?? ""),
+      nilaiResidu: String(asset.nilaiResidu ?? "0"),
+      umurManfaatTahun: String(asset.umurManfaatTahun ?? ""),
+      akunAset: asset.akunAset || "",
+      akunAkumulasi: asset.akunAkumulasi || "",
+      akunBeban: asset.akunBeban || "",
+      tanggalMulaiPenyusutanOtomatis: asset.tanggalMulaiPenyusutanOtomatis || asset.tanggalPerolehan,
+      catatan: asset.catatan || ""
+    });
+    setAsetEditId(asset.id);
+    setAsetModal(true);
+  };
+  // Applies a category's default COA trio the moment Kategori is picked — but only into fields the
+  // user hasn't already filled in themselves, so switching Kategori mid-edit never silently
+  // overwrites a deliberate manual override.
+  const onAsetKategoriChange = kategori => {
+    const def = ASET_KATEGORI_DEFAULTS[kategori] || {};
+    const validKode = kode => kode && lkCoa.some(c => c.kode === kode);
+    setAsetForm(f => ({
+      ...f,
+      kategori,
+      akunAset: f.akunAset || (validKode(def.akunAset) ? def.akunAset : ""),
+      akunAkumulasi: f.akunAkumulasi || (validKode(def.akunAkumulasi) ? def.akunAkumulasi : ""),
+      akunBeban: f.akunBeban || (validKode(def.akunBeban) ? def.akunBeban : "")
+    }));
+  };
+  const saveAset = () => {
+    if (!asetForm.nama.trim() || !asetForm.kategori || !asetForm.tanggalPerolehan) return alert("Nama, Kategori, dan Tanggal Perolehan wajib diisi");
+    const nilaiPerolehan = parseFloat(asetForm.nilaiPerolehan) || 0;
+    if (nilaiPerolehan <= 0) return alert("Nilai Perolehan harus lebih besar dari 0");
+    if (asetForm.kategori !== "Tanah" && (!asetForm.umurManfaatTahun || Number(asetForm.umurManfaatTahun) <= 0)) return alert("Umur Manfaat (tahun) wajib diisi untuk aset selain Tanah");
+    const payload = {
+      id: asetEditId || "AT-" + uid(),
+      kode: asetForm.kode || genAsetKode(),
+      nama: asetForm.nama.trim(),
+      kategori: asetForm.kategori,
+      tanggalPerolehan: asetForm.tanggalPerolehan,
+      nilaiPerolehan,
+      nilaiResidu: parseFloat(asetForm.nilaiResidu) || 0,
+      umurManfaatTahun: asetForm.kategori === "Tanah" ? null : Number(asetForm.umurManfaatTahun) || 0,
+      akunAset: asetForm.akunAset || null,
+      akunAkumulasi: asetForm.akunAkumulasi || null,
+      akunBeban: asetForm.akunBeban || null,
+      tanggalMulaiPenyusutanOtomatis: asetForm.tanggalMulaiPenyusutanOtomatis || today(),
+      catatan: asetForm.catatan
+    };
+    if (asetEditId) {
+      setLkAsetTetap(prev => prev.map(a => a.id === asetEditId ? {
+        ...a,
+        ...payload
+      } : a));
+      logAudit(store, session, {
+        module: "LK Aset Tetap",
+        docNomor: `${payload.kode} - ${payload.nama}`,
+        action: "Edit",
+        detail: ""
+      });
+    } else {
+      setLkAsetTetap(prev => [...prev, {
+        ...payload,
+        status: "Aktif",
+        disposal: null,
+        depresiasiLog: [],
+        createdBy: session.nama,
+        createdAt: new Date().toISOString()
+      }]);
+      logAudit(store, session, {
+        module: "LK Aset Tetap",
+        docNomor: `${payload.kode} - ${payload.nama}`,
+        action: "Tambah",
+        detail: `Nilai Perolehan ${fmt(nilaiPerolehan)}`
+      });
+    }
+    setAsetModal(false);
+  };
+  const onDeleteAset = async asset => {
+    if (!isOwnerLike) return alert("Hanya Owner/GM/Finance Director yang bisa menghapus aset.");
+    if ((asset.depresiasiLog || []).length > 0) return alert("Aset ini sudah punya riwayat penyusutan yang sudah masuk Jurnal Umum — tidak bisa dihapus langsung (akan meninggalkan entri jurnal yang menggantung). Gunakan \"Nonaktifkan\" jika aset ini sudah tidak dipakai/terjual.");
+    if (!(await askConfirm(`Hapus aset "${asset.nama}"?`, {
+      danger: true,
+      confirmLabel: "Hapus"
+    }))) return;
+    setLkAsetTetap(prev => prev.filter(a => a.id !== asset.id));
+    logAudit(store, session, {
+      module: "LK Aset Tetap",
+      docNomor: `${asset.kode} - ${asset.nama}`,
+      action: "Hapus",
+      detail: ""
+    });
+  };
+  const [disposalModal, setDisposalModal] = useState(null);
+  const [disposalForm, setDisposalForm] = useState({
+    status: "Dijual",
+    tanggal: today(),
+    alasan: ""
+  });
+  const openDisposal = asset => {
+    setDisposalModal(asset);
+    setDisposalForm({
+      status: "Dijual",
+      tanggal: today(),
+      alasan: ""
+    });
+  };
+  const saveDisposal = () => {
+    if (!disposalForm.alasan.trim()) return alert("Keterangan wajib diisi (mis. harga jual, pembeli, atau alasan penghapusan).");
+    setLkAsetTetap(prev => prev.map(a => a.id === disposalModal.id ? {
+      ...a,
+      status: disposalForm.status,
+      disposal: {
+        tanggal: disposalForm.tanggal,
+        alasan: disposalForm.alasan.trim(),
+        oleh: session.nama
+      }
+    } : a));
+    logAudit(store, session, {
+      module: "LK Aset Tetap",
+      docNomor: `${disposalModal.kode} - ${disposalModal.nama}`,
+      action: disposalForm.status === "Dijual" ? "Tandai Dijual" : "Tandai Dihapuskan",
+      detail: disposalForm.alasan.trim()
+    });
+    setDisposalModal(null);
+  };
+  const reaktivasiAset = asset => {
+    setLkAsetTetap(prev => prev.map(a => a.id === asset.id ? {
+      ...a,
+      status: "Aktif",
+      disposal: null
+    } : a));
+    logAudit(store, session, {
+      module: "LK Aset Tetap",
+      docNomor: `${asset.kode} - ${asset.nama}`,
+      action: "Aktifkan Kembali",
+      detail: ""
+    });
+  };
+  // Excel import — only the basic register fields (nama/kategori/tanggal/nilai/umur manfaat); akun
+  // fields are intentionally left for onAsetKategoriChange's defaults / manual review afterward
+  // rather than guessed from spreadsheet text, since posting to the wrong COA account is a real-money
+  // mistake and not something to risk auto-matching from free-text.
+  const ASET_TEMPLATE_HEADERS = ["kode", "nama", "kategori", "tanggalPerolehan", "nilaiPerolehan", "nilaiResidu", "umurManfaatTahun", "catatan"];
+  const ASET_FIELD_ALIASES = {
+    kode: ["kode aset", "no aset", "asset code"],
+    nama: ["nama aset", "nama barang", "asset name"],
+    kategori: ["category", "jenis aset"],
+    tanggalPerolehan: ["tanggal perolehan", "acquisition date", "tanggal beli"],
+    nilaiPerolehan: ["nilai perolehan", "harga perolehan", "acquisition cost", "harga beli"],
+    nilaiResidu: ["nilai residu", "salvage value", "nilai sisa"],
+    umurManfaatTahun: ["umur manfaat", "umur manfaat (tahun)", "useful life", "masa manfaat"],
+    catatan: ["keterangan", "notes"]
+  };
+  const [asetImportSummary, setAsetImportSummary] = useState(null);
+  const handleImportAset = rawRows => {
+    setLkAsetTetap(prev => {
+      const toAdd = [];
+      rawRows.forEach(raw => {
+        const r = normalizeImportRow(raw, ASET_FIELD_ALIASES);
+        const nilaiPerolehan = parseFloat(r.nilaiPerolehan) || 0;
+        if (!r.nama || nilaiPerolehan <= 0) return; // skip clearly incomplete rows rather than guess
+        const kategoriRaw = String(r.kategori || "").trim();
+        const kategori = ASET_KATEGORI.find(k => k.toLowerCase() === kategoriRaw.toLowerCase()) || "Aset Tetap Lainnya";
+        const def = ASET_KATEGORI_DEFAULTS[kategori] || {};
+        const validKode = kode => kode && lkCoa.some(c => c.kode === kode);
+        let kode = String(r.kode || "").trim();
+        if (!kode || prev.some(a => a.kode === kode) || toAdd.some(a => a.kode === kode)) {
+          kode = genAsetKode();
+        }
+        toAdd.push({
+          id: "AT-" + uid(),
+          kode,
+          nama: String(r.nama).trim(),
+          kategori,
+          tanggalPerolehan: r.tanggalPerolehan || today(),
+          nilaiPerolehan,
+          nilaiResidu: parseFloat(r.nilaiResidu) || 0,
+          umurManfaatTahun: kategori === "Tanah" ? null : parseFloat(r.umurManfaatTahun) || 0,
+          akunAset: validKode(def.akunAset) ? def.akunAset : null,
+          akunAkumulasi: validKode(def.akunAkumulasi) ? def.akunAkumulasi : null,
+          akunBeban: validKode(def.akunBeban) ? def.akunBeban : null,
+          tanggalMulaiPenyusutanOtomatis: today(),
+          catatan: r.catatan || "",
+          status: "Aktif",
+          disposal: null,
+          depresiasiLog: [],
+          createdBy: session.nama,
+          createdAt: new Date().toISOString()
+        });
+      });
+      setAsetImportSummary({
+        added: toAdd.length,
+        skipped: rawRows.length - toAdd.length
+      });
+      return [...prev, ...toAdd];
+    });
+  };
+  const doExportAset = () => exportToExcel(lkAsetTetap.map(a => ({
+    kode: a.kode,
+    nama: a.nama,
+    kategori: a.kategori,
+    tanggalPerolehan: a.tanggalPerolehan,
+    nilaiPerolehan: a.nilaiPerolehan,
+    nilaiResidu: a.nilaiResidu,
+    umurManfaatTahun: a.umurManfaatTahun ?? "",
+    akunPenyusutanSejak: a.tanggalMulaiPenyusutanOtomatis,
+    akumulasiPenyusutan: akumulasiPenyusutan(a),
+    nilaiBuku: nilaiBukuAset(a),
+    status: a.status,
+    catatan: a.catatan || ""
+  })), "Aset_Tetap.xlsx", "Aset Tetap");
+  // "Proses Penyusutan Bulan Ini" — deliberately a manual, on-demand action (mirrors Payroll's
+  // "Proses Payroll" pattern already in the app) rather than something that fires silently on page
+  // load, so a month's depreciation is never posted without someone actually looking at the result.
+  // Idempotent twice over: depresiasiLog is checked here BEFORE attempting to post, and lkAutoPost
+  // itself also keys on sourceId (`${asset.id}-${periode}`) so even a double-click can't duplicate
+  // an entry.
+  const [prosesResult, setProsesResult] = useState(null);
+  const prosesPenyusutanBulanIni = () => {
+    const periode = today().slice(0, 7); // "YYYY-MM"
+    const posted = [];
+    const skipped = [];
+    let next = [...lkAsetTetap];
+    lkAsetTetap.forEach(asset => {
+      if (asset.status !== "Aktif") return skipped.push({
+        asset,
+        alasan: "Status tidak Aktif"
+      });
+      if (asset.kategori === "Tanah") return skipped.push({
+        asset,
+        alasan: "Tanah tidak disusutkan"
+      });
+      if (!asset.umurManfaatTahun || Number(asset.umurManfaatTahun) <= 0) return skipped.push({
+        asset,
+        alasan: "Umur Manfaat belum diisi"
+      });
+      if ((asset.tanggalMulaiPenyusutanOtomatis || asset.tanggalPerolehan) > today()) return skipped.push({
+        asset,
+        alasan: `Belum waktunya (mulai ${fmtDateRev(asset.tanggalMulaiPenyusutanOtomatis || asset.tanggalPerolehan)})`
+      });
+      if ((asset.depresiasiLog || []).some(d => d.periode === periode)) return skipped.push({
+        asset,
+        alasan: "Sudah diproses periode ini"
+      });
+      if (!asset.akunBeban || !asset.akunAkumulasi) return skipped.push({
+        asset,
+        alasan: "Akun Beban/Akumulasi Penyusutan belum dipetakan — lengkapi lewat Edit"
+      });
+      const sisaBisaDisusutkan = Math.max(0, nilaiBukuAset(asset) - (Number(asset.nilaiResidu) || 0));
+      const jumlah = Math.min(straightLineMonthly(asset), sisaBisaDisusutkan);
+      if (jumlah <= 0) return skipped.push({
+        asset,
+        alasan: "Sudah habis disusutkan (Nilai Buku = Nilai Residu)"
+      });
+      const ok = lkAutoPost(store, {
+        sourceType: "aset_depresiasi",
+        sourceId: `${asset.id}-${periode}`,
+        tanggal: today(),
+        keterangan: `Penyusutan ${asset.nama} (${asset.kode}) — periode ${periode}`,
+        lines: [{
+          kode: asset.akunBeban,
+          debit: jumlah,
+          kredit: 0
+        }, {
+          kode: asset.akunAkumulasi,
+          debit: 0,
+          kredit: jumlah
+        }]
+      });
+      if (!ok) return skipped.push({
+        asset,
+        alasan: "Gagal posting — cek akun di Bagan Akun masih aktif"
+      });
+      posted.push({
+        asset,
+        jumlah
+      });
+      next = next.map(a => a.id === asset.id ? {
+        ...a,
+        depresiasiLog: [...(a.depresiasiLog || []), {
+          periode,
+          jumlah,
+          postedAt: new Date().toISOString()
+        }]
+      } : a);
+    });
+    if (posted.length > 0) {
+      setLkAsetTetap(next);
+      logAudit(store, session, {
+        module: "LK Aset Tetap",
+        docNomor: `Penyusutan ${periode}`,
+        action: "Proses Penyusutan",
+        detail: `${posted.length} aset diproses, total ${fmt(posted.reduce((s, p) => s + p.jumlah, 0))}`
+      });
+    }
+    setProsesResult({
+      periode,
+      posted,
+      skipped
+    });
+  };
+  const totalNilaiPerolehanAset = lkAsetTetap.filter(a => a.status === "Aktif").reduce((s, a) => s + (Number(a.nilaiPerolehan) || 0), 0);
+  const totalAkumulasiAset = lkAsetTetap.filter(a => a.status === "Aktif").reduce((s, a) => s + akumulasiPenyusutan(a), 0);
+  const totalNilaiBukuAset = lkAsetTetap.filter(a => a.status === "Aktif").reduce((s, a) => s + nilaiBukuAset(a), 0);
+  const asetAktif = lkAsetTetap.filter(a => a.status === "Aktif");
+  const asetNonAktif = lkAsetTetap.filter(a => a.status !== "Aktif");
+  const asetCoaLabel = kode => {
+    if (!kode) return "-";
+    const c = lkCoa.find(x => x.kode === kode);
+    return c ? c.nama : kode;
+  };
+  const asetTab = /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 14,
+      flexWrap: "wrap"
+    }
+  }, [["Total Nilai Perolehan", totalNilaiPerolehanAset], ["Total Akumulasi Penyusutan", totalAkumulasiAset], ["Total Nilai Buku", totalNilaiBukuAset]].map(([label, val]) => /*#__PURE__*/React.createElement(Card, {
+    key: label,
+    style: {
+      flex: 1,
+      minWidth: 200
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      marginBottom: 4
+    }
+  }, label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 18,
+      fontWeight: 700,
+      color: theme.text
+    }
+  }, "Rp ", fmtNum(val)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      flexWrap: "wrap",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "success",
+    onClick: prosesPenyusutanBulanIni
+  }, "🔄 Proses Penyusutan Bulan Ini"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement(ExportExcelBtn, {
+    onClick: doExportAset
+  }), /*#__PURE__*/React.createElement(ImportExcelButton, {
+    onParsed: handleImportAset
+  }), /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    size: "sm",
+    onClick: () => downloadTemplate(ASET_TEMPLATE_HEADERS, "Template_Aset_Tetap.xlsx")
+  }, "📄 Template"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: openAddAset
+  }, "+ Tambah Aset"))), prosesResult && /*#__PURE__*/React.createElement(Card, {
+    style: {
+      background: theme.green + "11",
+      border: `1px solid ${theme.green}44`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "flex-start"
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 6px",
+      fontSize: 13,
+      color: theme.text,
+      fontWeight: 600
+    }
+  }, `Hasil Proses Penyusutan Periode ${prosesResult.periode}`), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 4px",
+      fontSize: 13,
+      color: theme.green
+    }
+  }, `✓ ${prosesResult.posted.length} aset berhasil diposting — total Rp ${fmtNum(prosesResult.posted.reduce((s, p) => s + p.jumlah, 0))}`), prosesResult.skipped.length > 0 && /*#__PURE__*/React.createElement("details", null, /*#__PURE__*/React.createElement("summary", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      cursor: "pointer"
+    }
+  }, `${prosesResult.skipped.length} aset dilewati (lihat alasan)`), prosesResult.skipped.map(s => /*#__PURE__*/React.createElement("p", {
+    key: s.asset.id,
+    style: {
+      margin: "4px 0 0",
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, `${s.asset.kode} - ${s.asset.nama}: ${s.alasan}`)))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setProsesResult(null),
+    style: {
+      background: "none",
+      border: "none",
+      color: theme.muted,
+      cursor: "pointer"
+    }
+  }, "×"))), asetImportSummary && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: theme.green,
+      background: theme.green + "11",
+      padding: "8px 14px",
+      borderRadius: 8,
+      border: `1px solid ${theme.green}44`,
+      display: "flex",
+      justifyContent: "space-between"
+    }
+  }, /*#__PURE__*/React.createElement("span", null, `✓ Import selesai: ${asetImportSummary.added} aset baru ditambahkan${asetImportSummary.skipped ? `, ${asetImportSummary.skipped} baris dilewati (nama/nilai kosong)` : ""}.`), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setAsetImportSummary(null),
+    style: {
+      background: "none",
+      border: "none",
+      color: theme.green,
+      cursor: "pointer"
+    }
+  }, "×")), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
+    headers: ["Kode", "Nama", "Kategori", "Tanggal Perolehan", "Nilai Perolehan", "Akumulasi Penyusutan", "Nilai Buku", "Status"],
+    rows: asetAktif.map(a => [a.kode, a.nama, a.kategori, fmtDateRev(a.tanggalPerolehan), fmt(a.nilaiPerolehan), fmt(akumulasiPenyusutan(a)), fmt(nilaiBukuAset(a)), /*#__PURE__*/React.createElement(Badge, {
+      color: theme.green
+    }, a.status)]),
+    onEdit: i => onEditAset(asetAktif[i]),
+    onDelete: i => onDeleteAset(asetAktif[i]),
+    search: true,
+    emptyMsg: "Belum ada aset tetap terdaftar"
+  })), asetNonAktif.length > 0 && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h4", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "ASET NONAKTIF (Dijual / Dihapuskan)"), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Kode", "Nama", "Status", "Tanggal", "Keterangan", ""],
+    rows: asetNonAktif.map(a => [a.kode, a.nama, /*#__PURE__*/React.createElement(Badge, {
+      color: theme.red
+    }, a.status), fmtDateRev(a.disposal?.tanggal), a.disposal?.alasan || "-", isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => reaktivasiAset(a)
+    }, "↩ Aktifkan Kembali")])
+  }))), /*#__PURE__*/React.createElement(Modal, {
+    open: asetModal,
+    title: asetEditId ? "Edit Aset Tetap" : "Tambah Aset Tetap",
+    onClose: () => setAsetModal(false),
+    width: 640
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Kode Aset",
+    value: asetForm.kode,
+    onChange: v => setAsetForm({
+      ...asetForm,
+      kode: v
+    }),
+    disabled: !!asetEditId
+  }), /*#__PURE__*/React.createElement(Select, {
+    label: "Kategori",
+    value: asetForm.kategori,
+    onChange: onAsetKategoriChange,
+    required: true,
+    options: [{
+      value: "",
+      label: "-- Pilih --"
+    }, ...ASET_KATEGORI.map(k => ({
+      value: k,
+      label: k
+    }))]
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Nama Aset",
+    value: asetForm.nama,
+    onChange: v => setAsetForm({
+      ...asetForm,
+      nama: v
+    }),
+    required: true,
+    style: {
+      gridColumn: "1/-1"
+    }
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal Perolehan",
+    type: "date",
+    value: asetForm.tanggalPerolehan,
+    onChange: v => setAsetForm({
+      ...asetForm,
+      tanggalPerolehan: v
+    }),
+    required: true
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Mulai Penyusutan Otomatis",
+    type: "date",
+    value: asetForm.tanggalMulaiPenyusutanOtomatis,
+    onChange: v => setAsetForm({
+      ...asetForm,
+      tanggalMulaiPenyusutanOtomatis: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Nilai Perolehan (Rp)",
+    type: "number",
+    value: asetForm.nilaiPerolehan,
+    onChange: v => setAsetForm({
+      ...asetForm,
+      nilaiPerolehan: v
+    }),
+    required: true
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Nilai Residu (Rp)",
+    type: "number",
+    value: asetForm.nilaiResidu,
+    onChange: v => setAsetForm({
+      ...asetForm,
+      nilaiResidu: v
+    })
+  }), asetForm.kategori !== "Tanah" && /*#__PURE__*/React.createElement(Input, {
+    label: "Umur Manfaat (Tahun)",
+    type: "number",
+    value: asetForm.umurManfaatTahun,
+    onChange: v => setAsetForm({
+      ...asetForm,
+      umurManfaatTahun: v
+    }),
+    required: true
+  }), /*#__PURE__*/React.createElement(Select, {
+    label: "Akun Aset (Neraca)",
+    value: asetForm.akunAset,
+    onChange: v => setAsetForm({
+      ...asetForm,
+      akunAset: v
+    }),
+    options: [{
+      value: "",
+      label: "-- Belum dipilih --"
+    }, ...lkCoa.filter(c => c.aktif !== false).map(c => ({
+      value: c.kode,
+      label: `${c.kode} - ${c.nama}`
+    }))]
+  }), asetForm.kategori !== "Tanah" && /*#__PURE__*/React.createElement(Select, {
+    label: "Akun Akumulasi Penyusutan",
+    value: asetForm.akunAkumulasi,
+    onChange: v => setAsetForm({
+      ...asetForm,
+      akunAkumulasi: v
+    }),
+    options: [{
+      value: "",
+      label: "-- Belum dipilih --"
+    }, ...lkCoa.filter(c => c.aktif !== false).map(c => ({
+      value: c.kode,
+      label: `${c.kode} - ${c.nama}`
+    }))]
+  }), asetForm.kategori !== "Tanah" && /*#__PURE__*/React.createElement(Select, {
+    label: "Akun Beban Penyusutan",
+    value: asetForm.akunBeban,
+    onChange: v => setAsetForm({
+      ...asetForm,
+      akunBeban: v
+    }),
+    options: [{
+      value: "",
+      label: "-- Belum dipilih --"
+    }, ...lkCoa.filter(c => c.aktif !== false).map(c => ({
+      value: c.kode,
+      label: `${c.kode} - ${c.nama}`
+    }))]
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Catatan",
+    multiline: true,
+    value: asetForm.catatan,
+    onChange: v => setAsetForm({
+      ...asetForm,
+      catatan: v
+    }),
+    style: {
+      gridColumn: "1/-1"
+    }
+  }), asetEditId && /*#__PURE__*/React.createElement("p", {
+    style: {
+      gridColumn: "1/-1",
+      margin: 0,
+      fontSize: 11,
+      color: theme.muted,
+      fontStyle: "italic"
+    }
+  }, `Akumulasi Penyusutan saat ini: Rp ${fmtNum(akumulasiPenyusutan(asetForm))} — Nilai Buku: Rp ${fmtNum(nilaiBukuAset({
+    ...asetForm,
+    nilaiPerolehan: parseFloat(asetForm.nilaiPerolehan) || 0,
+    nilaiResidu: parseFloat(asetForm.nilaiResidu) || 0,
+    depresiasiLog: (lkAsetTetap.find(a => a.id === asetEditId) || {}).depresiasiLog
+  }))} (dihitung dari riwayat jurnal penyusutan, bukan bisa diedit manual di sini).`), /*#__PURE__*/React.createElement("div", {
+    style: {
+      gridColumn: "1/-1",
+      display: "flex",
+      justifyContent: "space-between",
+      gap: 10
+    }
+  }, asetEditId && /*#__PURE__*/React.createElement(Btn, {
+    variant: "warning",
+    onClick: () => {
+      setAsetModal(false);
+      openDisposal(lkAsetTetap.find(a => a.id === asetEditId));
+    }
+  }, "🏷️ Nonaktifkan (Dijual/Dihapuskan)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      marginLeft: "auto"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setAsetModal(false)
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: saveAset
+  }, "💾 Simpan"))))), /*#__PURE__*/React.createElement(Modal, {
+    open: !!disposalModal,
+    title: disposalModal ? `Nonaktifkan Aset — ${disposalModal.nama}` : "",
+    onClose: () => setDisposalModal(null)
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    label: "Status Baru",
+    value: disposalForm.status,
+    onChange: v => setDisposalForm({
+      ...disposalForm,
+      status: v
+    }),
+    options: [{
+      value: "Dijual",
+      label: "Dijual"
+    }, {
+      value: "Dihapuskan",
+      label: "Dihapuskan (rusak/hilang/afkir)"
+    }]
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Tanggal",
+    type: "date",
+    value: disposalForm.tanggal,
+    onChange: v => setDisposalForm({
+      ...disposalForm,
+      tanggal: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Keterangan (harga jual/pembeli, atau alasan penghapusan)",
+    multiline: true,
+    value: disposalForm.alasan,
+    onChange: v => setDisposalForm({
+      ...disposalForm,
+      alasan: v
+    }),
+    required: true
+  }), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 11,
+      color: theme.muted,
+      fontStyle: "italic"
+    }
+  }, "Fase 3: menonaktifkan aset menghentikan penyusutan otomatis bulan berikutnya. Jurnal pelepasan aset (untung/rugi penjualan) belum otomatis — catat manual lewat tab Jurnal Umum jika perlu."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setDisposalModal(null)
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    variant: "danger",
+    onClick: saveDisposal
+  }, "Simpan")))));
+
+  // Simple, shared print-to-new-window helper for the 4 statements below — deliberately NOT built
+  // on printDocument() (that function's shape is item-table + single total, tailored for
+  // Quotation/Invoice/PO/DO; a multi-section statement with several subtotals doesn't fit it).
+  const printLaporan = (title, subtitle, sections) => {
+    const win = window.open("", "_blank");
+    if (!win) {
+      alert("Popup diblokir browser. Izinkan popup untuk mencetak laporan.");
+      return;
+    }
+    const co = {
+      ...COMPANY_INFO,
+      ...(store.companySettings || {})
+    };
+    const sectionsHtml = sections.map(sec => `
+      <div style="margin-bottom:16px;">
+        ${sec.header ? `<div style="font-weight:700;font-size:12px;color:#333;margin:12px 0 4px;text-transform:uppercase;">${escapeHtml(sec.header)}</div>` : ""}
+        ${sec.rows.map(([label, val, bold]) => `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #eee;font-weight:${bold ? 700 : 400};font-size:13px;${bold ? "border-top:1px solid #999;margin-top:2px;padding-top:6px;" : ""}"><span>${escapeHtml(label)}</span><span>Rp ${fmtNum(val)}</span></div>`).join("")}
+      </div>`).join("");
+    win.document.write(`<html><head><title>${escapeHtml(title)}</title>
+      <style>body{font-family:Arial,sans-serif;padding:32px;color:#222;} h1{font-size:18px;margin:0 0 2px;} h2{font-size:14px;margin:0 0 20px;color:#555;font-weight:400;} @media print{body{padding:12px;}}</style>
+      </head><body>
+      <h1>${escapeHtml(co.nama || "")}</h1>
+      <h2>${escapeHtml(title)} — ${escapeHtml(subtitle)}</h2>
+      ${sectionsHtml}
+      </body></html>`);
+    win.document.close();
+    win.onload = () => win.print();
+  };
+  const tipeSubTipeList = tipe => [...new Set(lkCoa.filter(c => c.tipe === tipe).map(c => c.subTipe || "Lainnya"))];
+  // Generic Neraca section renderer — groups by subTipe (Aset Lancar / Aset Tetap / Aset Lain-lain,
+  // etc.) with its own subtotal, and shows every account in the tipe's OWN typical direction via
+  // contribution() — a contra account (Akumulasi Penyusutan, Prive) therefore shows as a NEGATIVE /
+  // deduction line here, which is the standard, correct presentation (and the whole reason the
+  // Fase 4 sign-fix above matters).
+  const renderNeracaTipe = tipe => tipeSubTipeList(tipe).map(subTipe => {
+    const accounts = lkCoa.filter(c => c.tipe === tipe && (c.subTipe || "Lainnya") === subTipe);
+    const subtotal = accounts.reduce((s, c) => s + contribution(c, neracaBal), 0);
+    return /*#__PURE__*/React.createElement(React.Fragment, {
+      key: subTipe
+    }, reportSectionHeader(subTipe), accounts.map(c => reportRow(normalOf(c) !== TIPE_NORMAL[tipe] ? `${c.nama} (kontra)` : c.nama, contribution(c, neracaBal))), accounts.length > 1 && reportRow(`Subtotal ${subTipe}`, subtotal, true));
+  });
+  const neracaSectionsForPrint = () => [{
+    header: "ASET",
+    rows: [...lkCoa.filter(c => c.tipe === "Aset").map(c => [normalOf(c) !== "Debit" ? `${c.nama} (kontra)` : c.nama, contribution(c, neracaBal)]), ["Total Aset", totalAset, true]]
+  }, {
+    header: "LIABILITAS",
+    rows: [...lkCoa.filter(c => c.tipe === "Liabilitas").map(c => [c.nama, contribution(c, neracaBal)]), ["Total Liabilitas", totalLiabilitas, true]]
+  }, {
+    header: "EKUITAS",
+    rows: [...lkCoa.filter(c => c.tipe === "Ekuitas").map(c => [normalOf(c) !== "Kredit" ? `${c.nama} (kontra)` : c.nama, contribution(c, neracaBal)]), ["Laba/Rugi Sejak Cutover", labaRugiSejakCutover, false], ["Total Ekuitas", totalEkuitas, true]]
+  }];
   const laporanTab = /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -42395,30 +43664,84 @@ function LKModule({
       color: theme.muted,
       fontStyle: "italic"
     }
-  }, "Fase 1: dihitung langsung dari Saldo Awal + Jurnal Umum manual. Arus Kas di bawah adalah pergerakan kas sederhana (belum metode tidak langsung penuh) — akan disempurnakan di Fase 2/4."), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+  }, "Fase 4: Neraca per tanggal terpilih; Laba Rugi/Perubahan Ekuitas/Arus Kas untuk periode terpilih (bukan lagi akumulasi sejak awal). Arus Kas diturunkan langsung dari baris jurnal yang menyentuh akun Kas/Bank — sederhana tapi otomatis mengecualikan item non-kas seperti penyusutan, jadi cukup akurat untuk kebutuhan internal; untuk audit formal tetap perlu direview akuntan."), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h4", {
     style: {
-      margin: "0 0 12px",
+      margin: "0 0 10px",
+      color: theme.muted,
+      fontSize: 12
+    }
+  }, "PERIODE LAPORAN (untuk Laba Rugi, Perubahan Ekuitas, Arus Kas)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      alignItems: "center",
+      flexWrap: "wrap"
+    }
+  }, ["bulan_ini", "tahun_ini", "custom"].map(p => /*#__PURE__*/React.createElement(Btn, {
+    key: p,
+    size: "sm",
+    variant: periodePreset === p ? "success" : "ghost",
+    onClick: () => setPeriodePreset(p)
+  }, p === "bulan_ini" ? "Bulan Ini" : p === "tahun_ini" ? "Tahun Ini (YTD)" : "Custom")), periodePreset === "custom" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Input, {
+    type: "date",
+    value: customStart,
+    onChange: setCustomStart,
+    style: {
+      width: 160
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted
+    }
+  }, "s/d"), /*#__PURE__*/React.createElement(Input, {
+    type: "date",
+    value: customEnd,
+    onChange: setCustomEnd,
+    style: {
+      width: 160
+    }
+  })), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      marginLeft: "auto"
+    }
+  }, fmtDateRev(periodeRange.start), " — ", fmtDateRev(periodeRange.end)))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      flexWrap: "wrap",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: 0,
       color: theme.text
     }
-  }, "Neraca (Balance Sheet)"), /*#__PURE__*/React.createElement("h4", {
+  }, "Neraca (Balance Sheet)"), /*#__PURE__*/React.createElement("div", {
     style: {
-      margin: "10px 0 4px",
-      color: theme.muted,
-      fontSize: 13
+      display: "flex",
+      gap: 10,
+      alignItems: "center"
     }
-  }, "ASET"), lkCoa.filter(c => c.tipe === "Aset").map(c => reportRow(c.nama, endingBalances[c.kode] || 0)), reportRow("Total Aset", totalAset, true), /*#__PURE__*/React.createElement("h4", {
+  }, /*#__PURE__*/React.createElement("span", {
     style: {
-      margin: "16px 0 4px",
-      color: theme.muted,
-      fontSize: 13
+      fontSize: 12,
+      color: theme.muted
     }
-  }, "LIABILITAS"), lkCoa.filter(c => c.tipe === "Liabilitas").map(c => reportRow(c.nama, endingBalances[c.kode] || 0)), reportRow("Total Liabilitas", totalLiabilitas, true), /*#__PURE__*/React.createElement("h4", {
+  }, "per"), /*#__PURE__*/React.createElement(Input, {
+    type: "date",
+    value: neracaAsOf,
+    onChange: setNeracaAsOf,
     style: {
-      margin: "16px 0 4px",
-      color: theme.muted,
-      fontSize: 13
+      width: 160
     }
-  }, "EKUITAS"), lkCoa.filter(c => c.tipe === "Ekuitas").map(c => reportRow(c.nama, endingBalances[c.kode] || 0)), reportRow("Laba/Rugi Tahun Berjalan", labaRugiBerjalan), reportRow("Total Ekuitas", totalEkuitas, true), /*#__PURE__*/React.createElement("div", {
+  }), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => printLaporan("Neraca (Balance Sheet)", `per ${fmtDateRev(neracaAsOf)}`, neracaSectionsForPrint())
+  }, "🖨️ Print"))), renderNeracaTipe("Aset"), reportRow("TOTAL ASET", totalAset, true), reportSectionHeader("LIABILITAS"), lkCoa.filter(c => c.tipe === "Liabilitas").map(c => reportRow(c.nama, contribution(c, neracaBal))), reportRow("TOTAL LIABILITAS", totalLiabilitas, true), reportSectionHeader("EKUITAS"), lkCoa.filter(c => c.tipe === "Ekuitas").map(c => reportRow(normalOf(c) !== "Kredit" ? `${c.nama} (kontra)` : c.nama, contribution(c, neracaBal))), reportRow("Laba/Rugi Sejak Cutover", labaRugiSejakCutover), reportRow("TOTAL EKUITAS", totalEkuitas, true), /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 14,
       paddingTop: 10,
@@ -42427,53 +43750,81 @@ function LKModule({
       fontWeight: 700,
       color: neracaBalanced ? theme.green : theme.red
     }
-  }, neracaBalanced ? "✓ Balance" : "⚠ Tidak Balance", " — Aset: Rp ", fmtNum(totalAset), " vs Liabilitas+Ekuitas: Rp ", fmtNum(totalLiabilitas + totalEkuitas))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+  }, neracaBalanced ? "✓ Balance" : "⚠ Tidak Balance", " — Aset: Rp ", fmtNum(totalAset), " vs Liabilitas+Ekuitas: Rp ", fmtNum(totalLiabilitas + totalEkuitas))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
     style: {
-      margin: "0 0 12px",
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center"
+    }
+  }, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: 0,
       color: theme.text
     }
-  }, "Laba Rugi (Income Statement)"), /*#__PURE__*/React.createElement("h4", {
-    style: {
-      margin: "10px 0 4px",
-      color: theme.muted,
-      fontSize: 13
-    }
-  }, "PENDAPATAN"), lkCoa.filter(c => c.tipe === "Pendapatan").map(c => reportRow(c.nama, endingBalances[c.kode] || 0)), reportRow("Total Pendapatan", totalPendapatan, true), /*#__PURE__*/React.createElement("h4", {
-    style: {
-      margin: "16px 0 4px",
-      color: theme.muted,
-      fontSize: 13
-    }
-  }, "BEBAN"), lkCoa.filter(c => c.tipe === "Beban").map(c => reportRow(c.nama, endingBalances[c.kode] || 0)), reportRow("Total Beban", totalBeban, true), /*#__PURE__*/React.createElement("div", {
+  }, "Laba Rugi (Income Statement)"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => printLaporan("Laba Rugi (Income Statement)", `${fmtDateRev(periodeRange.start)} — ${fmtDateRev(periodeRange.end)}`, [{
+      header: "Pendapatan",
+      rows: [...lkCoa.filter(c => c.tipe === "Pendapatan").map(c => [c.nama, plMov[c.kode] || 0]), ["Total Pendapatan", periodPendapatan, true]]
+    }, {
+      header: "Harga Pokok Penjualan",
+      rows: [...lkCoa.filter(c => c.tipe === "Beban" && c.subTipe === "Harga Pokok Penjualan").map(c => [c.nama, plMov[c.kode] || 0]), ["Laba Kotor", labaKotor, true]]
+    }, {
+      header: "Beban Usaha",
+      rows: [...lkCoa.filter(c => c.tipe === "Beban" && ["Beban Gaji & Karyawan", "Beban Operasional Kantor", "Beban Penyusutan"].includes(c.subTipe)).map(c => [c.nama, plMov[c.kode] || 0]), ["Laba Usaha", labaUsaha, true]]
+    }, {
+      header: "Pajak, Keuangan & Lain-lain",
+      rows: [...lkCoa.filter(c => c.tipe === "Beban" && ["Beban Pajak", "Beban Keuangan", "Beban Lain-lain"].includes(c.subTipe)).map(c => [c.nama, plMov[c.kode] || 0]), [labaBersihPeriode >= 0 ? "Laba Bersih" : "Rugi Bersih", Math.abs(labaBersihPeriode), true]]
+    }])
+  }, "🖨️ Print")), reportSectionHeader("PENDAPATAN"), lkCoa.filter(c => c.tipe === "Pendapatan").map(c => reportRow(c.nama, plMov[c.kode] || 0)), reportRow("Total Pendapatan", periodPendapatan, true), reportSectionHeader("HARGA POKOK PENJUALAN"), lkCoa.filter(c => c.tipe === "Beban" && c.subTipe === "Harga Pokok Penjualan").map(c => reportRow(c.nama, plMov[c.kode] || 0)), reportRow("Laba Kotor", labaKotor, true), reportSectionHeader("BEBAN USAHA"), lkCoa.filter(c => c.tipe === "Beban" && ["Beban Gaji & Karyawan", "Beban Operasional Kantor", "Beban Penyusutan"].includes(c.subTipe)).map(c => reportRow(c.nama, plMov[c.kode] || 0)), reportRow("Laba Usaha", labaUsaha, true), reportSectionHeader("PAJAK, KEUANGAN & LAIN-LAIN"), lkCoa.filter(c => c.tipe === "Beban" && ["Beban Pajak", "Beban Keuangan", "Beban Lain-lain"].includes(c.subTipe)).map(c => reportRow(c.nama, plMov[c.kode] || 0)), /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 14,
       paddingTop: 10,
       borderTop: `2px solid ${theme.border}`,
       fontSize: 14,
       fontWeight: 700,
-      color: labaRugiBerjalan >= 0 ? theme.green : theme.red
+      color: labaBersihPeriode >= 0 ? theme.green : theme.red
     }
-  }, labaRugiBerjalan >= 0 ? "Laba Bersih: Rp " : "Rugi Bersih: Rp ", fmtNum(Math.abs(labaRugiBerjalan)))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+  }, labaBersihPeriode >= 0 ? "Laba Bersih: Rp " : "Rugi Bersih: Rp ", fmtNum(Math.abs(labaBersihPeriode)))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
     style: {
       margin: "0 0 12px",
       color: theme.text
     }
-  }, "Arus Kas (Sederhana)"), kasAccounts.length === 0 ? /*#__PURE__*/React.createElement("p", {
+  }, "Laporan Perubahan Ekuitas"), reportRow("Modal Awal Periode", modalAwalPeriode), setoranModalPeriode !== 0 && reportRow("Setoran Modal Selama Periode", setoranModalPeriode), reportRow(labaBersihPeriode >= 0 ? "Laba Bersih Periode Ini" : "Rugi Bersih Periode Ini", labaBersihPeriode), privePeriode !== 0 && reportRow("Prive / Pengambilan Pribadi", -privePeriode), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 10,
+      paddingTop: 10,
+      borderTop: `2px solid ${theme.border}`,
+      fontSize: 14,
+      fontWeight: 700,
+      color: theme.text
+    }
+  }, "Modal Akhir Periode: Rp ", fmtNum(modalAkhirPeriode)), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "8px 0 0",
+      fontSize: 11,
+      color: theme.muted,
+      fontStyle: "italic"
+    }
+  }, "Tidak termasuk akun 3300 (Laba/Rugi Tahun Berjalan) — akun itu sengaja dibiarkan tidak dijurnal manual, karena Laba/Rugi selalu dihitung live dari Pendapatan − Beban periode berjalan.")), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.text
+    }
+  }, "Arus Kas"), kasAccounts.length === 0 ? /*#__PURE__*/React.createElement("p", {
     style: {
       margin: 0,
       fontSize: 13,
       color: theme.muted
     }
-  }, "Belum ada akun yang ditandai sebagai Kas/Bank. Tandai lewat centang \"Akun Kas/Bank\" di tab Bagan Akun.") : /*#__PURE__*/React.createElement(React.Fragment, null, kasAccounts.map(c => reportRow(c.nama, endingBalances[c.kode] || 0)), reportRow("Total Kas & Bank (Saldo Akhir)", totalKas, true), reportRow("Saldo Kas & Bank Awal", kasAwal), /*#__PURE__*/React.createElement("div", {
+  }, "Belum ada akun yang ditandai sebagai Kas/Bank. Tandai lewat centang \"Akun Kas/Bank\" di tab Bagan Akun.") : /*#__PURE__*/React.createElement(React.Fragment, null, reportRow("Kas dari Aktivitas Operasi", arusKasByKategori.Operasi || 0), reportRow("Kas dari Aktivitas Investasi", arusKasByKategori.Investasi || 0), reportRow("Kas dari Aktivitas Pendanaan", arusKasByKategori.Pendanaan || 0), reportRow("Kenaikan/(Penurunan) Kas Bersih", arusKasBersih, true), reportRow("Saldo Kas & Bank Awal Periode", kasAwalPeriode), reportRow("Saldo Kas & Bank Akhir Periode", kasAkhirAktual, true), !arusKasCocok && /*#__PURE__*/React.createElement("p", {
     style: {
-      marginTop: 10,
-      paddingTop: 10,
-      borderTop: `2px solid ${theme.border}`,
-      fontSize: 13,
-      fontWeight: 700,
-      color: kasMovement >= 0 ? theme.green : theme.red
+      margin: "8px 0 0",
+      fontSize: 11,
+      color: theme.yellow
     }
-  }, "Kenaikan/(Penurunan) Kas Bersih: Rp ", fmtNum(kasMovement)))));
+  }, "⚠ Perhitungan kategori Arus Kas (Rp ", fmtNum(kasAkhirPeriode), ") tidak persis sama dengan saldo Kas/Bank aktual (Rp ", fmtNum(kasAkhirAktual), ") — kemungkinan ada entri jurnal manual yang menyentuh Kas tanpa sisi lawan yang jelas kategorinya. Saldo Akhir di atas tetap dari data aktual, bukan dari penjumlahan kategori."))));
 
   const tabs = [{
     key: "coa",
@@ -42484,6 +43835,12 @@ function LKModule({
   }, {
     key: "jurnal",
     label: "Jurnal Umum"
+  }, {
+    key: "mapping",
+    label: "Pemetaan Akun"
+  }, {
+    key: "aset",
+    label: "Aset Tetap"
   }, {
     key: "laporan",
     label: "Laporan"
@@ -42527,7 +43884,7 @@ function LKModule({
       fontSize: 14,
       fontFamily: "inherit"
     }
-  }, t.label))), tab === "coa" && coaTab, tab === "saldo" && saldoTab, tab === "jurnal" && jurnalTab, tab === "laporan" && laporanTab);
+  }, t.label))), tab === "coa" && coaTab, tab === "saldo" && saldoTab, tab === "jurnal" && jurnalTab, tab === "mapping" && mappingTab, tab === "aset" && asetTab, tab === "laporan" && laporanTab);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
