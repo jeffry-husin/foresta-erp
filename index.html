@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-09-08.11";
+const APP_BUILD = "2026-09-08.12";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -1554,7 +1554,7 @@ const ROLE_DEFS = {
   finance: {
     label: "Finance",
     color: "#eab308",
-    modules: ["dashboard", "invoice", "financial_dashboard", "attendance", "master_coa", "jurnal", "bank_recon"]
+    modules: ["dashboard", "invoice", "financial_dashboard", "attendance", "jurnal", "bank_recon"]
   },
   hrd: {
     label: "HRD",
@@ -1576,7 +1576,7 @@ const ROLE_DEFS = {
   workshop_manager: {
     label: "Workshop Manager",
     color: "#0ea5e9",
-    modules: ["dashboard", "workshop_dashboard", "maintenance_schedule", "kpi_mekanik", "sales_order", "item_requisition", "part_request", "goods_receipt", "parts_use", "delivery_order", "mekanik_report", "master_mill", "attendance", "master_coa", "mutasi_barang"]
+    modules: ["dashboard", "workshop_dashboard", "maintenance_schedule", "kpi_mekanik", "sales_order", "item_requisition", "part_request", "goods_receipt", "parts_use", "delivery_order", "mekanik_report", "master_mill", "attendance", "mutasi_barang"]
   },
   // Freelance field technician — same day-to-day modules as Mekanik (job reports, parts use,
   // uang dinas) since freelance staff also get dispatched to sites, but kept as a distinct role so
@@ -1794,10 +1794,6 @@ const ALL_MODULES = [{
   icon: "🏗️",
   label: "Master Unit (BOM)"
 }, {
-  id: "master_coa",
-  icon: "🏢",
-  label: "Master COA"
-}, {
   id: "master_mill",
   icon: "🏔️",
   label: "Master Mill"
@@ -1977,7 +1973,7 @@ const SIDEBAR_GROUPS = [{
 }, {
   key: "database",
   label: "DATABASE",
-  moduleIds: ["master_part", "master_unit", "master_coa", "master_mill", "customer", "supplier"]
+  moduleIds: ["master_part", "master_unit", "master_mill", "customer", "supplier"]
 }, {
   key: "sales",
   label: "SALES",
@@ -2256,17 +2252,17 @@ const USER_DAN_AKSES_SEED = [{
   username: "ho1",
   nama: "Effendi Husin",
   role: "owner",
-  customModules: ["dashboard", "master_part", "master_unit", "master_coa", "customer", "supplier", "part_request", "quotation_unit", "quotation_ps", "sales_order", "item_requisition", "po_local", "po_overseas", "goods_receipt", "parts_use", "delivery_order", "invoice", "mekanik_report", "ticketing", "maintenance_schedule", "workshop_dashboard", "workshop_ops", "attendance", "payroll", "uang_dinas", "client_history", "kpi_mekanik", "kpi_sales", "audit_trail", "financial_dashboard", "users"]
+  customModules: ["dashboard", "master_part", "master_unit", "customer", "supplier", "part_request", "quotation_unit", "quotation_ps", "sales_order", "item_requisition", "po_local", "po_overseas", "goods_receipt", "parts_use", "delivery_order", "invoice", "mekanik_report", "ticketing", "maintenance_schedule", "workshop_dashboard", "workshop_ops", "attendance", "payroll", "uang_dinas", "client_history", "kpi_mekanik", "kpi_sales", "audit_trail", "financial_dashboard", "users"]
 }, {
   username: "ho2",
   nama: "Jeffry Husin",
   role: "gm",
-  customModules: ["dashboard", "master_part", "master_unit", "master_coa", "customer", "supplier", "part_request", "quotation_unit", "quotation_ps", "sales_order", "item_requisition", "po_local", "po_overseas", "goods_receipt", "parts_use", "delivery_order", "invoice", "mekanik_report", "ticketing", "maintenance_schedule", "workshop_dashboard", "workshop_ops", "attendance", "payroll", "uang_dinas", "client_history", "kpi_mekanik", "kpi_sales", "audit_trail", "financial_dashboard", "users"]
+  customModules: ["dashboard", "master_part", "master_unit", "customer", "supplier", "part_request", "quotation_unit", "quotation_ps", "sales_order", "item_requisition", "po_local", "po_overseas", "goods_receipt", "parts_use", "delivery_order", "invoice", "mekanik_report", "ticketing", "maintenance_schedule", "workshop_dashboard", "workshop_ops", "attendance", "payroll", "uang_dinas", "client_history", "kpi_mekanik", "kpi_sales", "audit_trail", "financial_dashboard", "users"]
 }, {
   username: "ho3",
   nama: "Christine Husin",
   role: "finance_director",
-  customModules: ["dashboard", "master_part", "master_unit", "master_coa", "customer", "supplier", "part_request", "quotation_unit", "quotation_ps", "sales_order", "item_requisition", "po_local", "po_overseas", "goods_receipt", "parts_use", "delivery_order", "invoice", "mekanik_report", "ticketing", "maintenance_schedule", "workshop_dashboard", "workshop_ops", "attendance", "payroll", "uang_dinas", "client_history", "kpi_mekanik", "kpi_sales", "audit_trail", "financial_dashboard", "users"]
+  customModules: ["dashboard", "master_part", "master_unit", "customer", "supplier", "part_request", "quotation_unit", "quotation_ps", "sales_order", "item_requisition", "po_local", "po_overseas", "goods_receipt", "parts_use", "delivery_order", "invoice", "mekanik_report", "ticketing", "maintenance_schedule", "workshop_dashboard", "workshop_ops", "attendance", "payroll", "uang_dinas", "client_history", "kpi_mekanik", "kpi_sales", "audit_trail", "financial_dashboard", "users"]
 }, {
   username: "hrd1",
   nama: "Laurentius Tabrani",
@@ -2316,12 +2312,12 @@ const USER_DAN_AKSES_SEED = [{
   username: "accounting1",
   nama: "Tio",
   role: "finance",
-  customModules: ["dashboard", "master_part", "master_unit", "master_coa", "customer", "supplier", "sales_order", "po_local", "po_overseas", "goods_receipt", "delivery_order", "invoice", "ticketing", "workshop_ops", "attendance", "payroll", "audit_trail", "financial_dashboard"]
+  customModules: ["dashboard", "master_part", "master_unit", "customer", "supplier", "sales_order", "po_local", "po_overseas", "goods_receipt", "delivery_order", "invoice", "ticketing", "workshop_ops", "attendance", "payroll", "audit_trail", "financial_dashboard"]
 }, {
   username: "tax1",
   nama: "Pipin",
   role: "finance",
-  customModules: ["dashboard", "master_part", "master_unit", "master_coa", "customer", "supplier", "sales_order", "po_local", "po_overseas", "invoice", "ticketing", "workshop_ops", "attendance", "payroll", "client_history", "audit_trail", "financial_dashboard"]
+  customModules: ["dashboard", "master_part", "master_unit", "customer", "supplier", "sales_order", "po_local", "po_overseas", "invoice", "ticketing", "workshop_ops", "attendance", "payroll", "client_history", "audit_trail", "financial_dashboard"]
 }, {
   username: "ho5",
   nama: "Widodo",
@@ -2715,6 +2711,39 @@ const seedCOA = [{
   kategori: "Lainnya",
   perOrang: false
 }];
+// MASTER COA RETIRED (2026-09-08, per Jef): the old office-cost list above (OPS-001..013) and LK's
+// own Bagan Akun below were two disconnected chart-of-accounts systems — an Operation Cost expense
+// tagged with an OPS-xxx code never reached LK's Jurnal Umum/Laba Rugi at all. Master COA is now
+// retired in favor of LK's Bagan Akun everywhere (Operation Cost, Sales Activity's per-person travel
+// costs); this map lets a one-time backfill translate old OPS-xxx codes already saved on existing
+// records into their LK equivalent. seedCOA itself is left in place only because Jurnal's "Selisih
+// Kurs" auto-provisioning still tags its own auto-generated entries with an OPS-013 code — unrelated
+// to Operation Cost and out of scope for this cleanup.
+const OPS_TO_LK_COA_MAP = {
+  "OPS-001": "5310",
+  // Listrik -> Beban Utilitas
+  "OPS-002": "5310",
+  // Air -> Beban Utilitas
+  "OPS-003": "5310",
+  // IPL -> Beban Utilitas
+  "OPS-004": "5320",
+  // Bensin -> Beban Bensin & Transportasi
+  "OPS-005": "5330",
+  // Parkir -> Beban Parkir & Tol
+  "OPS-006": "5340",
+  // Service Mobil -> Beban Service Kendaraan
+  "OPS-007": "5350",
+  // Entertain -> Beban Entertain / Jamuan
+  "OPS-008": "5330",
+  // Tol -> Beban Parkir & Tol
+  "OPS-009": "5360",
+  // ATK -> Beban ATK & Perlengkapan Kantor
+  "OPS-010": "5392",
+  // Food & Beverages -> Beban Konsumsi / Food & Beverages
+  "OPS-011": "5391",
+  // Service AC -> Beban Service AC & Fasilitas Kantor
+  "OPS-012": "5390" // Others -> Beban Operasional Lainnya
+};
 // ════════════════════════════════════════════════════════════════════════════
 // LAPORAN KEUANGAN — Bagan Akun (Chart of Accounts) seed, comprehensive-from-the-start per explicit
 // request (2026-09-08): rather than starting minimal and restructuring later, this covers every
@@ -2743,8 +2772,10 @@ const seedLKCOA = [
 { kode: "5100", nama: "HPP Spare Parts", tipe: "Beban", subTipe: "Harga Pokok Penjualan", saldoNormal: "Debit" }, { kode: "5110", nama: "HPP Jasa / Service", tipe: "Beban", subTipe: "Harga Pokok Penjualan", saldoNormal: "Debit" },
 // BEBAN — Gaji & Karyawan
 { kode: "5210", nama: "Beban Gaji Pokok", tipe: "Beban", subTipe: "Beban Gaji & Karyawan", saldoNormal: "Debit" }, { kode: "5211", nama: "Beban Lembur", tipe: "Beban", subTipe: "Beban Gaji & Karyawan", saldoNormal: "Debit" }, { kode: "5212", nama: "Beban Komisi", tipe: "Beban", subTipe: "Beban Gaji & Karyawan", saldoNormal: "Debit" }, { kode: "5213", nama: "Beban Tunjangan (Uang Makan/Harian)", tipe: "Beban", subTipe: "Beban Gaji & Karyawan", saldoNormal: "Debit" }, { kode: "5214", nama: "Beban BPJS / Asuransi Karyawan", tipe: "Beban", subTipe: "Beban Gaji & Karyawan", saldoNormal: "Debit" }, { kode: "5215", nama: "Beban Uang Dinas / Perjalanan", tipe: "Beban", subTipe: "Beban Gaji & Karyawan", saldoNormal: "Debit" },
-// BEBAN — Operasional Kantor (memetakan kategori COA lama Biaya Lain: OPS-001..012)
-{ kode: "5310", nama: "Beban Utilitas (Listrik/Air/IPL)", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5320", nama: "Beban Bensin & Transportasi", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5330", nama: "Beban Parkir & Tol", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5340", nama: "Beban Service Kendaraan", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5350", nama: "Beban Entertain / Jamuan", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5360", nama: "Beban ATK & Perlengkapan Kantor", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5370", nama: "Beban Telepon & Internet", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5380", nama: "Beban Sewa", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5390", nama: "Beban Operasional Lainnya", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" },
+// BEBAN — Operasional Kantor (memetakan kategori COA lama Biaya Lain: OPS-001..012). `perOrang: true`
+// marks the per-person travel/field-cost accounts Sales Activity lets a sales rep log per visit
+// (mirrors the old Master COA `perOrang` flag) — 2026-09-08, Master COA retired in favor of this.
+{ kode: "5310", nama: "Beban Utilitas (Listrik/Air/IPL)", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5320", nama: "Beban Bensin & Transportasi", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit", perOrang: true }, { kode: "5330", nama: "Beban Parkir & Tol", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit", perOrang: true }, { kode: "5340", nama: "Beban Service Kendaraan", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit", perOrang: true }, { kode: "5350", nama: "Beban Entertain / Jamuan", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit", perOrang: true }, { kode: "5360", nama: "Beban ATK & Perlengkapan Kantor", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5370", nama: "Beban Telepon & Internet", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5380", nama: "Beban Sewa", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5390", nama: "Beban Operasional Lainnya", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5391", nama: "Beban Service AC & Fasilitas Kantor", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit" }, { kode: "5392", nama: "Beban Konsumsi / Food & Beverages", tipe: "Beban", subTipe: "Beban Operasional Kantor", saldoNormal: "Debit", perOrang: true },
 // BEBAN — Penyusutan
 { kode: "5410", nama: "Beban Penyusutan Bangunan", tipe: "Beban", subTipe: "Beban Penyusutan", saldoNormal: "Debit" }, { kode: "5420", nama: "Beban Penyusutan Kendaraan", tipe: "Beban", subTipe: "Beban Penyusutan", saldoNormal: "Debit" }, { kode: "5430", nama: "Beban Penyusutan Mesin & Peralatan", tipe: "Beban", subTipe: "Beban Penyusutan", saldoNormal: "Debit" }, { kode: "5440", nama: "Beban Penyusutan Peralatan Kantor", tipe: "Beban", subTipe: "Beban Penyusutan", saldoNormal: "Debit" }, { kode: "5450", nama: "Beban Penyusutan Aset Tetap Lainnya", tipe: "Beban", subTipe: "Beban Penyusutan", saldoNormal: "Debit" },
 // BEBAN — Pajak & Keuangan & Lain-lain
@@ -35321,10 +35352,29 @@ function SalesActivityModule({
     salesActivities,
     setSalesActivities,
     customers,
-    coa
+    lkCoa
   } = store;
   const isSalesManager = session.role === "sales_manager";
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
+  // ONE-TIME BACKFILL (2026-09-08, Master COA retired) — same as WorkshopOpsModule: translate any
+  // biaya line still carrying an old OPS-xxx code (from the retired Master COA) to its LK equivalent.
+  useEffect(() => {
+    let changed = false;
+    const fixed = salesActivities.map(a => {
+      if (!(a.biaya || []).some(b => OPS_TO_LK_COA_MAP[b.coaKode])) return a;
+      changed = true;
+      return {
+        ...a,
+        biaya: a.biaya.map(b => {
+          const newKode = OPS_TO_LK_COA_MAP[b.coaKode];
+          if (!newKode) return b;
+          const c = lkCoa.find(x => x.kode === newKode);
+          return c ? { ...b, coaKode: newKode, coaNama: c.nama } : b;
+        })
+      };
+    });
+    if (changed) setSalesActivities(fixed);
+  }, [salesActivities, lkCoa]);
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState(null);
   const [form, setForm] = useState({
@@ -35344,9 +35394,9 @@ function SalesActivityModule({
   const [saSearch, setSaSearch] = useState("");
   const myActivities = (saSearch.trim() ? myActivitiesAll.filter(a => [a.salesNama, a.customerNama, a.jenisAktivitas, a.catatan].filter(Boolean).some(x => String(x).toLowerCase().includes(saSearch.trim().toLowerCase()))) : myActivitiesAll).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const myCustomers = isSalesManager ? customers.filter(c => customerAccessibleBy(c, session)) : customers;
-  const opsCoa = coa.filter(c => c.perOrang);
+  const opsCoa = lkCoa.filter(c => c.perOrang && c.aktif !== false);
   const addBiaya = () => {
-    const c = coa.find(x => x.kode === biayaForm.coaKode);
+    const c = opsCoa.find(x => x.kode === biayaForm.coaKode);
     if (!c || !biayaForm.nominal) return alert("Pilih jenis biaya dan isi nominal");
     setForm(f => ({
       ...f,
@@ -44063,11 +44113,34 @@ function WorkshopOpsModule({
   const {
     workshopOpsExpenses,
     setWorkshopOpsExpenses,
-    coa
+    lkCoa
   } = store;
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
   const canSeeAll = isOwnerLike || session.username === "accounting1";
   const visibleExpenses = canSeeAll ? workshopOpsExpenses : workshopOpsExpenses.filter(e => e.inputUsername ? e.inputUsername === session.username : e.inputBy === session.nama);
+  const bebanCoa = lkCoa.filter(c => c.tipe === "Beban" && c.aktif !== false);
+  // ONE-TIME BACKFILL (2026-09-08, Master COA retired) — old records still carry an OPS-xxx code
+  // from the retired Master COA list; translate them to their LK Bagan Akun equivalent (see
+  // OPS_TO_LK_COA_MAP) so every expense, old and new, points at a real LK account and can post to
+  // Jurnal Umum correctly.
+  useEffect(() => {
+    const fixes = [];
+    workshopOpsExpenses.forEach(e => {
+      if (e.coaKode && OPS_TO_LK_COA_MAP[e.coaKode]) {
+        const newKode = OPS_TO_LK_COA_MAP[e.coaKode];
+        const c = lkCoa.find(x => x.kode === newKode);
+        if (c) fixes.push({
+          id: e.id,
+          coaKode: newKode,
+          coaNama: c.nama
+        });
+      }
+    });
+    if (fixes.length > 0) setWorkshopOpsExpenses(prev => prev.map(e => {
+      const fix = fixes.find(f => f.id === e.id);
+      return fix ? { ...e, ...fix } : e;
+    }));
+  }, [workshopOpsExpenses, lkCoa]);
   const blankWopsForm = {
     tanggal: today(),
     coaKode: "",
@@ -44081,7 +44154,7 @@ function WorkshopOpsModule({
   const [editingExpenseId, setEditingExpenseId] = useState(null);
   const canEditEntry = e => canSeeAll || (e.inputUsername ? e.inputUsername === session.username : e.inputBy === session.nama);
   const save = () => {
-    const c = coa.find(x => x.kode === form.coaKode);
+    const c = bebanCoa.find(x => x.kode === form.coaKode);
     if (!c || !form.nominal) return alert("Pilih jenis biaya dan isi nominal");
     if (form.kategori === "Other" && !form.kategoriLainnya.trim()) return alert("Isi kategori (Other) secara manual");
     if (editingExpenseId) {
@@ -44147,34 +44220,105 @@ function WorkshopOpsModule({
       onDeleteNow: () => deleteExpenseById(e.id)
     });
   };
+  // Kas/Bank source options for the LK auto-posting Kredit side (2026-09-08) — plain Kode lookups
+  // into LK's own Bagan Akun (Kas Kecil/Besar, Bank BCA/MANDIRI), not a separate list.
+  const OPS_KAS_OPTIONS = [{
+    value: "1101",
+    label: "Kas Kecil"
+  }, {
+    value: "1102",
+    label: "Kas Besar"
+  }, {
+    value: "1111",
+    label: "Bank BCA"
+  }, {
+    value: "1112",
+    label: "Bank MANDIRI"
+  }];
+  const [payMethodModal, setPayMethodModal] = useState(null); // { mode: 'period'|'item', targetId }
+  const [payMethod, setPayMethod] = useState("1101");
+  // Removes the LK Jurnal Umum posting(s) for the given expense ids — used when un-marking an
+  // expense back to Belum Dibayar, so the ledger doesn't keep a stale entry for money that (per this
+  // correction) was never actually settled.
+  const removeLkPostings = ids => {
+    store.setLkJurnal(prev => (prev || []).filter(j => !(j.sourceType === "workshop_ops" && ids.includes(j.sourceId))));
+  };
+  // Posts one Jurnal Umum entry per expense item (Debit Beban akun, Kredit Kas/Bank dipilih) — kept
+  // 1:1 per item (even when triggered from the bulk period action) so un-marking a single item later
+  // cleanly removes just that item's posting instead of an all-or-nothing period-level entry.
+  const postLkForItems = (items, kasKode) => {
+    items.forEach(e => {
+      lkAutoPost(store, {
+        sourceType: "workshop_ops",
+        sourceId: e.id,
+        tanggal: e.tanggal,
+        keterangan: `Operation Cost — ${e.coaNama} (${e.kategoriLabel || e.kategori})`,
+        lines: [{
+          kode: e.coaKode,
+          debit: e.nominal,
+          kredit: 0
+        }, {
+          kode: kasKode,
+          debit: 0,
+          kredit: e.nominal
+        }]
+      });
+    });
+  };
   // Bulk-mark every expense in a given weekly (Thu-Wed) period as paid/unpaid at once — the recap
-  // is what actually gets settled/paid to the team, not each individual line item.
-  const markPeriodPaid = (periodKey, paid) => {
+  // is what actually gets settled/paid to the team, not each individual line item. Marking AS paid
+  // needs a Kas/Bank source first (see payMethodModal below); un-marking doesn't, it just reverses.
+  const markPeriodPaid = (periodKey, paid, kasKode) => {
+    const items = workshopOpsExpenses.filter(e => getWeekPeriod(e.tanggal).key === periodKey);
     setWorkshopOpsExpenses(prev => prev.map(e => getWeekPeriod(e.tanggal).key === periodKey ? {
       ...e,
-      dibayar: paid
+      dibayar: paid,
+      ...(paid ? {
+        metodeBayar: OPS_KAS_OPTIONS.find(o => o.value === kasKode)?.label,
+        paidBy: session.nama,
+        paidDate: today()
+      } : {})
     } : e));
+    if (paid) postLkForItems(items, kasKode);else removeLkPostings(items.map(e => e.id));
     logAudit(store, session, {
       module: "Operation Cost",
       docNomor: periodKey,
       action: paid ? "Tandai Sudah Dibayar" : "Tandai Belum Dibayar",
-      detail: `Periode ${weekPeriods.find(p => p.key === periodKey)?.label || periodKey}`
+      detail: `Periode ${weekPeriods.find(p => p.key === periodKey)?.label || periodKey}${paid ? ` via ${OPS_KAS_OPTIONS.find(o => o.value === kasKode)?.label}` : ""}`
     });
   };
   // Mark a single transaction paid/unpaid — period status derives from these per-item flags:
   // all paid = Sudah Dibayar, none paid = Belum Dibayar, some paid = Sebagian Dibayar.
-  const markExpensePaid = (id, paid) => {
+  const markExpensePaid = (id, paid, kasKode) => {
     const e = workshopOpsExpenses.find(x => x.id === id);
     setWorkshopOpsExpenses(prev => prev.map(x => x.id === id ? {
       ...x,
-      dibayar: paid
+      dibayar: paid,
+      ...(paid ? {
+        metodeBayar: OPS_KAS_OPTIONS.find(o => o.value === kasKode)?.label,
+        paidBy: session.nama,
+        paidDate: today()
+      } : {})
     } : x));
+    if (e && paid) postLkForItems([e], kasKode);else removeLkPostings([id]);
     logAudit(store, session, {
       module: "Operation Cost",
       docNomor: e?.tanggal || id,
       action: paid ? "Tandai Sudah Dibayar (Detail)" : "Tandai Belum Dibayar (Detail)",
-      detail: `${e?.coaNama || "-"} - ${fmt(e?.nominal || 0)}`
+      detail: `${e?.coaNama || "-"} - ${fmt(e?.nominal || 0)}${paid ? ` via ${OPS_KAS_OPTIONS.find(o => o.value === kasKode)?.label}` : ""}`
     });
+  };
+  const openPayMethodModal = (mode, targetId) => {
+    setPayMethod("1101");
+    setPayMethodModal({
+      mode,
+      targetId
+    });
+  };
+  const confirmPayMethodModal = () => {
+    if (!payMethodModal) return;
+    if (payMethodModal.mode === "period") markPeriodPaid(payMethodModal.targetId, true, payMethod);else markExpensePaid(payMethodModal.targetId, true, payMethod);
+    setPayMethodModal(null);
   };
   const periodPaidStatus = items => {
     if (!items.length) return "unpaid";
@@ -44293,7 +44437,7 @@ function WorkshopOpsModule({
       fontSize: 12,
       color: theme.muted
     }
-  }, "Pengeluaran operasional (sewa forklift, bensin mobil, air minum, dll) diambil dari Master COA.", !canSeeAll && " Hanya data yang Anda input yang ditampilkan di sini."), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("span", {
+  }, "Pengeluaran operasional (sewa forklift, bensin mobil, air minum, dll) diambil dari Bagan Akun LK. Menandai Sudah Dibayar otomatis posting ke Jurnal Umum LK.", !canSeeAll && " Hanya data yang Anda input yang ditampilkan di sini."), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.muted,
       fontSize: 13
@@ -44372,7 +44516,7 @@ function WorkshopOpsModule({
   }), (isOwnerLike || canSeeAll) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: periodPaidStatus(periodItems) === "paid" ? "ghost" : "success",
-    onClick: () => markPeriodPaid(detailPeriod, periodPaidStatus(periodItems) !== "paid")
+    onClick: () => periodPaidStatus(periodItems) === "paid" ? markPeriodPaid(detailPeriod, false) : openPayMethodModal("period", detailPeriod)
   }, periodPaidStatus(periodItems) === "paid" ? "↺ Tandai Semua Belum Dibayar" : "✓ Tandai Semua Sudah Dibayar")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -44405,7 +44549,7 @@ function WorkshopOpsModule({
     }, e.dibayar ? "Dibayar" : "Belum"), (isOwnerLike || canSeeAll) && /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: e.dibayar ? "ghost" : "success",
-      onClick: () => markExpensePaid(e.id, !e.dibayar)
+      onClick: () => e.dibayar ? markExpensePaid(e.id, false) : openPayMethodModal("item", e.id)
     }, e.dibayar ? "↺" : "✓"))]),
     emptyMsg: "Tidak ada transaksi pada periode ini",
     onEdit: onEditExpense,
@@ -44460,15 +44604,15 @@ function WorkshopOpsModule({
     }),
     required: true
   }), /*#__PURE__*/React.createElement(Select, {
-    label: "Jenis Biaya (Master COA)",
+    label: "Jenis Biaya (Bagan Akun LK)",
     value: form.coaKode,
     onChange: v => setForm({
       ...form,
       coaKode: v
     }),
-    options: coa.map(c => ({
+    options: bebanCoa.map(c => ({
       value: c.kode,
-      label: c.nama
+      label: `${c.kode} — ${c.nama}`
     })),
     required: true
   }), /*#__PURE__*/React.createElement(Input, {
@@ -44499,7 +44643,41 @@ function WorkshopOpsModule({
     onClick: () => setModal(false)
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     onClick: save
-  }, "Simpan")))));
+  }, "Simpan")))), /*#__PURE__*/React.createElement(Modal, {
+    open: !!payMethodModal,
+    title: "Pilih Sumber Dana",
+    onClose: () => setPayMethodModal(null),
+    width: 380
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Dipakai untuk posting otomatis ke Jurnal Umum LK (Debit Beban, Kredit sumber dana ini)."), /*#__PURE__*/React.createElement(Select, {
+    label: "Dibayar via",
+    value: payMethod,
+    onChange: setPayMethod,
+    options: OPS_KAS_OPTIONS
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setPayMethodModal(null)
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    variant: "success",
+    onClick: confirmPayMethodModal
+  }, "✓ Konfirmasi")))));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -46310,11 +46488,6 @@ function App() {
             setFocusClientNama(clientNama);
             setActive("customer");
           }
-        });
-      case "master_coa":
-        return /*#__PURE__*/React.createElement(MasterCOAModule, {
-          store: store,
-          session: session
         });
       case "master_mill":
         return /*#__PURE__*/React.createElement(MasterMillModule, {
