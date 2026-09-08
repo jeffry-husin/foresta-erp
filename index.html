@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-09-08.9";
+const APP_BUILD = "2026-09-08.10";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -4736,8 +4736,14 @@ function tableCellSortValue(node) {
   // sorting by Username looked scrambled (e.g. "workshop1" and "ho1" both collapsed to just "1")
   // instead of alphabetical. Anything containing a letter now always falls through to a
   // case-insensitive string compare, which is what alphanumeric IDs need.
-  if (text && !/[a-zA-Z]/.test(text)) {
-    const digits = text.replace(/[^0-9-]/g, "");
+  // fmt()'s "Rp" currency prefix (used for every money column app-wide) is itself letters, so the
+  // guard above was rejecting EVERY money cell too — sorting "Total" columns lexicographically
+  // ("Rp 999.000" > "Rp 1.500.000" because '9' > '1' as the first differing character) instead of
+  // by amount. Strip that one known prefix before the letter check so money still sorts as a
+  // string when it's genuinely alphanumeric, but numerically when it's just "Rp" + digits.
+  const noCurrencyPrefix = text.replace(/^Rp\s*/i, "");
+  if (noCurrencyPrefix && !/[a-zA-Z]/.test(noCurrencyPrefix)) {
+    const digits = noCurrencyPrefix.replace(/[^0-9-]/g, "");
     if (digits && /^-?\d+$/.test(digits)) {
       const n = parseInt(digits, 10);
       if (!isNaN(n)) return n;
@@ -17356,7 +17362,17 @@ function QuotationPS({
     diskonLabel: detail.clientDiskonPersen ? `Discount (${detail.clientDiskonPersen}%)` : "Discount",
     pajak: detail.pajak,
     total: detail.total
-  }), (detail.extendHistory || []).length > 0 && /*#__PURE__*/React.createElement("div", {
+  }), detail.rejectReason && /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: theme.red,
+      fontSize: 13
+    }
+  }, "Alasan ditolak: ", detail.rejectReason), detail.status === "Closed" && detail.closeReason && /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "Alasan Closed (", detail.closeDate, "): ", detail.closeReason), (detail.extendHistory || []).length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       background: theme.surface,
       borderRadius: 8,
@@ -33793,11 +33809,19 @@ function MaintenanceScheduleModule({
     salesOrders,
     mills,
     customers,
+    clientGroups,
     quotationsPS,
     suratTugas
   } = store;
   const isSepti = session.role === "workshop_manager";
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director"; // standardized 2026-08-21
+  // Same pattern as PriceAnalysisModule/ClientAnalysisModule's groupNamaForCustomerNama — schedule
+  // rows only ever carry a client NAME snapshot (no customer id), so group lookup has to go by name.
+  const groupNamaForCustomerNama = nama => {
+    const cust = (customers || []).find(c => c.nama === nama);
+    if (!cust || !cust.groupId) return "-";
+    return (clientGroups || []).find(g => g.id === cust.groupId)?.nama || "-";
+  };
   const [assignModal, setAssignModal] = useState(null);
   const [mekanikNama, setMekanikNama] = useState("");
   const [completeModal, setCompleteModal] = useState(null);
@@ -33927,7 +33951,7 @@ function MaintenanceScheduleModule({
   };
   const sorted = [...maintenanceSchedules].sort((a, b) => a.nextDueDate.localeCompare(b.nextDueDate));
   const [msSearch, setMsSearch] = useState("");
-  const msFiltered = msSearch.trim() ? sorted.filter(m => [m.unitName, m.unitCode, m.customerNama, m.soNomor, m.assignedMekanik].filter(Boolean).some(x => String(x).toLowerCase().includes(msSearch.trim().toLowerCase()))) : sorted;
+  const msFiltered = msSearch.trim() ? sorted.filter(m => [m.unitName, m.unitCode, m.customerNama, m.soNomor, m.assignedMekanik, groupNamaForCustomerNama(m.customerNama)].filter(Boolean).some(x => String(x).toLowerCase().includes(msSearch.trim().toLowerCase()))) : sorted;
   // Split, not combined: a combined "Segera/Terlambat" count rendered in a single red number was
   // confusing when the 1 item due was actually "Segera" (yellow row) — the card said "1" in red text
   // but no row on screen was actually red, since Segera and Terlambat are different severities with
@@ -33948,7 +33972,9 @@ function MaintenanceScheduleModule({
   // plumbing), so this is a compact summary instead. { type: "quotation"|"so"|"st", data } | null.
   const [docPreview, setDocPreview] = useState(null);
   const millSummaryRows = (mills || []).map(m => {
-    const clientNama = (customers || []).find(c => c.id === m.customerId)?.nama || m.companyName || "-";
+    const custRecord = (customers || []).find(c => c.id === m.customerId);
+    const clientNama = custRecord?.nama || m.companyName || "-";
+    const groupNama = custRecord?.groupId ? (clientGroups || []).find(g => g.id === custRecord.groupId)?.nama || "-" : "-";
     const soForClient = (salesOrders || []).filter(so => m.customerId ? so.customerId === m.customerId : so.customerNama === clientNama).slice().sort((a, b) => (a.tanggal || "").localeCompare(b.tanggal || ""));
     const latestSO = soForClient[soForClient.length - 1] || null;
     const quotForClient = (quotationsPS || []).filter(q => m.customerId ? q.customerId === m.customerId : q.customerNama === clientNama).slice().sort((a, b) => (a.tanggal || "").localeCompare(b.tanggal || ""));
@@ -33959,6 +33985,7 @@ function MaintenanceScheduleModule({
     const latestST = stForMill[stForMill.length - 1] || null;
     return {
       clientNama,
+      groupNama,
       millName: m.millName,
       lastSODate: latestSO?.tanggal || null,
       soData: latestSO,
@@ -33968,7 +33995,7 @@ function MaintenanceScheduleModule({
       stData: latestST
     };
   });
-  const millSummaryFiltered = millSummarySearch.trim() ? millSummaryRows.filter(r => [r.clientNama, r.millName].some(x => String(x).toLowerCase().includes(millSummarySearch.trim().toLowerCase()))) : millSummaryRows;
+  const millSummaryFiltered = millSummarySearch.trim() ? millSummaryRows.filter(r => [r.clientNama, r.groupNama, r.millName].some(x => String(x).toLowerCase().includes(millSummarySearch.trim().toLowerCase()))) : millSummaryRows;
   // Renders a clickable doc-number cell (Quotation/SO/ST) that opens the compact preview modal, or
   // an empty-state badge when there's no document on record yet.
   const docCell = (nomor, type, data) => nomor ? /*#__PURE__*/React.createElement("a", {
@@ -34062,7 +34089,7 @@ function MaintenanceScheduleModule({
       marginBottom: 12
     }
   }), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Nama Client", "Nama Mill", "Tanggal Visit Terakhir", "Tanggal Quotation Terakhir", "No. Quotation", "No. SO", "No. MR", "Aksi"],
+    headers: ["Nama Client", "Group", "Nama Mill", "Tanggal Visit Terakhir", "Tanggal Quotation Terakhir", "No. Quotation", "No. SO", "No. MR", "Aksi"],
     rows: millSummaryFiltered.map(r => [onOpenClient ? /*#__PURE__*/React.createElement("span", {
       style: {
         color: theme.accentLight,
@@ -34070,7 +34097,7 @@ function MaintenanceScheduleModule({
         textDecoration: "underline"
       },
       onClick: () => onOpenClient(r.clientNama)
-    }, r.clientNama) : r.clientNama, r.millName, r.lastVisitDate ? fmtDateRev(r.lastVisitDate) : /*#__PURE__*/React.createElement(Badge, {
+    }, r.clientNama) : r.clientNama, r.groupNama, r.millName, r.lastVisitDate ? fmtDateRev(r.lastVisitDate) : /*#__PURE__*/React.createElement(Badge, {
       color: theme.red
     }, "Kosong"), r.lastQuotationDate ? fmtDateRev(r.lastQuotationDate) : /*#__PURE__*/React.createElement(Badge, {
       color: theme.red
@@ -34092,7 +34119,7 @@ function MaintenanceScheduleModule({
       marginBottom: 12
     }
   }), /*#__PURE__*/React.createElement(Table, {
-    headers: ["Client", "Unit", "No. SO", "Year", "Service Terakhir", "Jadwal Berikutnya", "Mekanik Ditugaskan", "Status"],
+    headers: ["Client", "Group", "Unit", "No. SO", "Year", "Service Terakhir", "Jadwal Berikutnya", "Mekanik Ditugaskan", "Status"],
     rows: msFiltered.map((m, i) => {
       const due = getDueBadge(m.nextDueDate, m.status);
       const clientCell = onOpenClient ? /*#__PURE__*/React.createElement("span", {
@@ -34109,7 +34136,7 @@ function MaintenanceScheduleModule({
       // "Year" = the year this maintenance schedule falls due (nextDueDate's year) — lets Workshop
       // filter/scan schedules by year at a glance instead of reading the full date each time.
       const scheduleYear = m.nextDueDate ? new Date(m.nextDueDate).getFullYear() : "-";
-      return [clientCell, m.unitName || m.unitCode, m.soNomor, scheduleYear, /*#__PURE__*/React.createElement("span", null, fmtDateRev(m.lastServiceDate), " ", m.autoSynced && /*#__PURE__*/React.createElement(Badge, {
+      return [clientCell, groupNamaForCustomerNama(m.customerNama), m.unitName || m.unitCode, m.soNomor, scheduleYear, /*#__PURE__*/React.createElement("span", null, fmtDateRev(m.lastServiceDate), " ", m.autoSynced && /*#__PURE__*/React.createElement(Badge, {
         color: theme.cyan
       }, "Auto")), fmtDateRev(m.nextDueDate), m.assignedMekanik || /*#__PURE__*/React.createElement("span", {
         style: {
