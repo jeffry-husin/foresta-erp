@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-09-08.10";
+const APP_BUILD = "2026-09-08.11";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -28194,7 +28194,8 @@ function InvoiceModule({
     tanggalPenerimaan: today(),
     jumlah: "",
     potonganPph: false,
-    biayaAdmin: ""
+    biayaAdmin: "",
+    metodeBayar: "BCA"
   };
   const [bayarForm, setBayarForm] = useState(emptyBayarForm);
   // PPh 2% (Pasal 23 withholding) is computed off the invoice's "nilai pokok" — subtotal AFTER the
@@ -28220,7 +28221,8 @@ function InvoiceModule({
       tanggalPenerimaan: r.tanggal,
       jumlah: String(r.jumlah || ""),
       potonganPph: !!r.pph,
-      biayaAdmin: r.biayaAdmin ? String(r.biayaAdmin) : ""
+      biayaAdmin: r.biayaAdmin ? String(r.biayaAdmin) : "",
+      metodeBayar: r.metode || "BCA"
     });
   };
   const bayar = () => {
@@ -28234,23 +28236,31 @@ function InvoiceModule({
     // our behalf; Biaya Admin is the sending bank's transfer fee deducted before it reaches us) — so
     // both are added on top of jumlah for the purpose of tracking Sisa/Lunas, per Jef's confirmation.
     const totalSettlement = jml + pphAmount + biayaAdminAmount;
+    const metodeBayar = bayarForm.metodeBayar || "BCA";
     const entry = {
       tanggal: bayarForm.tanggalPenerimaan,
       jumlah: jml,
       pph: pphAmount,
       biayaAdmin: biayaAdminAmount,
       totalSettlement,
+      metode: metodeBayar,
       dicatatOleh: session.nama
     };
     const riwayatPembayaran = editingPayIdx !== null ? (inv.riwayatPembayaran || []).map((r, i) => i === editingPayIdx ? entry : r) : [...(inv.riwayatPembayaran || []), entry];
     // terbayar is always re-derived as the sum of every entry's totalSettlement (not incrementally
     // added) so revising one entry recomputes the running total correctly instead of drifting.
     const terbayar = riwayatPembayaran.reduce((s, r) => s + (r.totalSettlement ?? r.jumlah ?? 0), 0);
+    // metodeBayar/paidBy/paidDate mirror PO Lokal/Overseas' own payment record (BCA/MANDIRI/CASH) so
+    // Jurnal and Rekonsiliasi Bank can sync off the SAME real bank choice, the same way PO payments
+    // already do — instead of Jurnal guessing/discarding it, per Jef's request to unify the flow.
     setInvoices(prev => prev.map(x => x.nomor === inv.nomor ? {
       ...x,
       terbayar,
       riwayatPembayaran,
-      statusBayar: terbayar >= inv.total ? "Lunas" : "Sebagian"
+      statusBayar: terbayar >= inv.total ? "Lunas" : "Sebagian",
+      metodeBayar,
+      paidBy: session.nama,
+      paidDate: bayarForm.tanggalPenerimaan
     } : x));
     // LK Fase 2 auto-posting — cash clearing entry. Reposted as ONE cumulative entry covering the
     // invoice's ENTIRE payment history so far (mirroring how `terbayar` itself is always re-derived
@@ -29144,6 +29154,17 @@ function InvoiceModule({
     }),
     type: "number",
     required: true
+  }), /*#__PURE__*/React.createElement(Select, {
+    label: "Metode Pembayaran (masuk ke rekening mana)",
+    value: bayarForm.metodeBayar,
+    onChange: v => setBayarForm({
+      ...bayarForm,
+      metodeBayar: v
+    }),
+    options: ["BCA", "MANDIRI", "CASH"].map(m => ({
+      value: m,
+      label: m
+    }))
   }), /*#__PURE__*/React.createElement("label", {
     style: {
       display: "flex",
@@ -40948,10 +40969,13 @@ function JurnalModule({
     bankRecon,
     setBankRecon,
     poLocal,
+    setPoLocal,
     poOverseas,
+    setPoOverseas,
     payrollRuns,
     tickets,
     invoices,
+    setInvoices,
     coa,
     setCoa
   } = store;
@@ -41056,9 +41080,9 @@ function JurnalModule({
         tipe: "Pemasukan",
         ...(inv.statusBayar === "Lunas" ? {
           status: "Lunas",
-          paidBy: "(riwayat sebelum Rekonsiliasi Bank)",
-          paidDate: inv.tanggal,
-          metodeBayar: null
+          paidBy: inv.paidBy || "(riwayat sebelum Rekonsiliasi Bank)",
+          paidDate: inv.paidDate || inv.tanggal,
+          metodeBayar: inv.metodeBayar || null
         } : {
           status: "Belum Lunas"
         })
@@ -41116,10 +41140,17 @@ function JurnalModule({
   // bank-tagged Tandai Lunas flow), and nothing ever told the auto-created Jurnal entry about it —
   // it just stayed "Belum Lunas" forever even though the underlying PO was fully paid. Confirmed
   // directly against production data: 76 PO-sourced jurnal entries (mostly PO Lokal) were stuck this
-  // way. Synced straight to "Lunas" here, same convention as the pre-existing invoice auto-sync
-  // above (paidBy tagged as historical, no bank selected) since we don't retroactively know which
-  // account these older payments actually went through, and this is a paper reconciliation of what
-  // already happened, not a fresh bank movement to post to Rekonsiliasi Bank.
+  // way. Synced straight to "Lunas" here.
+  // UPDATED (2026-09-08, per Jef): PO Lokal/Overseas' own payment form already asks which bank
+  // (BCA/MANDIRI/CASH) the payment went through (see PurchaseOrderModule confirmMarkPaid) — that real
+  // choice used to be discarded here (metodeBayar hardcoded to null) and Rekonsiliasi Bank was never
+  // updated for these payments at all, unlike payments confirmed directly in Jurnal. Now the PO's own
+  // metodeBayar/paidBy/paidDate are carried over, and — for PO Lokal (always IDR, no kurs needed) —
+  // a matching Rekonsiliasi Bank entry is posted too, so the flow is consistent whether payment is
+  // confirmed from the PO screen or from Jurnal itself. PO Overseas entries are foreign-currency and
+  // the PO's own form doesn't collect a kurs, so those still rely on Jurnal's own kurs-aware "Catat
+  // Pembayaran" to post to Rekonsiliasi Bank accurately — this backfill only fixes their status/
+  // metodeBayar display, matching the pre-existing behavior for foreign entries.
   useEffect(() => {
     const fixes = [];
     jurnal.forEach(j => {
@@ -41128,20 +41159,65 @@ function JurnalModule({
         : j.sourceModule === "PO Lokal" ? poLocal.find(p => p.nomor === j.sourceId)
         : null;
       if (po && po.statusBayar === "Sudah Dibayar") fixes.push({
-        id: j.id,
-        status: "Lunas",
-        metodeBayar: null,
-        paidBy: "(riwayat sebelum Rekonsiliasi Bank)",
-        paidDate: po.tanggalBayar || po.paidDate || j.tanggal
+        entry: j,
+        update: {
+          status: "Lunas",
+          metodeBayar: po.metodeBayar || null,
+          paidBy: po.paidBy || "(riwayat sebelum Rekonsiliasi Bank)",
+          paidDate: po.tanggalBayar || po.paidDate || j.tanggal
+        }
       });
     });
     if (fixes.length > 0) {
       setJurnal(prev => prev.map(j => {
-        const fix = fixes.find(f => f.id === j.id);
-        return fix ? { ...j, ...fix } : j;
+        const fix = fixes.find(f => f.entry.id === j.id);
+        return fix ? { ...j, ...fix.update } : j;
       }));
+      fixes.forEach(({
+        entry,
+        update
+      }) => {
+        if (!isForeignEntry(entry) && update.metodeBayar) {
+          syncBankRecon({ ...entry, ...update }, update.metodeBayar, update.paidDate, entry.nominal);
+        }
+      });
     }
   }, [jurnal, poOverseas, poLocal]);
+
+  // NEW BACKFILL #3 (2026-09-08, per Jef) — same gap as Backfill #2 above, but for Invoice: Catat
+  // Pembayaran in the Invoice module now also asks for the bank/cash method, but marking an invoice
+  // "Lunas" there never told the auto-created Jurnal entry about it, so an Invoice-sourced entry born
+  // "Belum Lunas" stayed that way forever unless someone separately used Jurnal's own Tandai Lunas.
+  // Invoice-sourced entries are always IDR (non-IDR invoices are excluded from auto-sync entirely,
+  // see the sync effect above), so no kurs is needed and Rekonsiliasi Bank can be posted directly.
+  useEffect(() => {
+    const fixes = [];
+    jurnal.forEach(j => {
+      if (j.status !== "Belum Lunas" || j.sourceModule !== "Invoice") return;
+      const inv = invoices.find(i => i.nomor === j.sourceId);
+      if (inv && inv.statusBayar === "Lunas") fixes.push({
+        entry: j,
+        update: {
+          status: "Lunas",
+          metodeBayar: inv.metodeBayar || null,
+          paidBy: inv.paidBy || "(riwayat sebelum Rekonsiliasi Bank)",
+          paidDate: inv.paidDate || j.tanggal
+        }
+      });
+    });
+    if (fixes.length > 0) {
+      setJurnal(prev => prev.map(j => {
+        const fix = fixes.find(f => f.entry.id === j.id);
+        return fix ? { ...j, ...fix.update } : j;
+      }));
+      fixes.forEach(({
+        entry,
+        update
+      }) => {
+        if (update.metodeBayar) syncBankRecon({ ...entry, ...update }, update.metodeBayar, update.paidDate, entry.nominal);
+      });
+    }
+  }, [jurnal, invoices]);
 
   // Auto-provision the "Selisih Kurs" (currency exchange gain/loss) COA account the first time
   // anyone opens Jurnal — it doesn't exist in older installs' seeded COA, and every PO Overseas
@@ -41238,6 +41314,63 @@ function JurnalModule({
       return [...prev, posted];
     });
   };
+  // TWO-WAY SYNC (2026-09-08, per Jef): PO Lokal/Overseas -> Jurnal already flows one way (Backfill
+  // #2/#3 above). This is the other direction — when a PO- or Invoice-sourced entry is marked Lunas
+  // (or edited) directly from Jurnal's own Tandai Lunas, the source PO/Invoice record is updated too,
+  // so "sudah dibayar" always means the same thing and shows the same bank/cash method whichever
+  // screen it was confirmed from. Jurnal only tracks a binary Lunas/Belum Lunas (no partial state for
+  // Pengeluaran, and Pemasukan installments are tracked via riwayatPembayaran on the entry itself),
+  // so pushing back always treats the source as fully settled at that point.
+  const pushPaidToSource = (entry, metode, tanggal) => {
+    if (entry.sourceModule === "PO Lokal") {
+      setPoLocal(prev => prev.map(p => p.nomor === entry.sourceId ? {
+        ...p,
+        statusBayar: "Sudah Dibayar",
+        jumlahDibayar: p.total,
+        metodeBayar: metode,
+        paidBy: session.nama,
+        paidDate: tanggal,
+        tanggalBayar: tanggal
+      } : p));
+    } else if (entry.sourceModule === "PO Overseas") {
+      setPoOverseas(prev => prev.map(p => p.nomor === entry.sourceId ? {
+        ...p,
+        statusBayar: "Sudah Dibayar",
+        jumlahDibayar: p.total,
+        metodeBayar: metode,
+        paidBy: session.nama,
+        paidDate: tanggal,
+        tanggalBayar: tanggal
+      } : p));
+    } else if (entry.sourceModule === "Invoice") {
+      setInvoices(prev => prev.map(inv => {
+        if (inv.nomor !== entry.sourceId) return inv;
+        const sisa = Math.max(0, inv.total - (inv.terbayar || 0));
+        // Append a synthetic riwayatPembayaran entry so Invoice's own payment history stays complete
+        // and auditable even when settlement is confirmed from Jurnal instead of Invoice's own Catat
+        // Pembayaran — otherwise terbayar would jump to full without any record explaining why.
+        const riwayatPembayaran = sisa > 0 ? [...(inv.riwayatPembayaran || []), {
+          tanggal,
+          jumlah: sisa,
+          pph: 0,
+          biayaAdmin: 0,
+          totalSettlement: sisa,
+          metode,
+          dicatatOleh: session.nama,
+          viaJurnal: true
+        }] : (inv.riwayatPembayaran || []);
+        return {
+          ...inv,
+          statusBayar: "Lunas",
+          terbayar: inv.total,
+          riwayatPembayaran,
+          metodeBayar: metode,
+          paidBy: session.nama,
+          paidDate: tanggal
+        };
+      }));
+    }
+  };
   const confirmPayModal = () => {
     if (!payModal) return;
     const {
@@ -41320,6 +41453,7 @@ function JurnalModule({
         return [...arr, ...kursEntries];
       });
       syncBankRecon(updated, metode, tanggal, nominalIDR);
+      if (nowLunas && entry.sourceModule) pushPaidToSource(entry, metode, tanggal);
       logAudit(store, session, {
         module: "Jurnal",
         docNomor: entry.id,
@@ -41362,6 +41496,7 @@ function JurnalModule({
       return arr;
     });
     syncBankRecon(updated, metode, tanggal, nominalIDR);
+    if (updated.status === "Lunas" && entry.sourceModule) pushPaidToSource(entry, metode, tanggal);
     logAudit(store, session, {
       module: "Jurnal",
       docNomor: entry.id,
