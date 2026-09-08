@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-09-08.8";
+const APP_BUILD = "2026-09-08.9";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -25206,7 +25206,11 @@ function PartsUseModule({
   } = store;
   const isStefanus = session.role === "logistic";
   const isMekanik = session.role === "mekanik" || session.role === "freelance";
-  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
+  // Includes hasAdminModule so an Owner/GM can grant a specific user (e.g. someone
+  // who isn't role owner/gm/finance_director) full admin access to JUST Parts Use
+  // via Manajemen User > Akses Modul > "Full Access", without changing their role
+  // (and therefore without unlocking isOwnerLike everywhere else in the app).
+  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director" || hasAdminModule(session, "parts_use");
   const canRelease = isStefanus || isOwnerLike;
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState(null);
