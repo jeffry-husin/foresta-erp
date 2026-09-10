@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-09-08.12";
+const APP_BUILD = "2026-09-10.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -10093,7 +10093,8 @@ function MekanikReport({
     attendance,
     setAttendance,
     dinasCatatan,
-    setDinasCatatan
+    setDinasCatatan,
+    setCustomers
   } = store;
   // On a phone, the ON GOING Kunjungan table (14 columns) forces heavy horizontal scrolling per row
   // — swap it for a stacked card list instead (see MobileCardList near the top of the file).
@@ -10115,6 +10116,53 @@ function MekanikReport({
       ...m,
       ...patch
     } : m));
+  };
+  // Mirrors MasterMillModule's own `millLokasi` fallback (lokasi, or legacy alamat+kabupaten) — used
+  // here only to decide whether to still show the "isi lokasi manual" field in BAPP even when a
+  // Master Mill is already linked, so a mekanik can fill in a still-blank Lokasi and have it flow
+  // back into Master Mill via backfillMillFromField below.
+  const millLokasiInBapp = mill => !!(mill && (mill.lokasi || mill.alamat || mill.kabupaten));
+  // Upsert-by-name PIC sync into the linked Database Client's `pics` array (per Jef's request): when
+  // a BAPP/DAR is saved with a client-side signer name, that person is added as a PIC on the
+  // Database Client record — or, if a PIC with the same name (case-insensitive) already exists,
+  // only their still-blank jabatan/noHp get filled in. Never overwrites an already-filled value and
+  // never creates a duplicate entry for the same person.
+  const syncPicToClient = (customerId, {
+    nama,
+    jabatan,
+    noHp
+  }) => {
+    if (!customerId || !nama || !nama.trim()) return;
+    const namaTrim = nama.trim();
+    setCustomers(prev => prev.map(c => {
+      if (c.id !== customerId) return c;
+      const pics = c.pics || [];
+      const idx = pics.findIndex(p => (p.nama || "").trim().toLowerCase() === namaTrim.toLowerCase());
+      if (idx === -1) {
+        return {
+          ...c,
+          pics: [...pics, {
+            nama: namaTrim,
+            jabatan: jabatan || "",
+            noHp: noHp || ""
+          }]
+        };
+      }
+      const existing = pics[idx];
+      const patch = {};
+      if (jabatan && !existing.jabatan) patch.jabatan = jabatan;
+      if (noHp && !existing.noHp) patch.noHp = noHp;
+      if (Object.keys(patch).length === 0) return c;
+      const updatedPics = [...pics];
+      updatedPics[idx] = {
+        ...existing,
+        ...patch
+      };
+      return {
+        ...c,
+        pics: updatedPics
+      };
+    }));
   };
   // Master Mill → Kunjungan auto-link: "Unit Terkait" for a Kunjungan pulled from a Master Mill is
   // derived from that mill's crane brand + serial number (matches the historical manual-entry format
@@ -10402,6 +10450,7 @@ function MekanikReport({
     kondisiLainnya: "",
     namaPenerima: "",
     jabatanPenerima: "",
+    noHpPenerima: "",
     catatan: ""
   };
   const [bastForm, setBastForm] = useState(emptyBastForm);
@@ -10774,6 +10823,11 @@ function MekanikReport({
         status: "Menunggu Approval Septi"
       }]);
     }
+    // Sync the client-side signer as a PIC on the Database Client, same as BAPP — DAR only ever
+    // captures a name (no jabatan/noHp field), so only `nama` is passed through.
+    syncPicToClient(formVisit?.customerId, {
+      nama: darForm.namaPenerima
+    });
     closeForm();
     setEditingDarId(null);
     setDarForm({
@@ -10892,12 +10946,20 @@ function MekanikReport({
       }]);
     }
     // Backfill Master Mill with whatever this BAPP just captured that the Mill record was still
-    // missing (e.g. SN Crane, SN Grapple) — see backfillMillFromField above.
+    // missing (e.g. SN Crane, SN Grapple, and now Lokasi too) — see backfillMillFromField above.
     backfillMillFromField(mill, {
       crane: bastForm.crane,
       snCrane: bastForm.snCrane,
       grapple: bastForm.grapple,
-      snGrapple: bastForm.snGrapple
+      snGrapple: bastForm.snGrapple,
+      lokasi: bastForm.lokasiManual
+    });
+    // Sync the client-side signer as a PIC on the Database Client (per Jef's request) — adds them if
+    // new, or fills in a still-blank jabatan/noHp if a PIC with this name already exists.
+    syncPicToClient(bastForm.customerId, {
+      nama: bastForm.namaPenerima,
+      jabatan: bastForm.jabatanPenerima,
+      noHp: bastForm.noHpPenerima
     });
     closeForm();
     setEditingBastId(null);
@@ -12217,11 +12279,11 @@ function MekanikReport({
         snGrapple: mill ? mill.snGrapple || "" : bastForm.snGrapple
       });
     },
-    options: mills.map(m => ({
+    options: mills.filter(m => m.aktif !== false || m.millName === bastForm.millId).map(m => ({
       value: m.millName,
       label: `${m.millName} — ${m.companyName || ""}`
     }))
-  }), !bastForm.millId && /*#__PURE__*/React.createElement(Input, {
+  }), (!bastForm.millId || !millLokasiInBapp(mills.find(m => m.millName === bastForm.millId))) && /*#__PURE__*/React.createElement(Input, {
     label: "Atau isi lokasi manual",
     value: bastForm.lokasiManual,
     onChange: v => setBastForm({
@@ -12301,6 +12363,13 @@ function MekanikReport({
     onChange: v => setBastForm({
       ...bastForm,
       jabatanPenerima: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "No HP Penerima (opsional)",
+    value: bastForm.noHpPenerima,
+    onChange: v => setBastForm({
+      ...bastForm,
+      noHpPenerima: v
     })
   })), /*#__PURE__*/React.createElement(Input, {
     label: "Catatan",
@@ -13543,7 +13612,7 @@ function MekanikReport({
     options: [{
       value: "",
       label: "— Tidak menggunakan Master Mill —"
-    }, ...mills.map(m => ({
+    }, ...mills.filter(m => m.aktif !== false || m.millName === visitForm.millId).map(m => ({
       value: m.millName,
       label: `${m.millName} — ${m.companyName || ""}`
     }))]
@@ -34023,7 +34092,10 @@ function MaintenanceScheduleModule({
   // each module's own detail view isn't practical from here (different components, different print
   // plumbing), so this is a compact summary instead. { type: "quotation"|"so"|"st", data } | null.
   const [docPreview, setDocPreview] = useState(null);
-  const millSummaryRows = (mills || []).map(m => {
+  // Mills marked "Tidak Ditangani Lagi" in Master Mill (aktif === false) are hidden from this
+  // Ringkasan Per Mill summary — their data is retained in Master Mill itself, just not surfaced
+  // here (or in the Mekanik Report mill picker) until reactivated.
+  const millSummaryRows = (mills || []).filter(m => m.aktif !== false).map(m => {
     const custRecord = (customers || []).find(c => c.id === m.customerId);
     const clientNama = custRecord?.nama || m.companyName || "-";
     const groupNama = custRecord?.groupId ? (clientGroups || []).find(g => g.id === custRecord.groupId)?.nama || "-" : "-";
@@ -44972,6 +45044,13 @@ function MasterMillModule({
   const [modal, setModal] = useState(false);
   const [editIdx, setEditIdx] = useState(null);
   const [search, setSearch] = useState("");
+  const [showInactive, setShowInactive] = useState(false);
+  // Legacy records may still only have `alamat` + `kabupaten` (pre-rebuild schema) instead of the
+  // unified `lokasi` field — fold them together here so no data is lost after the rebuild.
+  const millLokasi = m => m.lokasi || [m.alamat, m.kabupaten].filter(Boolean).join(", ") || "";
+  // Linked Database Client's name for a mill — falls back to the legacy free-text companyName for
+  // records not yet linked (or never migrated because no matching client name was found).
+  const millClientNama = m => customers.find(c => c.id === m.customerId)?.nama || m.companyName || "-";
   // One-time migration: link legacy mills (free-text companyName only) to a Database Client whose
   // name matches exactly (case-insensitive), so existing data isn't orphaned by the switch to a
   // proper customerId link below. Mills with no match (or already linked) are left untouched — those
@@ -44991,6 +45070,29 @@ function MasterMillModule({
     });
     if (changed) setMills(updated);
   }, [customers, mills]);
+  // Auto-fill Lokasi from the linked Database Client's own address, but only when Master Mill's own
+  // Lokasi field is still blank (per Jef's request — this fills gaps in Master Mill's incomplete
+  // data, it never overwrites anything already entered). Database Client's `alamat` is a general
+  // free-text address field (sometimes a full street address, sometimes just a province/region
+  // name), so this only ever backfills the combined "Lokasi" field — `provinsi` is deliberately left
+  // alone here since there's no dedicated per-client province field reliable enough to source it
+  // from; `provinsi` instead only gets auto-filled from Mekanik Report's own manual entry (see
+  // backfillMillFromField in MekanikReport).
+  useEffect(() => {
+    if (!customers || customers.length === 0 || mills.length === 0) return;
+    let changed = false;
+    const updated = mills.map(m => {
+      if (millLokasi(m) || !m.customerId) return m;
+      const cust = customers.find(c => c.id === m.customerId);
+      if (!cust || !cust.alamat) return m;
+      changed = true;
+      return {
+        ...m,
+        lokasi: cust.alamat
+      };
+    });
+    if (changed) setMills(updated);
+  }, [customers, mills]);
   const emptyForm = {
     group: "",
     customerId: "",
@@ -45002,17 +45104,23 @@ function MasterMillModule({
     snGrapple: "",
     crane: "",
     snCrane: "",
-    year: ""
+    year: "",
+    aktif: true
   };
   const [form, setForm] = useState(emptyForm);
   const [importSummary, setImportSummary] = useState(null);
-  // Legacy records may still only have `alamat` + `kabupaten` (pre-rebuild schema) instead of the
-  // unified `lokasi` field — fold them together here so no data is lost after the rebuild.
-  const millLokasi = m => m.lokasi || [m.alamat, m.kabupaten].filter(Boolean).join(", ") || "";
-  // Linked Database Client's name for a mill — falls back to the legacy free-text companyName for
-  // records not yet linked (or never migrated because no matching client name was found).
-  const millClientNama = m => customers.find(c => c.id === m.customerId)?.nama || m.companyName || "-";
   const filtered = mills.filter(m => m.millName.toLowerCase().includes(search.toLowerCase()) || millClientNama(m).toLowerCase().includes(search.toLowerCase()) || (m.group || "").toLowerCase().includes(search.toLowerCase()));
+  const activeFiltered = filtered.filter(m => m.aktif !== false);
+  const inactiveFiltered = filtered.filter(m => m.aktif === false);
+  // Toggle a mill in/out of "Tidak Ditangani Lagi" — data is always kept, this only hides it from
+  // Maintenance Schedule / Ringkasan Per Mill / the Mekanik Report mill picker (see those modules'
+  // own `aktif !== false` filters) while remaining reactivatable here at any time.
+  const toggleAktif = m => {
+    setMills(prev => prev.map(x => x.millName === m.millName ? {
+      ...x,
+      aktif: x.aktif === false ? true : false
+    } : x));
+  };
   const MILL_TEMPLATE_HEADERS = ["group", "companyName", "millName", "lokasi", "provinsi", "grapple", "snGrapple", "crane", "snCrane", "year"];
   const doExport = () => exportToExcel(mills.map(m => ({
     group: m.group || "",
@@ -45068,8 +45176,7 @@ function MasterMillModule({
     setEditIdx(null);
     setModal(true);
   };
-  const onEdit = i => {
-    const m = filtered[i];
+  const onEdit = m => {
     setForm({
       group: m.group || "",
       customerId: m.customerId || "",
@@ -45081,16 +45188,16 @@ function MasterMillModule({
       snGrapple: m.snGrapple || "",
       crane: m.crane || "",
       snCrane: m.snCrane || "",
-      year: m.year || ""
+      year: m.year || "",
+      aktif: m.aktif !== false
     });
-    setEditIdx(mills.indexOf(filtered[i]));
+    setEditIdx(mills.indexOf(m));
     setModal(true);
   };
   const deleteMillByName = millName => {
     setMills(prev => prev.filter(m => m.millName !== millName));
   };
-  const onDelete = async i => {
-    const m = filtered[i];
+  const onDelete = async m => {
     await gatedDelete({
       isOwnerLike,
       store,
@@ -45180,7 +45287,7 @@ function MasterMillModule({
     onChange: setSearch
   }), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
     headers: ["Group", "Client", "Mill Name", "Lokasi", "Provinsi", "Grapple", "SN Grapple", "Crane", "SN Crane", "Year", ""],
-    rows: filtered.map((m, i) => [m.group || "-", m.customerId ? millClientNama(m) : /*#__PURE__*/React.createElement("span", {
+    rows: activeFiltered.map(m => [m.group || "-", m.customerId ? millClientNama(m) : /*#__PURE__*/React.createElement("span", {
       title: "Belum terhubung ke Database Client — edit untuk pilih client"
     }, millClientNama(m), " ⚠️"), m.millName, millLokasi(m) || "-", m.provinsi || "-", m.grapple || "-", m.snGrapple || "-", m.crane || "-", m.snCrane || "-", m.year || "-", canEdit && /*#__PURE__*/React.createElement("div", {
       style: {
@@ -45190,14 +45297,56 @@ function MasterMillModule({
     }, /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "ghost",
-      onClick: () => onEdit(i)
+      onClick: () => onEdit(m)
     }, "✏️"), /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
+      variant: "ghost",
+      title: "Tandai Tidak Ditangani Lagi",
+      onClick: () => toggleAktif(m)
+    }, "🚫"), /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
       variant: "danger",
-      onClick: () => onDelete(i)
+      onClick: () => onDelete(m)
     }, "×"))]),
     emptyMsg: "Belum ada data lokasi mill"
-  })), /*#__PURE__*/React.createElement(Modal, {
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowInactive(v => !v),
+    style: {
+      background: "none",
+      border: "none",
+      cursor: "pointer",
+      color: theme.muted,
+      fontSize: 13,
+      textAlign: "left",
+      padding: 0
+    }
+  }, showInactive ? "▾" : "▸", " Tidak Ditangani Lagi (", inactiveFiltered.length, ")"), showInactive && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
+    headers: ["Group", "Client", "Mill Name", "Lokasi", "Provinsi", "Grapple", "SN Grapple", "Crane", "SN Crane", "Year", ""],
+    rows: inactiveFiltered.map(m => [m.group || "-", millClientNama(m), m.millName, millLokasi(m) || "-", m.provinsi || "-", m.grapple || "-", m.snGrapple || "-", m.crane || "-", m.snCrane || "-", m.year || "-", canEdit && /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => onEdit(m)
+    }, "✏️"), /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      onClick: () => toggleAktif(m)
+    }, "↺ Aktifkan"), /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "danger",
+      onClick: () => onDelete(m)
+    }, "×"))]),
+    emptyMsg: "Tidak ada mill yang tidak ditangani"
+  }))), /*#__PURE__*/React.createElement(Modal, {
     open: modal,
     title: editIdx !== null ? "Edit Lokasi Mill" : "Tambah Lokasi Mill",
     onClose: () => setModal(false),
