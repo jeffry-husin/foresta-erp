@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-09-10.1";
+const APP_BUILD = "2026-09-10.2";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -3669,6 +3669,131 @@ function PendingHapusCard({
     variant: "ghost",
     onClick: () => reject(req)
   }, "Reject")))));
+}
+
+// Superuser-only data-correction tool (per Jef's request, Sep 2026 — SQ-122/SO-106/IR-109/PL-188
+// client mislink): lets Owner/GM/Finance Director relink an existing document to the correct
+// Database Client when the wrong one was picked at creation time, without needing a raw database
+// edit. Deliberately narrow — it only ever patches the client-identity field(s) passed in via
+// `applyFix`, never items/totals/status, and every application is logged to Audit Trail. Reusable
+// across any module whose records carry a client name/id (Quotation, Sales Order, Item
+// Requisition, ...); PO Lokal/Overseas need no equivalent since their displayed client is always
+// derived live from the linked IR's soCustomerNama (see PurchaseOrderModule), so fixing the IR
+// automatically fixes what any linked PO shows.
+function ClientFixCard({
+  module,
+  isOwnerLike,
+  customers,
+  findDoc,
+  applyFix,
+  session,
+  store
+}) {
+  const [open, setOpen] = useState(false);
+  const [nomor, setNomor] = useState("");
+  const [customerId, setCustomerId] = useState("");
+  const [result, setResult] = useState(null); // { ok: true, msg } | { ok: false, msg }
+  if (!isOwnerLike) return null;
+  const apply = () => {
+    setResult(null);
+    const trimmed = nomor.trim();
+    if (!trimmed) return setResult({
+      ok: false,
+      msg: "Isi nomor dokumen dulu"
+    });
+    const doc = findDoc(trimmed);
+    if (!doc) return setResult({
+      ok: false,
+      msg: `Tidak ditemukan dokumen dengan nomor "${trimmed}"`
+    });
+    const cust = customers.find(c => c.id === customerId);
+    if (!cust) return setResult({
+      ok: false,
+      msg: "Pilih client tujuan dulu"
+    });
+    if (!window.confirm(`Ubah client pada ${trimmed} dari "${doc.customerNama || doc.soCustomerNama || "-"}" menjadi "${cust.nama}"?`)) return;
+    const before = doc.customerNama || doc.soCustomerNama || "-";
+    applyFix(doc, cust);
+    logAudit(store, session, {
+      module,
+      docNomor: trimmed,
+      action: "Perbaiki Client",
+      detail: `${before} → ${cust.nama}`
+    });
+    setResult({
+      ok: true,
+      msg: `✓ Client pada ${trimmed} berhasil diubah menjadi "${cust.nama}"`
+    });
+    setNomor("");
+    setCustomerId("");
+  };
+  return /*#__PURE__*/React.createElement(Card, {
+    style: {
+      marginBottom: 16,
+      border: `1px dashed ${theme.muted}`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      cursor: "pointer"
+    },
+    onClick: () => setOpen(o => !o)
+  }, /*#__PURE__*/React.createElement("h4", {
+    style: {
+      margin: 0,
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "🔧 Perbaiki Client Dokumen (Superuser)"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted
+    }
+  }, open ? "▾" : "▸")), open && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 10,
+      marginTop: 12
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: 0,
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Ubah client yang terhubung ke dokumen yang sudah ada — untuk kasus salah pilih client saat dibuat. Hanya mengubah identitas client, item/total/status tidak berubah."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr auto",
+      gap: 10,
+      alignItems: "end"
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Nomor Dokumen",
+    value: nomor,
+    onChange: setNomor,
+    placeholder: "cth. SQ-122-FRT-VIII-2026-R3"
+  }), /*#__PURE__*/React.createElement(Select, {
+    label: "Client Tujuan",
+    value: customerId,
+    onChange: setCustomerId,
+    options: [{
+      value: "",
+      label: "— Pilih Client —"
+    }, ...customers.map(c => ({
+      value: c.id,
+      label: c.nama
+    }))]
+  }), /*#__PURE__*/React.createElement(Btn, {
+    onClick: apply
+  }, "Terapkan")), result && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: result.ok ? theme.green : theme.red
+    }
+  }, result.msg)));
 }
 
 // Global audit log helper — call this whenever an approval/rejection decision happens.
@@ -17032,6 +17157,18 @@ function QuotationPS({
     store,
     session,
     applyDelete: payload => setQuotationsPS(prev => prev.filter(x => x.nomor !== payload.nomor))
+  }), /*#__PURE__*/React.createElement(ClientFixCard, {
+    module: "Parts & Service Quotation",
+    isOwnerLike,
+    customers,
+    store,
+    session,
+    findDoc: nomor => quotationsPS.find(q => q.nomor === nomor),
+    applyFix: (doc, cust) => setQuotationsPS(prev => prev.map(q => q.nomor === doc.nomor ? {
+      ...q,
+      customerId: cust.id,
+      customerNama: cust.nama
+    } : q))
   }), (isAsil || isOwnerLike) && /*#__PURE__*/React.createElement(React.Fragment, null, pendingRecs.length > 0 && /*#__PURE__*/React.createElement(Btn, {
     variant: "success",
     onClick: () => setPullModal(true)
@@ -18861,6 +18998,18 @@ function SalesOrderModule({
     store,
     session,
     applyDelete: payload => cascadeDeleteSO(payload)
+  }), /*#__PURE__*/React.createElement(ClientFixCard, {
+    module: "Sales Order",
+    isOwnerLike,
+    customers,
+    store,
+    session,
+    findDoc: nomor => salesOrders.find(so => so.nomor === nomor),
+    applyFix: (doc, cust) => setSalesOrders(prev => prev.map(so => so.nomor === doc.nomor ? {
+      ...so,
+      customerId: cust.id,
+      customerNama: cust.nama
+    } : so))
   }), /*#__PURE__*/React.createElement(Input, {
     placeholder: "Cari no. quotation / no. SO / client / sales manager / sumber quotation...",
     value: search,
@@ -20572,6 +20721,19 @@ function ItemRequisitionModule({
     store,
     session,
     applyDelete: payload => setItemRequisitions(prev => prev.filter(x => x.nomor !== payload.nomor))
+  }), React.createElement(ClientFixCard, {
+    module: "Item Requisition",
+    isOwnerLike,
+    customers,
+    store,
+    session,
+    // IR has no customerId of its own — its client is a point-in-time name snapshot (soCustomerNama,
+    // copied from the linked SO when the IR was created) — see the schema note in ItemRequisitionModule.
+    findDoc: nomor => itemRequisitions.find(r => r.nomor === nomor),
+    applyFix: (doc, cust) => setItemRequisitions(prev => prev.map(r => r.nomor === doc.nomor ? {
+      ...r,
+      soCustomerNama: cust.nama
+    } : r))
   }), React.createElement(Input, {
     placeholder: "Cari no. requisition / no. SO / nama client / part number / nama part / deskripsi...",
     value: search,
