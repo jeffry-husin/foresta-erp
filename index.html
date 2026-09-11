@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-09-10.3";
+const APP_BUILD = "2026-09-11.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -14575,7 +14575,11 @@ function QuotationUnit({
   const [quPeriodeSampai, setQuPeriodeSampai] = useState("");
   const myQuotationsAllUnfiltered = isOwnerLike ? quotationsUnit : quotationsUnit.filter(q => q.salesManagerUsername === session.username);
   const myQuotationsAll = myQuotationsAllUnfiltered.filter(q => (!quPeriodeDari || (q.tanggal || "") >= quPeriodeDari) && (!quPeriodeSampai || (q.tanggal || "") <= quPeriodeSampai));
-  const myQuotations = (quSearch.trim() ? myQuotationsAll.filter(q => [q.nomor, q.customerNama, q.salesManagerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(quSearch.trim().toLowerCase()))) : myQuotationsAll).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  const myQuotations = (quSearch.trim() ? myQuotationsAll.filter(q => {
+    const needle = quSearch.trim().toLowerCase();
+    if ([q.nomor, q.customerNama, q.salesManagerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(needle))) return true;
+    return (q.items || []).some(it => [it.unitCode, it.unitName].filter(Boolean).some(x => String(x).toLowerCase().includes(needle)));
+  }) : myQuotationsAll).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const newNomor = baseNomor => {
     if (baseNomor) {
       const existingRevisions = quotationsUnit.filter(q => q.revisiDari === baseNomor || q.nomor === baseNomor);
@@ -15412,7 +15416,7 @@ function QuotationUnit({
     variant: "warning",
     onClick: () => fixDuplicateNomorUQ(q)
   }, "🔧 Beri Nomor Baru")))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
-    placeholder: "Cari no. quotation / client / sales manager...",
+    placeholder: "Cari no. quotation / client / sales manager / nama unit / kode unit...",
     value: quSearch,
     onChange: setQuSearch,
     style: {
@@ -16299,7 +16303,11 @@ function QuotationPS({
   const [qpsPeriodeDari, setQpsPeriodeDari] = useState("");
   const [qpsPeriodeSampai, setQpsPeriodeSampai] = useState("");
   const quotationsPSByPeriod = quotationsPS.filter(q => (!qpsPeriodeDari || (q.tanggal || "") >= qpsPeriodeDari) && (!qpsPeriodeSampai || (q.tanggal || "") <= qpsPeriodeSampai));
-  const quotationsPSFiltered = (qpsSearch.trim() ? quotationsPSByPeriod.filter(q => [q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(qpsSearch.trim().toLowerCase()))) : quotationsPSByPeriod).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  const quotationsPSFiltered = (qpsSearch.trim() ? quotationsPSByPeriod.filter(q => {
+    const needle = qpsSearch.trim().toLowerCase();
+    if ([q.nomor, q.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(needle))) return true;
+    return (q.items || []).some(it => [it.partNumber, it.partName].filter(Boolean).some(x => String(x).toLowerCase().includes(needle)));
+  }) : quotationsPSByPeriod).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const [modal, setModal] = useState(false);
   const [revisionOf, setRevisionOf] = useState(null);
   const [editingQ, setEditingQ] = useState(null); // quotation being edited in-place (same nomor, no new revision)
@@ -17350,7 +17358,7 @@ function QuotationPS({
     variant: "warning",
     onClick: () => fixSOSource(so, soFixInput[so.nomor])
   }, "Terapkan"))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
-    placeholder: "Cari no. quotation / client...",
+    placeholder: "Cari no. quotation / client / nama part / part number...",
     value: qpsSearch,
     onChange: setQpsSearch,
     style: {
