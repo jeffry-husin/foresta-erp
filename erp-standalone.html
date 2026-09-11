@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-09-10.2";
+const APP_BUILD = "2026-09-10.3";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -15251,7 +15251,7 @@ function QuotationUnit({
       gap: 10
     }
   }, /*#__PURE__*/React.createElement(ExportExcelBtn, {
-    onClick: () => exportToExcel(myQuotations.map(q => ({
+    onClick: () => exportToExcel([...onGoingQFiltered, ...successQFiltered, ...closedQFiltered].map(q => ({
       nomor: q.nomor,
       revisiDari: q.revisiDari || "-",
       tanggal: q.tanggal,
@@ -17140,7 +17140,7 @@ function QuotationPS({
       flexWrap: "wrap"
     }
   }, /*#__PURE__*/React.createElement(ExportExcelBtn, {
-    onClick: () => exportToExcel(quotationsPS.map(q => ({
+    onClick: () => exportToExcel([...qpsOnGoingFiltered, ...qpsSuccessFiltered, ...qpsClosedFiltered].map(q => ({
       nomor: q.nomor,
       revisiDari: q.revisiDari || "-",
       tanggal: q.tanggal,
@@ -41264,7 +41264,7 @@ function JurnalModule({
     setCoa
   } = store;
   const SELISIH_KURS_COA_KODE = "OPS-013";
-  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
+  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director" || session.role === "finance"; // Jurnal-local: Accounting 1 (finance) gets full access here per Jef's request 2026-09-10
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState(null);
   const [form, setForm] = useState({
