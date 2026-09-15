@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-09-11.1";
+const APP_BUILD = "2026-09-15.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -14555,6 +14555,11 @@ function QuotationUnit({
     percent: "",
     note: ""
   });
+  // Term of Payment rows can be entered either as a % of the quotation total (original behavior)
+  // or as a flat Rupiah value that gets converted to the equivalent % on Add — the underlying data
+  // model stays 100%-based (topPercentSum validation, buildQuotationAutoNotes' DP note, print,
+  // etc. all keep reading `t.percent` unchanged), this only changes how Sales enters the number.
+  const [topInputMode, setTopInputMode] = useState("persen");
   const [salesDiscount, setSalesDiscount] = useState({
     aktif: false,
     nominal: "",
@@ -14733,12 +14738,18 @@ function QuotationUnit({
     items: f.items.filter((_, j) => j !== i)
   }));
   const addTop = () => {
-    if (!topForm.label || !topForm.percent) return alert("Isi termin dan persentase");
+    if (!topForm.label || !topForm.percent) return alert(topInputMode === "rp" ? "Isi termin dan nilai (Rp)" : "Isi termin dan persentase");
+    const rawValue = parseFloat(topForm.percent) || 0;
+    let pct = rawValue;
+    if (topInputMode === "rp") {
+      if (!(total > 0)) return alert("Tidak bisa menghitung % dari nilai Rp karena total quotation masih 0. Tambahkan item dulu.");
+      pct = rawValue / total * 100;
+    }
     setForm(f => ({
       ...f,
       termOfPayment: [...(f.termOfPayment || []), {
         ...topForm,
-        percent: parseFloat(topForm.percent) || 0
+        percent: pct
       }]
     }));
     setTopForm({
@@ -15955,7 +15966,7 @@ function QuotationUnit({
   }, "(total ", topPercentSum, "%)")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
-      gridTemplateColumns: "1fr 1fr 2fr auto",
+      gridTemplateColumns: "1fr 0.8fr 1fr 2fr auto",
       gap: 10,
       marginBottom: 10
     }
@@ -15969,6 +15980,16 @@ function QuotationUnit({
       value: l,
       label: l
     }))
+  }), /*#__PURE__*/React.createElement(Select, {
+    value: topInputMode,
+    onChange: v => setTopInputMode(v),
+    options: [{
+      value: "persen",
+      label: "Persen (%)"
+    }, {
+      value: "rp",
+      label: "Nilai (Rp)"
+    }]
   }), /*#__PURE__*/React.createElement(Input, {
     value: topForm.percent,
     onChange: v => setTopForm({
@@ -15976,7 +15997,7 @@ function QuotationUnit({
       percent: v
     }),
     type: "number",
-    placeholder: "%"
+    placeholder: topInputMode === "rp" ? "Rp" : "%"
   }), /*#__PURE__*/React.createElement(Input, {
     value: topForm.note,
     onChange: v => setTopForm({
@@ -15993,7 +16014,7 @@ function QuotationUnit({
       fontSize: 12,
       color: theme.accentLight
     }
-  }, "≈ ", fmt(total * (parseFloat(topForm.percent) || 0) / 100), " dari total quotation"), (form.termOfPayment || []).length > 0 && /*#__PURE__*/React.createElement(Table, {
+  }, topInputMode === "rp" ? /*#__PURE__*/React.createElement(React.Fragment, null, "≈ ", (total > 0 ? (parseFloat(topForm.percent) || 0) / total * 100 : 0).toFixed(2), "% dari total quotation (", fmt(total), ")") : /*#__PURE__*/React.createElement(React.Fragment, null, "≈ ", fmt(total * (parseFloat(topForm.percent) || 0) / 100), " dari total quotation")), (form.termOfPayment || []).length > 0 && /*#__PURE__*/React.createElement(Table, {
     headers: ["Termin", "%", "Nominal", "Catatan", ""],
     rows: form.termOfPayment.map((t, i) => [t.label, t.percent + "%", fmt(total * (parseFloat(t.percent) || 0) / 100), t.note || "-", /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
