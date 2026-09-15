@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-09-15.1";
+const APP_BUILD = "2026-09-15.2";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -14742,8 +14742,11 @@ function QuotationUnit({
     const rawValue = parseFloat(topForm.percent) || 0;
     let pct = rawValue;
     if (topInputMode === "rp") {
-      if (!(total > 0)) return alert("Tidak bisa menghitung % dari nilai Rp karena total quotation masih 0. Tambahkan item dulu.");
-      pct = rawValue / total * 100;
+      // Per Jef 2026-09-15: Term of Payment % is always a share of the pre-tax base (nilai pokok —
+      // Subtotal minus client-visible Discount), NOT the PPN-inclusive `total`. Matches the
+      // convention InvoiceModule's ad-hoc DP flow already uses (see preTaxBase there).
+      if (!(subtotalAfterClientDiskon > 0)) return alert("Tidak bisa menghitung % dari nilai Rp karena nilai pokok quotation masih 0. Tambahkan item dulu.");
+      pct = rawValue / subtotalAfterClientDiskon * 100;
     }
     setForm(f => ({
       ...f,
@@ -14778,13 +14781,11 @@ function QuotationUnit({
   const save = (asDraft = false) => {
     if (!form.customerId) return alert("Pilih client");
     if (form.items.length === 0) return alert("Tambahkan minimal 1 unit/part");
-    // Term of Payment either stays completely empty (legacy no-termin mode) or must add up to
-    // exactly 100% — a "nanggung" list (e.g. only DP1 30% with no Final Payment) used to save fine
-    // and silently leave the remaining balance impossible to invoice later. Drafts are exempt since
-    // they're still being worked on.
-    if (!asDraft && (form.termOfPayment || []).length > 0 && topPercentSum !== 100) {
-      return alert(`Total persentase Term of Payment harus 100% (saat ini ${topPercentSum}%). Tambahkan/perbaiki termin sebelum menyimpan.`);
-    }
+    // Per Jef 2026-09-15: Term of Payment total NOT having to be exactly 100% is now allowed —
+    // this used to hard-block saving, but a "nanggung" list (e.g. only DP1 30% with no Final
+    // Payment yet) is a legitimate in-progress state, not an error. The colored "(total X%)" badge
+    // above the termin table (green at 100%, yellow otherwise) stays as the non-blocking visual
+    // warning so Sales/GM can still see it's incomplete — it just no longer prevents saving.
     const cust = customers.find(c => c.id === form.customerId);
     if (!isOwnerLike && cust && !customerAccessibleBy(cust, session)) {
       return alert("Anda belum memiliki akses ke client ini. Ajukan Request Akses di Database Client terlebih dahulu.");
@@ -16014,9 +16015,9 @@ function QuotationUnit({
       fontSize: 12,
       color: theme.accentLight
     }
-  }, topInputMode === "rp" ? /*#__PURE__*/React.createElement(React.Fragment, null, "≈ ", (total > 0 ? (parseFloat(topForm.percent) || 0) / total * 100 : 0).toFixed(2), "% dari total quotation (", fmt(total), ")") : /*#__PURE__*/React.createElement(React.Fragment, null, "≈ ", fmt(total * (parseFloat(topForm.percent) || 0) / 100), " dari total quotation")), (form.termOfPayment || []).length > 0 && /*#__PURE__*/React.createElement(Table, {
-    headers: ["Termin", "%", "Nominal", "Catatan", ""],
-    rows: form.termOfPayment.map((t, i) => [t.label, t.percent + "%", fmt(total * (parseFloat(t.percent) || 0) / 100), t.note || "-", /*#__PURE__*/React.createElement(Btn, {
+  }, topInputMode === "rp" ? /*#__PURE__*/React.createElement(React.Fragment, null, "≈ ", (subtotalAfterClientDiskon > 0 ? (parseFloat(topForm.percent) || 0) / subtotalAfterClientDiskon * 100 : 0).toFixed(2), "% dari nilai pokok quotation (", fmt(subtotalAfterClientDiskon), ", belum termasuk PPN)") : /*#__PURE__*/React.createElement(React.Fragment, null, "≈ ", fmt(subtotalAfterClientDiskon * (parseFloat(topForm.percent) || 0) / 100), " dari nilai pokok quotation (belum termasuk PPN)")), (form.termOfPayment || []).length > 0 && /*#__PURE__*/React.createElement(Table, {
+    headers: ["Termin", "%", "Nominal (Pokok)", "Catatan", ""],
+    rows: form.termOfPayment.map((t, i) => [t.label, t.percent + "%", fmt(subtotalAfterClientDiskon * (parseFloat(t.percent) || 0) / 100), t.note || "-", /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "danger",
       onClick: () => removeTop(i)
