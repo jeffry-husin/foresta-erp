@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-09-11.1";
+const APP_BUILD = "2026-09-17.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -279,6 +279,13 @@ const fmt = n => new Intl.NumberFormat("id-ID", {
 const fmtNum = n => new Intl.NumberFormat("id-ID", {
   maximumFractionDigits: 0
 }).format(n || 0);
+// Shared label for a Term of Payment entry ({label, percent, note, inputMode, nominalValue}) — used
+// by Quotation/SO/Invoice wherever a termin needs to be shown short-form (dropdown option, inline
+// summary text, badges). Per Jef 2026-09-15: a termin originally entered as a flat Rupiah value
+// (inputMode "rp") must always be shown/labeled as that Rp figure, never re-expressed as "X%" —
+// showing % there was making it look (and, before this fix, actually behave) like a percent-based
+// termin even when Jef explicitly typed a fixed nominal amount in the Quotation.
+const topShortLabel = t => t && t.inputMode === "rp" && t.nominalValue != null ? fmt(t.nominalValue) : `${(t && t.percent) || 0}%`;
 // Currency-aware number formatting: IDR stays whole numbers, any other currency (foreign PO/PS
 // amounts) gets 2 decimal places (cents) so overseas prices aren't silently rounded off.
 const fmtCur = (n, currency) => new Intl.NumberFormat("id-ID", {
@@ -14555,6 +14562,20 @@ function QuotationUnit({
     percent: "",
     note: ""
   });
+  // Term of Payment rows can be entered either as a % of the quotation total (original behavior)
+  // or as a flat Rupiah value that gets converted to the equivalent % on Add — the underlying data
+  // model stays 100%-based (topPercentSum validation, buildQuotationAutoNotes' DP note, print,
+  // etc. all keep reading `t.percent` unchanged), this only changes how Sales enters the number.
+  const [topInputMode, setTopInputMode] = useState("persen");
+  // Per Jef 2026-09-17: Sales can enter each item's price either excl-PPN (system adds PPN on top,
+  // original/default behavior) or incl-PPN (system backs out the excl-PPN price for storage). This
+  // is purely a data-ENTRY convenience for the whole document — every item's `harga`/`subtotal` is
+  // always stored excl-PPN exactly as before, so Diskon/Subtotal/Total, SO creation, and Invoice all
+  // keep working completely unchanged; they never need to know which mode Sales typed the price in.
+  const [priceInputMode, setPriceInputMode] = useState("excl");
+  const pajakPctForEntry = () => parseFloat(form.pajak) || 0;
+  const toExclFromEntry = raw => priceInputMode === "incl" ? raw / (1 + pajakPctForEntry() / 100) : raw;
+  const toEntryFromExcl = excl => priceInputMode === "incl" ? excl * (1 + pajakPctForEntry() / 100) : excl;
   const [salesDiscount, setSalesDiscount] = useState({
     aktif: false,
     nominal: "",
@@ -14683,7 +14704,10 @@ function QuotationUnit({
     const unit = units.find(u => u.unitCode === itemForm.unitCode);
     if (!unit) return alert("Pilih unit");
     const qty = parseInt(itemForm.qty) || 1;
-    const harga = parseFloat(itemForm.harga) || unit.hargaJual;
+    const rawHarga = parseFloat(itemForm.harga);
+    // Only convert a value Sales actually typed — an empty/zero field still falls back to the
+    // Master Unit's own hargaJual, which is already excl-PPN and needs no conversion.
+    const harga = rawHarga ? toExclFromEntry(rawHarga) : unit.hargaJual;
     setForm(f => ({
       ...f,
       items: [...f.items, {
@@ -14706,7 +14730,8 @@ function QuotationUnit({
     const part = parts.find(p => p.partNumber === partItemForm.partNumber);
     if (!part) return alert("Pilih part");
     const qty = parseInt(partItemForm.qty) || 1;
-    const harga = parseFloat(partItemForm.harga) || part.hargaJual || part.hargaBeli || 0;
+    const rawPartHarga = parseFloat(partItemForm.harga);
+    const harga = rawPartHarga ? toExclFromEntry(rawPartHarga) : part.hargaJual || part.hargaBeli || 0;
     setForm(f => ({
       ...f,
       items: [...f.items, {
@@ -14733,12 +14758,31 @@ function QuotationUnit({
     items: f.items.filter((_, j) => j !== i)
   }));
   const addTop = () => {
-    if (!topForm.label || !topForm.percent) return alert("Isi termin dan persentase");
+    if (!topForm.label || !topForm.percent) return alert(topInputMode === "rp" ? "Isi termin dan nilai (Rp)" : "Isi termin dan persentase");
+    const rawValue = parseFloat(topForm.percent) || 0;
+    let pct = rawValue;
+    if (topInputMode === "rp") {
+      // Per Jef 2026-09-15: Term of Payment % is always a share of the pre-tax base (nilai pokok —
+      // Subtotal minus client-visible Discount), NOT the PPN-inclusive `total`. Matches the
+      // convention InvoiceModule's ad-hoc DP flow already uses (see preTaxBase there).
+      if (!(subtotalAfterClientDiskon > 0)) return alert("Tidak bisa menghitung % dari nilai Rp karena nilai pokok quotation masih 0. Tambahkan item dulu.");
+      pct = rawValue / subtotalAfterClientDiskon * 100;
+    }
     setForm(f => ({
       ...f,
       termOfPayment: [...(f.termOfPayment || []), {
         ...topForm,
-        percent: parseFloat(topForm.percent) || 0
+        percent: pct,
+        // Per Jef 2026-09-15: keep the exact Rupiah figure he typed (when using "Nilai (Rp)" mode)
+        // alongside the derived percent, so SO/Invoice creation downstream can bill this EXACT
+        // amount instead of re-deriving it from `percent` against whatever subtotal happens to be
+        // in scope there — that recompute silently drifted from the intended fixed value whenever
+        // the SO's item set/discount ended up even slightly different from the Quotation's (partial
+        // item carry-over, a renegotiated SO-level discount, etc.). inputMode also lets every
+        // downstream display (SO pick-items summary, Invoice termin dropdown, Invoice detail/print)
+        // show "Rp X" instead of always showing "X%" regardless of how it was originally entered.
+        inputMode: topInputMode,
+        nominalValue: topInputMode === "rp" ? rawValue : null
       }]
     }));
     setTopForm({
@@ -14767,13 +14811,11 @@ function QuotationUnit({
   const save = (asDraft = false) => {
     if (!form.customerId) return alert("Pilih client");
     if (form.items.length === 0) return alert("Tambahkan minimal 1 unit/part");
-    // Term of Payment either stays completely empty (legacy no-termin mode) or must add up to
-    // exactly 100% — a "nanggung" list (e.g. only DP1 30% with no Final Payment) used to save fine
-    // and silently leave the remaining balance impossible to invoice later. Drafts are exempt since
-    // they're still being worked on.
-    if (!asDraft && (form.termOfPayment || []).length > 0 && topPercentSum !== 100) {
-      return alert(`Total persentase Term of Payment harus 100% (saat ini ${topPercentSum}%). Tambahkan/perbaiki termin sebelum menyimpan.`);
-    }
+    // Per Jef 2026-09-15: Term of Payment total NOT having to be exactly 100% is now allowed —
+    // this used to hard-block saving, but a "nanggung" list (e.g. only DP1 30% with no Final
+    // Payment yet) is a legitimate in-progress state, not an error. The colored "(total X%)" badge
+    // above the termin table (green at 100%, yellow otherwise) stays as the non-blocking visual
+    // warning so Sales/GM can still see it's incomplete — it just no longer prevents saving.
     const cust = customers.find(c => c.id === form.customerId);
     if (!isOwnerLike && cust && !customerAccessibleBy(cust, session)) {
       return alert("Anda belum memiliki akses ke client ini. Ajukan Request Akses di Database Client terlebih dahulu.");
@@ -15757,6 +15799,28 @@ function QuotationUnit({
     }
   }, "UNIT YANG DITAWARKAN (dari Master Unit)"), /*#__PURE__*/React.createElement("div", {
     style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Mode input harga (berlaku untuk semua item di quotation ini):"), /*#__PURE__*/React.createElement(Select, {
+    value: priceInputMode,
+    onChange: v => setPriceInputMode(v),
+    options: [{
+      value: "excl",
+      label: "Harga Excl PPN (sistem tambah PPN)"
+    }, {
+      value: "incl",
+      label: "Harga Incl PPN (sistem kurangi PPN)"
+    }]
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
       display: "grid",
       gridTemplateColumns: "2fr 1fr 1fr auto",
       gap: 10,
@@ -15769,7 +15833,7 @@ function QuotationUnit({
       setItemForm({
         ...itemForm,
         unitCode: v,
-        harga: u?.hargaJual || ""
+        harga: u ? toEntryFromExcl(u.hargaJual) || "" : ""
       });
     },
     options: units.map(u => ({
@@ -15792,11 +15856,17 @@ function QuotationUnit({
       harga: v
     }),
     type: "number",
-    placeholder: "Harga"
+    placeholder: priceInputMode === "incl" ? "Harga (Incl PPN)" : "Harga (Excl PPN)"
   }), /*#__PURE__*/React.createElement(Btn, {
     onClick: addItem,
     size: "sm"
-  }, "+ Add")), /*#__PURE__*/React.createElement("p", {
+  }, "+ Add")), priceInputMode === "incl" && itemForm.harga && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "-4px 0 10px",
+      fontSize: 11,
+      color: theme.accentLight
+    }
+  }, "≈ ", fmt(toExclFromEntry(parseFloat(itemForm.harga) || 0)), " excl PPN (disimpan)"), /*#__PURE__*/React.createElement("p", {
     style: {
       margin: "6px 0 8px",
       color: theme.muted,
@@ -15814,10 +15884,11 @@ function QuotationUnit({
     value: partItemForm.partNumber,
     onChange: v => {
       const p = parts.find(x => x.partNumber === v);
+      const defExcl = p?.hargaJual || p?.hargaBeli || 0;
       setPartItemForm({
         ...partItemForm,
         partNumber: v,
-        harga: p?.hargaJual || p?.hargaBeli || ""
+        harga: defExcl ? toEntryFromExcl(defExcl) : ""
       });
     },
     options: (parts || []).map(p => ({
@@ -15840,11 +15911,17 @@ function QuotationUnit({
       harga: v
     }),
     type: "number",
-    placeholder: "Harga"
+    placeholder: priceInputMode === "incl" ? "Harga (Incl PPN)" : "Harga (Excl PPN)"
   }), /*#__PURE__*/React.createElement(Btn, {
     onClick: addPartItem,
     size: "sm"
-  }, "+ Add")), form.items.length > 0 && /*#__PURE__*/React.createElement(Table, {
+  }, "+ Add")), priceInputMode === "incl" && partItemForm.harga && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "-4px 0 10px",
+      fontSize: 11,
+      color: theme.accentLight
+    }
+  }, "≈ ", fmt(toExclFromEntry(parseFloat(partItemForm.harga) || 0)), " excl PPN (disimpan)"), form.items.length > 0 && /*#__PURE__*/React.createElement(Table, {
     headers: ["Item", "Sumber", "Qty", "Harga", "Subtotal", ""],
     rows: form.items.map((it, i) => [it.unitName, it.sumber || "Master Unit", it.qty, fmt(it.harga), fmt(it.subtotal), /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
@@ -15955,7 +16032,7 @@ function QuotationUnit({
   }, "(total ", topPercentSum, "%)")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
-      gridTemplateColumns: "1fr 1fr 2fr auto",
+      gridTemplateColumns: "1fr 0.8fr 1fr 2fr auto",
       gap: 10,
       marginBottom: 10
     }
@@ -15969,6 +16046,16 @@ function QuotationUnit({
       value: l,
       label: l
     }))
+  }), /*#__PURE__*/React.createElement(Select, {
+    value: topInputMode,
+    onChange: v => setTopInputMode(v),
+    options: [{
+      value: "persen",
+      label: "Persen (%)"
+    }, {
+      value: "rp",
+      label: "Nilai (Rp)"
+    }]
   }), /*#__PURE__*/React.createElement(Input, {
     value: topForm.percent,
     onChange: v => setTopForm({
@@ -15976,7 +16063,7 @@ function QuotationUnit({
       percent: v
     }),
     type: "number",
-    placeholder: "%"
+    placeholder: topInputMode === "rp" ? "Rp" : "%"
   }), /*#__PURE__*/React.createElement(Input, {
     value: topForm.note,
     onChange: v => setTopForm({
@@ -15993,9 +16080,9 @@ function QuotationUnit({
       fontSize: 12,
       color: theme.accentLight
     }
-  }, "≈ ", fmt(total * (parseFloat(topForm.percent) || 0) / 100), " dari total quotation"), (form.termOfPayment || []).length > 0 && /*#__PURE__*/React.createElement(Table, {
-    headers: ["Termin", "%", "Nominal", "Catatan", ""],
-    rows: form.termOfPayment.map((t, i) => [t.label, t.percent + "%", fmt(total * (parseFloat(t.percent) || 0) / 100), t.note || "-", /*#__PURE__*/React.createElement(Btn, {
+  }, topInputMode === "rp" ? /*#__PURE__*/React.createElement(React.Fragment, null, "≈ ", (subtotalAfterClientDiskon > 0 ? (parseFloat(topForm.percent) || 0) / subtotalAfterClientDiskon * 100 : 0).toFixed(2), "% dari nilai pokok quotation (", fmt(subtotalAfterClientDiskon), ", belum termasuk PPN)") : /*#__PURE__*/React.createElement(React.Fragment, null, "≈ ", fmt(subtotalAfterClientDiskon * (parseFloat(topForm.percent) || 0) / 100), " dari nilai pokok quotation (belum termasuk PPN)")), (form.termOfPayment || []).length > 0 && /*#__PURE__*/React.createElement(Table, {
+    headers: ["Termin", "%", "Nominal (Pokok)", "Catatan", ""],
+    rows: form.termOfPayment.map((t, i) => [t.label, t.inputMode === "rp" ? `Rp (≈${(parseFloat(t.percent) || 0).toFixed(2)}%)` : t.percent + "%", fmt(t.inputMode === "rp" && t.nominalValue != null ? t.nominalValue : subtotalAfterClientDiskon * (parseFloat(t.percent) || 0) / 100), t.note || "-", /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "danger",
       onClick: () => removeTop(i)
@@ -19406,7 +19493,7 @@ function SalesOrderModule({
       fontSize: 12,
       color: theme.accentLight
     }
-  }, "✓ Term of Payment sudah dikunci dari Quotation ", pickQuot.quot.nomor, " (", pickQuot.quot.termOfPayment.map(t => `${t.label} ${t.percent}%`).join(", "), ") — akan otomatis dipakai di SO ini.") : /*#__PURE__*/React.createElement("div", {
+  }, "✓ Term of Payment sudah dikunci dari Quotation ", pickQuot.quot.nomor, " (", pickQuot.quot.termOfPayment.map(t => `${t.label} ${topShortLabel(t)}`).join(", "), ") — akan otomatis dipakai di SO ini.") : /*#__PURE__*/React.createElement("div", {
     style: {
       border: `1px solid ${theme.yellow}44`,
       background: theme.yellow + "0a",
@@ -28179,10 +28266,17 @@ function InvoiceModule({
     // old invoice's possibly-corrupted stored amount. This is correct for brand-new SOs too (a
     // 30%-then-70% split still nets out to preTaxBase either way) and is immune to whatever formula
     // was in effect when the earlier invoice happened to be created.
+    // Per Jef 2026-09-15: a termin that was entered on the Quotation as a fixed Rupiah value
+    // (inputMode "rp") must bill EXACTLY that Rupiah figure at invoice time, not a percent
+    // re-derived against whatever `preTaxBase` happens to be on this particular SO. Without this,
+    // an SO built from only part of the Quotation's items (or with a renegotiated SO-level
+    // discount) would silently bill a different amount than the fixed value Jef actually typed,
+    // even though the Quotation clearly showed a Rp amount, not a percentage.
+    const amountFor = x => x.inputMode === "rp" && x.nominalValue != null ? parseFloat(x.nominalValue) || 0 : preTaxBase * (parseFloat(x.percent) || 0) / 100;
     const usedLabels = soInvoices(so.nomor).filter(i => i.terminLabel).map(i => i.terminLabel);
-    const billedSoFar = top.filter(x => usedLabels.includes(x.label)).reduce((s, x) => s + preTaxBase * (parseFloat(x.percent) || 0) / 100, 0);
+    const billedSoFar = top.filter(x => usedLabels.includes(x.label)).reduce((s, x) => s + amountFor(x), 0);
     if (isLastRemaining) return Math.max(0, preTaxBase - billedSoFar);
-    return preTaxBase * (parseFloat(t.percent) || 0) / 100;
+    return amountFor(t);
   };
   // One-click retroactive repair for termin invoices already saved with the Rp 0 bug above (e.g.
   // INV-012/INV-013 for SO-061/SO-062) — recomputes this ONE invoice's subtotal/pajak/total using
@@ -28293,6 +28387,11 @@ function InvoiceModule({
       }] : chosenItems,
       terminLabel: hasTop ? form.terminLabel : null,
       terminPercent: termin?.percent ?? null,
+      // Preserve how this termin was originally entered on the Quotation, so the invoice list/
+      // detail/print can show "Rp X" instead of always showing "(X%)" for a termin Jef typed as a
+      // fixed value (see topShortLabel/computeTerminAmount).
+      terminInputMode: termin?.inputMode || "persen",
+      terminNominalValue: termin?.inputMode === "rp" ? termin.nominalValue : null,
       isAdhocDP: useDpMode,
       soTotal: so?.total,
       subtotal: baseSubtotal,
@@ -28861,7 +28960,7 @@ function InvoiceModule({
         onClick: () => setDetailPO(inv)
       }, inv.noPoClient) : "-", inv.terminLabel ? /*#__PURE__*/React.createElement(Badge, {
         color: theme.purple
-      }, inv.terminLabel, " (", inv.terminPercent, "%)") : /*#__PURE__*/React.createElement(Badge, {
+      }, inv.terminLabel, " (", inv.terminInputMode === "rp" && inv.terminNominalValue != null ? fmt(inv.terminNominalValue) : inv.terminPercent + "%", ")") : /*#__PURE__*/React.createElement(Badge, {
         color: theme.muted
       }, "Full"), inv.customerNama, /*#__PURE__*/React.createElement(Badge, {
         color: inv.tipePembayaran === "COD" ? theme.cyan : theme.purple
@@ -29546,7 +29645,7 @@ function InvoiceModule({
       color: theme.muted,
       fontSize: 13
     }
-  }, /*#__PURE__*/React.createElement("span", null, "Termin ", detail.terminLabel, detail.terminPercent != null ? ` (${detail.terminPercent}%)` : ""), /*#__PURE__*/React.createElement("span", null, fmtMoney(detail.subtotal, detail.currency))), invoiceSoDiskonAmount(detail) > 0 && /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("span", null, "Termin ", detail.terminLabel, detail.terminInputMode === "rp" && detail.terminNominalValue != null ? ` (${fmt(detail.terminNominalValue)})` : detail.terminPercent != null ? ` (${detail.terminPercent}%)` : ""), /*#__PURE__*/React.createElement("span", null, fmtMoney(detail.subtotal, detail.currency))), invoiceSoDiskonAmount(detail) > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
@@ -29635,7 +29734,7 @@ function InvoiceModule({
       items: detail.items.map(it => [it.partNumber || it.unitCode || "-", it.unitName || it.partName, fmtNum(it.qty), fmtMoney(it.harga, detail.currency), fmtMoney(it.subtotal, detail.currency)]),
       currency: detail.currency,
       subtotal: detail.terminLabel ? invoiceItemsSubtotal(detail) : detail.subtotal,
-      extraTotalRows: detail.terminLabel ? [[`Termin ${detail.terminLabel}${detail.terminPercent != null ? ` (${detail.terminPercent}%)` : ""}`, detail.subtotal]] : [],
+      extraTotalRows: detail.terminLabel ? [[`Termin ${detail.terminLabel}${detail.terminInputMode === "rp" && detail.terminNominalValue != null ? ` (${fmt(detail.terminNominalValue)})` : detail.terminPercent != null ? ` (${detail.terminPercent}%)` : ""}`, detail.subtotal]] : [],
       diskon: detail.diskon,
       diskonLabel: detail.diskonPersen ? `Discount (${detail.diskonPersen}%)` : "Discount",
       pajak: invoiceDisplayFinancials(detail).pajak,
@@ -29709,7 +29808,7 @@ function InvoiceModule({
     }),
     options: selectedSORemainingTermin.map(t => ({
       value: t.label,
-      label: `${t.label} — ${t.percent}%${t.note ? ` (${t.note})` : ""}`
+      label: `${t.label} — ${topShortLabel(t)}${t.note ? ` (${t.note})` : ""}`
     })),
     required: true
   }), form.terminLabel && /*#__PURE__*/React.createElement("p", {
@@ -46361,11 +46460,30 @@ function ChangePasswordModal({
 // APP ROOT
 // ════════════════════════════════════════════════════════════════════════════
 async function buildAppSession(user) {
-  const {
-    data: profile,
-    error
-  } = await sb.from("profiles").select("*").eq("id", user.id).maybeSingle();
-  if (error || !profile || !profile.aktif) {
+  // Per Jef 2026-09-15: users were getting bounced back to the login screen on plain page
+  // refresh even though their session was still valid. Root cause — this function used to treat
+  // ANY failure of the profiles lookup (a transient network blip, a Supabase cold-start timeout,
+  // a momentary RLS hiccup) exactly the same as "this account doesn't exist / is deactivated" and
+  // immediately called sb.auth.signOut(), destroying a perfectly good session over what was often
+  // just a flaky query. Fix: retry the lookup a few times with backoff before giving up, and only
+  // ever sign the user out when we get a DEFINITIVE answer (query succeeded and the profile is
+  // genuinely missing or aktif===false) — a lookup that keeps erroring after retries just fails
+  // this attempt (user sees the login screen once more) without destroying the stored session, so
+  // the very next refresh can succeed normally instead of forcing a fresh login every time.
+  let profile, error;
+  const maxAttempts = 3;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const result = await sb.from("profiles").select("*").eq("id", user.id).maybeSingle();
+    profile = result.data;
+    error = result.error;
+    if (!error) break;
+    if (attempt < maxAttempts - 1) await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+  }
+  if (error) {
+    console.error("buildAppSession: gagal memuat profil setelah beberapa percobaan (kemungkinan koneksi/Supabase lambat), sesi TIDAK dihapus", error);
+    return null;
+  }
+  if (!profile || !profile.aktif) {
     await sb.auth.signOut();
     return null;
   }

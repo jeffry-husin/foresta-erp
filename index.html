@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-09-15.4";
+const APP_BUILD = "2026-09-17.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -14567,6 +14567,15 @@ function QuotationUnit({
   // model stays 100%-based (topPercentSum validation, buildQuotationAutoNotes' DP note, print,
   // etc. all keep reading `t.percent` unchanged), this only changes how Sales enters the number.
   const [topInputMode, setTopInputMode] = useState("persen");
+  // Per Jef 2026-09-17: Sales can enter each item's price either excl-PPN (system adds PPN on top,
+  // original/default behavior) or incl-PPN (system backs out the excl-PPN price for storage). This
+  // is purely a data-ENTRY convenience for the whole document — every item's `harga`/`subtotal` is
+  // always stored excl-PPN exactly as before, so Diskon/Subtotal/Total, SO creation, and Invoice all
+  // keep working completely unchanged; they never need to know which mode Sales typed the price in.
+  const [priceInputMode, setPriceInputMode] = useState("excl");
+  const pajakPctForEntry = () => parseFloat(form.pajak) || 0;
+  const toExclFromEntry = raw => priceInputMode === "incl" ? raw / (1 + pajakPctForEntry() / 100) : raw;
+  const toEntryFromExcl = excl => priceInputMode === "incl" ? excl * (1 + pajakPctForEntry() / 100) : excl;
   const [salesDiscount, setSalesDiscount] = useState({
     aktif: false,
     nominal: "",
@@ -14695,7 +14704,10 @@ function QuotationUnit({
     const unit = units.find(u => u.unitCode === itemForm.unitCode);
     if (!unit) return alert("Pilih unit");
     const qty = parseInt(itemForm.qty) || 1;
-    const harga = parseFloat(itemForm.harga) || unit.hargaJual;
+    const rawHarga = parseFloat(itemForm.harga);
+    // Only convert a value Sales actually typed — an empty/zero field still falls back to the
+    // Master Unit's own hargaJual, which is already excl-PPN and needs no conversion.
+    const harga = rawHarga ? toExclFromEntry(rawHarga) : unit.hargaJual;
     setForm(f => ({
       ...f,
       items: [...f.items, {
@@ -14718,7 +14730,8 @@ function QuotationUnit({
     const part = parts.find(p => p.partNumber === partItemForm.partNumber);
     if (!part) return alert("Pilih part");
     const qty = parseInt(partItemForm.qty) || 1;
-    const harga = parseFloat(partItemForm.harga) || part.hargaJual || part.hargaBeli || 0;
+    const rawPartHarga = parseFloat(partItemForm.harga);
+    const harga = rawPartHarga ? toExclFromEntry(rawPartHarga) : part.hargaJual || part.hargaBeli || 0;
     setForm(f => ({
       ...f,
       items: [...f.items, {
@@ -15786,6 +15799,28 @@ function QuotationUnit({
     }
   }, "UNIT YANG DITAWARKAN (dari Master Unit)"), /*#__PURE__*/React.createElement("div", {
     style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Mode input harga (berlaku untuk semua item di quotation ini):"), /*#__PURE__*/React.createElement(Select, {
+    value: priceInputMode,
+    onChange: v => setPriceInputMode(v),
+    options: [{
+      value: "excl",
+      label: "Harga Excl PPN (sistem tambah PPN)"
+    }, {
+      value: "incl",
+      label: "Harga Incl PPN (sistem kurangi PPN)"
+    }]
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
       display: "grid",
       gridTemplateColumns: "2fr 1fr 1fr auto",
       gap: 10,
@@ -15798,7 +15833,7 @@ function QuotationUnit({
       setItemForm({
         ...itemForm,
         unitCode: v,
-        harga: u?.hargaJual || ""
+        harga: u ? toEntryFromExcl(u.hargaJual) || "" : ""
       });
     },
     options: units.map(u => ({
@@ -15821,11 +15856,17 @@ function QuotationUnit({
       harga: v
     }),
     type: "number",
-    placeholder: "Harga"
+    placeholder: priceInputMode === "incl" ? "Harga (Incl PPN)" : "Harga (Excl PPN)"
   }), /*#__PURE__*/React.createElement(Btn, {
     onClick: addItem,
     size: "sm"
-  }, "+ Add")), /*#__PURE__*/React.createElement("p", {
+  }, "+ Add")), priceInputMode === "incl" && itemForm.harga && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "-4px 0 10px",
+      fontSize: 11,
+      color: theme.accentLight
+    }
+  }, "≈ ", fmt(toExclFromEntry(parseFloat(itemForm.harga) || 0)), " excl PPN (disimpan)"), /*#__PURE__*/React.createElement("p", {
     style: {
       margin: "6px 0 8px",
       color: theme.muted,
@@ -15843,10 +15884,11 @@ function QuotationUnit({
     value: partItemForm.partNumber,
     onChange: v => {
       const p = parts.find(x => x.partNumber === v);
+      const defExcl = p?.hargaJual || p?.hargaBeli || 0;
       setPartItemForm({
         ...partItemForm,
         partNumber: v,
-        harga: p?.hargaJual || p?.hargaBeli || ""
+        harga: defExcl ? toEntryFromExcl(defExcl) : ""
       });
     },
     options: (parts || []).map(p => ({
@@ -15869,11 +15911,17 @@ function QuotationUnit({
       harga: v
     }),
     type: "number",
-    placeholder: "Harga"
+    placeholder: priceInputMode === "incl" ? "Harga (Incl PPN)" : "Harga (Excl PPN)"
   }), /*#__PURE__*/React.createElement(Btn, {
     onClick: addPartItem,
     size: "sm"
-  }, "+ Add")), form.items.length > 0 && /*#__PURE__*/React.createElement(Table, {
+  }, "+ Add")), priceInputMode === "incl" && partItemForm.harga && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "-4px 0 10px",
+      fontSize: 11,
+      color: theme.accentLight
+    }
+  }, "≈ ", fmt(toExclFromEntry(parseFloat(partItemForm.harga) || 0)), " excl PPN (disimpan)"), form.items.length > 0 && /*#__PURE__*/React.createElement(Table, {
     headers: ["Item", "Sumber", "Qty", "Harga", "Subtotal", ""],
     rows: form.items.map((it, i) => [it.unitName, it.sumber || "Master Unit", it.qty, fmt(it.harga), fmt(it.subtotal), /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
