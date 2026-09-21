@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-09-17.1";
+const APP_BUILD = "2026-09-18.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -3233,7 +3233,13 @@ function useStore() {
     telepon: "021-5550-0000",
     email: "info@heavyequipment.co.id",
     npwp: "",
-    logo: ""
+    logo: "",
+    // Per Jef 2026-09-18: these used to be hardcoded straight into InvoiceModule's print call
+    // (bankInfoText) — editable here now so changing the bank account doesn't need a code change.
+    // Updated 2026-09-18 to the new Maybank account per Jef's request.
+    bankNama: "Maybank Cabang Fatmawati",
+    bankAtasNama: "PT Foresta Transtek",
+    bankNoRekening: "2741001446"
   });
   // Real login accounts (Supabase `profiles`) — shared so any module can reference the actual
   // user/role/username list (Database Client access assignment, User Management, Cuti-on-behalf,
@@ -14567,6 +14573,16 @@ function QuotationUnit({
   // model stays 100%-based (topPercentSum validation, buildQuotationAutoNotes' DP note, print,
   // etc. all keep reading `t.percent` unchanged), this only changes how Sales enters the number.
   const [topInputMode, setTopInputMode] = useState("persen");
+  // Per Jef 2026-09-17 (root-caused from UQ-024-FRT-VII-2026-R1: total termin showed ~111% instead
+  // of 100%): a termin's Rp value can be typed either Excl PPN (the pre-tax base Invoice will add a
+  // flat 11% on top of at invoice time — original/default behavior) or Incl PPN (the full amount the
+  // client actually pays for that installment). Sales had been typing each DP as its full incl-PPN
+  // installment amount while the system treated it as a pre-tax base, so Invoice would have applied
+  // PPN a second time on top of an already-too-large figure. This toggle lets Sales say which one
+  // they're typing; addTop() below converts Incl-PPN entries down to their pre-tax equivalent before
+  // storing, so `percent`/`nominalValue` (and everything downstream that reads them) stay correct
+  // and PPN is only ever applied once, by Invoice, exactly as before.
+  const [topPpnMode, setTopPpnMode] = useState("excl");
   // Per Jef 2026-09-17: Sales can enter each item's price either excl-PPN (system adds PPN on top,
   // original/default behavior) or incl-PPN (system backs out the excl-PPN price for storage). This
   // is purely a data-ENTRY convenience for the whole document — every item's `harga`/`subtotal` is
@@ -14761,12 +14777,18 @@ function QuotationUnit({
     if (!topForm.label || !topForm.percent) return alert(topInputMode === "rp" ? "Isi termin dan nilai (Rp)" : "Isi termin dan persentase");
     const rawValue = parseFloat(topForm.percent) || 0;
     let pct = rawValue;
+    let storedNominal = rawValue;
     if (topInputMode === "rp") {
       // Per Jef 2026-09-15: Term of Payment % is always a share of the pre-tax base (nilai pokok —
       // Subtotal minus client-visible Discount), NOT the PPN-inclusive `total`. Matches the
       // convention InvoiceModule's ad-hoc DP flow already uses (see preTaxBase there).
       if (!(subtotalAfterClientDiskon > 0)) return alert("Tidak bisa menghitung % dari nilai Rp karena nilai pokok quotation masih 0. Tambahkan item dulu.");
-      pct = rawValue / subtotalAfterClientDiskon * 100;
+      // Per Jef 2026-09-17: if what was typed is Incl PPN (the full amount the client pays for this
+      // installment), convert it DOWN to its pre-tax equivalent before storing — Invoice always adds
+      // a flat 11% on top of the stored nominal, so storing the incl-PPN figure as-is would double
+      // the tax. See topPpnMode declaration above for the full story (UQ-024-FRT-VII-2026-R1 bug).
+      storedNominal = topPpnMode === "incl" ? rawValue / 1.11 : rawValue;
+      pct = storedNominal / subtotalAfterClientDiskon * 100;
     }
     setForm(f => ({
       ...f,
@@ -14781,8 +14803,13 @@ function QuotationUnit({
         // item carry-over, a renegotiated SO-level discount, etc.). inputMode also lets every
         // downstream display (SO pick-items summary, Invoice termin dropdown, Invoice detail/print)
         // show "Rp X" instead of always showing "X%" regardless of how it was originally entered.
+        // nominalValue is always the PRE-TAX figure (what Invoice actually bills before its own
+        // +11% PPN) — nominalEntered/nominalPpnMode remember what Sales literally typed, purely so
+        // the UI can show "Rp Y (incl PPN)" back to them without losing that context.
         inputMode: topInputMode,
-        nominalValue: topInputMode === "rp" ? rawValue : null
+        nominalValue: topInputMode === "rp" ? storedNominal : null,
+        nominalEntered: topInputMode === "rp" ? rawValue : null,
+        nominalPpnMode: topInputMode === "rp" ? topPpnMode : null
       }]
     }));
     setTopForm({
@@ -16029,7 +16056,29 @@ function QuotationUnit({
       fontWeight: 400,
       marginLeft: 8
     }
-  }, "(total ", topPercentSum, "%)")), /*#__PURE__*/React.createElement("div", {
+  }, "(total ", topPercentSum, "%)")), topInputMode === "rp" && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Nilai Rp yang diketik:"), /*#__PURE__*/React.createElement(Select, {
+    value: topPpnMode,
+    onChange: v => setTopPpnMode(v),
+    options: [{
+      value: "excl",
+      label: "Excl PPN (nilai pokok — sistem tambah PPN)"
+    }, {
+      value: "incl",
+      label: "Incl PPN (nilai penuh termasuk PPN)"
+    }]
+  })), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
       gridTemplateColumns: "1fr 0.8fr 1fr 2fr auto",
@@ -16063,7 +16112,7 @@ function QuotationUnit({
       percent: v
     }),
     type: "number",
-    placeholder: topInputMode === "rp" ? "Rp" : "%"
+    placeholder: topInputMode === "rp" ? topPpnMode === "incl" ? "Rp (Incl PPN)" : "Rp (Excl PPN)" : "%"
   }), /*#__PURE__*/React.createElement(Input, {
     value: topForm.note,
     onChange: v => setTopForm({
@@ -16080,9 +16129,9 @@ function QuotationUnit({
       fontSize: 12,
       color: theme.accentLight
     }
-  }, topInputMode === "rp" ? /*#__PURE__*/React.createElement(React.Fragment, null, "≈ ", (subtotalAfterClientDiskon > 0 ? (parseFloat(topForm.percent) || 0) / subtotalAfterClientDiskon * 100 : 0).toFixed(2), "% dari nilai pokok quotation (", fmt(subtotalAfterClientDiskon), ", belum termasuk PPN)") : /*#__PURE__*/React.createElement(React.Fragment, null, "≈ ", fmt(subtotalAfterClientDiskon * (parseFloat(topForm.percent) || 0) / 100), " dari nilai pokok quotation (belum termasuk PPN)")), (form.termOfPayment || []).length > 0 && /*#__PURE__*/React.createElement(Table, {
+  }, topInputMode === "rp" ? /*#__PURE__*/React.createElement(React.Fragment, null, "≈ ", fmt(topPpnMode === "incl" ? (parseFloat(topForm.percent) || 0) / 1.11 : parseFloat(topForm.percent) || 0), " nilai pokok (", (subtotalAfterClientDiskon > 0 ? (topPpnMode === "incl" ? (parseFloat(topForm.percent) || 0) / 1.11 : parseFloat(topForm.percent) || 0) / subtotalAfterClientDiskon * 100 : 0).toFixed(2), "% dari nilai pokok quotation ", fmt(subtotalAfterClientDiskon), ")", topPpnMode === "incl" && ` — dari Rp ${fmt(parseFloat(topForm.percent) || 0)} termasuk PPN yang Anda ketik`) : /*#__PURE__*/React.createElement(React.Fragment, null, "≈ ", fmt(subtotalAfterClientDiskon * (parseFloat(topForm.percent) || 0) / 100), " dari nilai pokok quotation (belum termasuk PPN)")), (form.termOfPayment || []).length > 0 && /*#__PURE__*/React.createElement(Table, {
     headers: ["Termin", "%", "Nominal (Pokok)", "Catatan", ""],
-    rows: form.termOfPayment.map((t, i) => [t.label, t.inputMode === "rp" ? `Rp (≈${(parseFloat(t.percent) || 0).toFixed(2)}%)` : t.percent + "%", fmt(t.inputMode === "rp" && t.nominalValue != null ? t.nominalValue : subtotalAfterClientDiskon * (parseFloat(t.percent) || 0) / 100), t.note || "-", /*#__PURE__*/React.createElement(Btn, {
+    rows: form.termOfPayment.map((t, i) => [t.label, t.inputMode === "rp" ? `Rp (≈${(parseFloat(t.percent) || 0).toFixed(2)}%${t.nominalPpnMode === "incl" ? ", incl PPN" : ""})` : t.percent + "%", fmt(t.inputMode === "rp" && t.nominalValue != null ? t.nominalValue : subtotalAfterClientDiskon * (parseFloat(t.percent) || 0) / 100), t.note || "-", /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "danger",
       onClick: () => removeTop(i)
@@ -18505,13 +18554,37 @@ function SalesOrderModule({
     percent: "",
     note: ""
   });
+  // Per Jef 2026-09-17: an already-created SO's Term of Payment used to only support typing a plain
+  // %, which meant Sales/GM had no way to add a missing termin (e.g. a DP3 the source Quotation was
+  // later revised to include, after the SO had already been created and locked its own snapshot —
+  // see createSO's termOfPayment comment) using an exact Rp figure. This gives the SO editor the
+  // same Rp-value + Excl/Incl PPN entry Unit Quotation's ToP has (see topPpnMode there for the full
+  // story — UQ-024-FRT-VII-2026-R1 showed a termin total of ~111% because an Incl-PPN amount was
+  // stored as if it were pre-tax). editPreTaxBase mirrors InvoiceModule's soAdhocPreTaxBase exactly
+  // (Subtotal minus SO-level Discount) so a Rp entry here converts to the identical % Invoice would
+  // derive when it later bills this termin.
+  const [editTopInputMode, setEditTopInputMode] = useState("persen");
+  const [editTopPpnMode, setEditTopPpnMode] = useState("excl");
+  const editPreTaxBase = editSO ? Math.max(0, (editSO.subtotal || 0) - (editSO.diskon || 0)) : 0;
   const addEditTop = () => {
-    if (!editTopForm.label || !editTopForm.percent) return alert("Isi termin dan persentase");
+    if (!editTopForm.label || !editTopForm.percent) return alert(editTopInputMode === "rp" ? "Isi termin dan nilai (Rp)" : "Isi termin dan persentase");
+    const rawValue = parseFloat(editTopForm.percent) || 0;
+    let pct = rawValue;
+    let storedNominal = rawValue;
+    if (editTopInputMode === "rp") {
+      if (!(editPreTaxBase > 0)) return alert("Tidak bisa menghitung % dari nilai Rp karena nilai pokok SO masih 0.");
+      storedNominal = editTopPpnMode === "incl" ? rawValue / 1.11 : rawValue;
+      pct = storedNominal / editPreTaxBase * 100;
+    }
     setEditForm(f => ({
       ...f,
       termOfPayment: [...(f.termOfPayment || []), {
         ...editTopForm,
-        percent: parseFloat(editTopForm.percent) || 0
+        percent: pct,
+        inputMode: editTopInputMode,
+        nominalValue: editTopInputMode === "rp" ? storedNominal : null,
+        nominalEntered: editTopInputMode === "rp" ? rawValue : null,
+        nominalPpnMode: editTopInputMode === "rp" ? editTopPpnMode : null
       }]
     }));
     setEditTopForm({
@@ -18528,8 +18601,11 @@ function SalesOrderModule({
     if (!editSO || !editForm) return;
     if ((editForm.termOfPayment || []).length > 0) {
       const editTopSum = (editForm.termOfPayment || []).reduce((s, t) => s + (parseFloat(t.percent) || 0), 0);
-      if (editTopSum !== 100) {
-        return alert(`Total persentase Term of Payment harus 100% (saat ini ${editTopSum}%). Tambahkan/perbaiki termin sebelum menyimpan.`);
+      // Tolerance instead of exact equality: Rp-mode entries divide by editPreTaxBase and can land on
+      // a recurring decimal (e.g. 14.999999999999998) that would otherwise fail this check even
+      // though the termin list is, for all practical purposes, exactly 100%.
+      if (Math.abs(editTopSum - 100) > 0.01) {
+        return alert(`Total persentase Term of Payment harus 100% (saat ini ${editTopSum.toFixed(2)}%). Tambahkan/perbaiki termin sebelum menyimpan.`);
       }
     }
     setSalesOrders(salesOrders.map(so => so.nomor === editSO.nomor ? {
@@ -19887,21 +19963,43 @@ function SalesOrderModule({
     const s = (editForm.termOfPayment || []).reduce((a, t) => a + (parseFloat(t.percent) || 0), 0);
     return s > 0 && /*#__PURE__*/React.createElement("span", {
       style: {
-        color: s === 100 ? theme.green : theme.yellow,
+        color: Math.abs(s - 100) < 0.01 ? theme.green : theme.yellow,
         fontWeight: 400,
         marginLeft: 8
       }
-    }, "(total ", s, "%)");
+    }, "(total ", s.toFixed(2), "%)");
   })()), /*#__PURE__*/React.createElement("p", {
     style: {
       margin: "0 0 10px",
       fontSize: 11,
       color: theme.muted
     }
-  }, "Menambah/mengubah di sini mengunci Term of Payment ke SO ini — Invoice berikutnya dari SO ini akan mengikuti daftar termin terbaru (invoice yang sudah dibuat sebelumnya tidak berubah)."), /*#__PURE__*/React.createElement("div", {
+  }, "Menambah/mengubah di sini mengunci Term of Payment ke SO ini — Invoice berikutnya dari SO ini akan mengikuti daftar termin terbaru (invoice yang sudah dibuat sebelumnya tidak berubah)."), editTopInputMode === "rp" && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Nilai Rp yang diketik:"), /*#__PURE__*/React.createElement(Select, {
+    value: editTopPpnMode,
+    onChange: v => setEditTopPpnMode(v),
+    options: [{
+      value: "excl",
+      label: "Excl PPN (nilai pokok — sistem tambah PPN)"
+    }, {
+      value: "incl",
+      label: "Incl PPN (nilai penuh termasuk PPN)"
+    }]
+  })), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
-      gridTemplateColumns: "1fr 1fr 2fr auto",
+      gridTemplateColumns: "1fr 0.8fr 1fr 2fr auto",
       gap: 10,
       marginBottom: 10
     }
@@ -19915,6 +20013,16 @@ function SalesOrderModule({
       value: l,
       label: l
     }))
+  }), /*#__PURE__*/React.createElement(Select, {
+    value: editTopInputMode,
+    onChange: v => setEditTopInputMode(v),
+    options: [{
+      value: "persen",
+      label: "Persen (%)"
+    }, {
+      value: "rp",
+      label: "Nilai (Rp)"
+    }]
   }), /*#__PURE__*/React.createElement(Input, {
     value: editTopForm.percent,
     onChange: v => setEditTopForm({
@@ -19922,7 +20030,7 @@ function SalesOrderModule({
       percent: v
     }),
     type: "number",
-    placeholder: "%"
+    placeholder: editTopInputMode === "rp" ? editTopPpnMode === "incl" ? "Rp (Incl PPN)" : "Rp (Excl PPN)" : "%"
   }), /*#__PURE__*/React.createElement(Input, {
     value: editTopForm.note,
     onChange: v => setEditTopForm({
@@ -19933,9 +20041,15 @@ function SalesOrderModule({
   }), /*#__PURE__*/React.createElement(Btn, {
     onClick: addEditTop,
     size: "sm"
-  }, "+ Add")), (editForm.termOfPayment || []).length > 0 && /*#__PURE__*/React.createElement(Table, {
-    headers: ["Termin", "%", "Catatan", ""],
-    rows: editForm.termOfPayment.map((t, i) => [t.label, t.percent + "%", t.note || "-", /*#__PURE__*/React.createElement(Btn, {
+  }, "+ Add")), editTopInputMode === "rp" && editTopForm.percent && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 10px",
+      fontSize: 12,
+      color: theme.accentLight
+    }
+  }, "≈ ", fmt(editTopPpnMode === "incl" ? (parseFloat(editTopForm.percent) || 0) / 1.11 : parseFloat(editTopForm.percent) || 0), " nilai pokok (", (editPreTaxBase > 0 ? (editTopPpnMode === "incl" ? (parseFloat(editTopForm.percent) || 0) / 1.11 : parseFloat(editTopForm.percent) || 0) / editPreTaxBase * 100 : 0).toFixed(2), "% dari nilai pokok SO ", fmt(editPreTaxBase), ")", editTopPpnMode === "incl" && ` — dari Rp ${fmt(parseFloat(editTopForm.percent) || 0)} termasuk PPN yang Anda ketik`), (editForm.termOfPayment || []).length > 0 && /*#__PURE__*/React.createElement(Table, {
+    headers: ["Termin", "%", "Nominal (Pokok)", "Catatan", ""],
+    rows: editForm.termOfPayment.map((t, i) => [t.label, t.inputMode === "rp" ? `Rp (≈${(parseFloat(t.percent) || 0).toFixed(2)}%${t.nominalPpnMode === "incl" ? ", incl PPN" : ""})` : t.percent + "%", fmt(t.inputMode === "rp" && t.nominalValue != null ? t.nominalValue : editPreTaxBase * (parseFloat(t.percent) || 0) / 100), t.note || "-", /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "danger",
       onClick: () => removeEditTop(i)
@@ -29744,7 +29858,10 @@ function InvoiceModule({
       catatan: detail.catatan,
       extraInfoRows: [["No. Purchase Order (dari Client)", detail.noPoClient || "-"], ["No. Sales Order", detail.soNomor || "-"], ...(invoiceSoDiskonAmount(detail) > 0 ? [["Diskon dari SO (sudah termasuk di harga item)", fmtMoney(invoiceSoDiskonAmount(detail), detail.currency)]] : []), ["Term of Payment", detail.tipePembayaran], ...(detail.tipePembayaran === "TEMPO" ? [...(detail.jumlahHariTempo ? [["Jumlah Hari", `${detail.jumlahHariTempo} hari`]] : []), ["Jatuh Tempo", detail.tanggalJatuhTempo]] : [])],
       terbilangText: detail.currency && detail.currency !== "IDR" ? "" : terbilang(detail.total),
-      bankInfoText: "BCA KCP Sunter Bisma<br/>A/N PT. FORESTA TRANSTEK<br/>A/C 5820822678",
+      // Per Jef 2026-09-18: was hardcoded here — now reads from Setting Perusahaan (erp_company_settings)
+      // so the bank account can be updated without a code change. Falls back to the current Maybank
+      // account if companySettings hasn't been saved with these fields yet (pre-existing installs).
+      bankInfoText: `${store.companySettings?.bankNama || "Maybank Cabang Fatmawati"}<br/>A/N ${store.companySettings?.bankAtasNama || "PT Foresta Transtek"}<br/>A/C ${store.companySettings?.bankNoRekening || "2741001446"}`,
       hideCreatedBy: true,
       disetujuiAlign: "left",
       showMateraiSpace: true,
@@ -45081,8 +45198,17 @@ function CompanySettingsModule({
   // after save()); re-sync the form whenever the underlying saved value changes so edits are
   // never made against a stale placeholder. Safe because this only changes on load/save, not
   // while the user is actively typing.
+  // Per Jef 2026-09-18: the live saved record predates the bank fields (bankNama/bankAtasNama/
+  // bankNoRekening), so it simply won't have those keys yet — spreading defaults FIRST means the
+  // form shows the current correct bank info instead of blank inputs, and clicking Simpan without
+  // touching them won't accidentally persist an empty value over the real account.
   useEffect(() => {
-    setForm(companySettings);
+    setForm({
+      bankNama: "Maybank Cabang Fatmawati",
+      bankAtasNama: "PT Foresta Transtek",
+      bankNoRekening: "2741001446",
+      ...companySettings
+    });
   }, [companySettings]);
   const handleLogoUpload = e => {
     const file = e.target.files?.[0];
@@ -45261,7 +45387,54 @@ function CompanySettingsModule({
       ...form,
       npwp: v
     })
-  }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      borderTop: `1px solid ${theme.border}`,
+      paddingTop: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 10px",
+      color: theme.muted,
+      fontSize: 13,
+      fontWeight: 600
+    }
+  }, "REKENING BANK (tampil di print Invoice)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Nama Bank & Cabang",
+    value: form.bankNama || "",
+    onChange: v => setForm({
+      ...form,
+      bankNama: v
+    }),
+    placeholder: "mis: BCA KCP Sunter Bisma"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Atas Nama (A/N)",
+    value: form.bankAtasNama || "",
+    onChange: v => setForm({
+      ...form,
+      bankAtasNama: v
+    }),
+    placeholder: "mis: PT. FORESTA TRANSTEK"
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "No. Rekening (A/C)",
+    value: form.bankNoRekening || "",
+    onChange: v => setForm({
+      ...form,
+      bankNoRekening: v
+    })
+  })))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
     style: {
       fontSize: 13,
       color: theme.muted,
