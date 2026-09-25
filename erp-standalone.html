@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-09-18.1";
+const APP_BUILD = "2026-09-25.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -28364,7 +28364,21 @@ function InvoiceModule({
     const t = top.find(x => x.label === label);
     const preTaxBase = soAdhocPreTaxBase(so);
     if (!t) return preTaxBase;
-    const isLastRemaining = remainingTermin(so).filter(x => x.label !== label).length === 0;
+    // BUG FIX (2026-09-25, reported by Jef: INV-015 Daya Semesta — invoicing a termin explicitly
+    // labeled "DP 50%" billed 100% of the SO instead of 50%). Root cause: "the last unbilled termin
+    // mops up whatever's left of preTaxBase" (below) was written assuming the SO's Term of Payment
+    // list always sums to a complete 100% plan — but since build 2026-09-15.2 an INCOMPLETE ToP
+    // (e.g. only "DP 50%" entered so far, "Final Payment 50%" not added yet) is explicitly allowed
+    // to be saved (soft warning, no longer a hard block). When only one termin exists at all,
+    // filtering it out of remainingTermin() trivially leaves zero items, so isLastRemaining came out
+    // true even though the plan was only half-defined — billing the ENTIRE preTaxBase for a termin
+    // that was only ever meant to be half of it. Fix: only ever treat a termin as "bills whatever's
+    // left" (the safe behavior for absorbing rounding gaps on a genuinely complete plan) when the
+    // SO's full termOfPayment list actually sums to ~100% — otherwise always bill exactly that
+    // termin's own declared share, never more.
+    const topSum = top.reduce((s, x) => s + (parseFloat(x.percent) || 0), 0);
+    const isCompletePlan = Math.abs(topSum - 100) < 0.5;
+    const isLastRemaining = isCompletePlan && remainingTermin(so).filter(x => x.label !== label).length === 0;
     // BUG FIX (2026-09-08, reported by Jef: SO-061/SO-062 Pelunasan invoices INV-012/INV-013 showed
     // Rp 0 as their total even though the prior DP1 30% invoices — INV-004/INV-005 — were correctly
     // paid). Root cause: "billed so far" used to be read from each earlier termin invoice's own
@@ -28392,10 +28406,12 @@ function InvoiceModule({
     if (isLastRemaining) return Math.max(0, preTaxBase - billedSoFar);
     return amountFor(t);
   };
-  // One-click retroactive repair for termin invoices already saved with the Rp 0 bug above (e.g.
-  // INV-012/INV-013 for SO-061/SO-062) — recomputes this ONE invoice's subtotal/pajak/total using
-  // the now-fixed computeTerminAmount, exactly as if it were being created fresh today, and
-  // overwrites only that invoice's financial fields. Never touches items/terminLabel/other invoices.
+  // One-click retroactive repair for termin invoices already saved with a wrong nominal due to bugs
+  // in computeTerminAmount (e.g. INV-012/INV-013 for SO-061/SO-062 — Rp 0 bug fixed 2026-09-08; or
+  // INV-015 for Daya Semesta — "DP 50%" billed as 100% due to an incomplete Term of Payment plan,
+  // fixed 2026-09-25) — recomputes this ONE invoice's subtotal/pajak/total using the now-fixed
+  // computeTerminAmount, exactly as if it were being created fresh today, and overwrites only that
+  // invoice's financial fields. Never touches items/terminLabel/other invoices.
   const fixStuckTerminInvoice = async inv => {
     const so = salesOrders.find(s => s.nomor === inv.soNomor);
     if (!so) return alert("SO sumber tidak ditemukan — tidak bisa hitung ulang.");
@@ -28414,8 +28430,19 @@ function InvoiceModule({
       module: "Invoice",
       docNomor: inv.nomor,
       action: "Perbaiki Nominal Termin",
-      detail: `Total lama Rp ${fmt(inv.total || 0)} -> Rp ${fmt(recomputedTotal)} (bug perhitungan Pelunasan Rp 0, diperbaiki 2026-09-08)`
+      detail: `Total lama Rp ${fmt(inv.total || 0)} -> Rp ${fmt(recomputedTotal)} (nominal termin salah, diperbaiki via Hitung Ulang)`
     });
+  };
+  // Detects whether a termin invoice's stored subtotal no longer matches what computeTerminAmount
+  // would produce today (covers both the old Rp 0 bug and the newer wrong-nonzero-% bug, e.g.
+  // INV-015 which showed 100% instead of the declared DP 50%). Used to decide whether to surface
+  // the "🔧 Hitung Ulang" self-service repair button on a given invoice row.
+  const terminAmountMismatch = inv => {
+    if (!inv?.terminLabel) return false;
+    const so = salesOrders.find(s => s.nomor === inv.soNomor);
+    if (!so) return false;
+    const expected = computeTerminAmount(so, inv.terminLabel);
+    return Math.abs((inv.subtotal || 0) - expected) > 1;
   };
   // Invoice numbering now follows the unified app-wide format: INV-000-FRT-ROMAN-YEAR.
   const newNomor = (arr = invoices) => genDocNumber(arr, "INV");
@@ -28485,8 +28512,13 @@ function InvoiceModule({
     const terminItems = hasTop ? (so.items || []).map(it => ({
       ...it
     })) : [];
+    // Per Jef 2026-09-25: Invoice tidak lagi butuh approval GM — auto-approved begitu dibuat.
+    // Karena lkAutoPost (pengakuan pendapatan ke General Ledger) sebelumnya HANYA dijalankan saat
+    // gmApprove() diklik, invoice baru sekarang harus langsung menjalankan posting GL yang sama di
+    // sini juga, supaya pendapatan tetap tercatat meskipun tahap approval manual dilewati.
+    const nomor = newNomor();
     setInvoices(prev => [...prev, {
-      nomor: newNomor(prev),
+      nomor,
       tanggal: today(),
       soNomor: form.soNomor,
       noPoClient: form.noPoClient,
@@ -28521,8 +28553,43 @@ function InvoiceModule({
       createdBy: session.nama,
       terbayar: 0,
       statusBayar: "Belum Lunas",
-      statusApproval: "Menunggu Approval GM"
+      statusApproval: "Disetujui GM"
     }]);
+    // Auto-post revenue recognition immediately (see comment above) — mirrors exactly what
+    // gmApprove() used to do at approval time: Dr Piutang Usaha (total) / Cr Pendapatan Unit atau
+    // Jasa (pra-pajak) / Cr PPN Keluaran (pajak). No-ops silently if Pemetaan Akun belum di-setup
+    // (see lkAutoPost's own SAFETY note).
+    {
+      const m = store.lkAccountMapping || {};
+      const invTipe = so?.tipe;
+      const pendapatanKode = invTipe === "Unit" ? m.pendapatanUnit : m.pendapatanJasa;
+      const pendapatanAmount = Math.max(0, invoiceTotal - pajakNominal);
+      lkAutoPost(store, {
+        sourceType: "invoice_approve",
+        sourceId: nomor,
+        tanggal: today(),
+        keterangan: `Pengakuan Pendapatan Invoice ${nomor} — ${so?.customerNama || ""}`,
+        lines: [{
+          kode: m.piutangUsaha,
+          debit: invoiceTotal,
+          kredit: 0
+        }, {
+          kode: pendapatanKode,
+          debit: 0,
+          kredit: pendapatanAmount
+        }, {
+          kode: m.ppnKeluaran,
+          debit: 0,
+          kredit: pajakNominal
+        }]
+      });
+    }
+    logAudit(store, session, {
+      module: "Invoice",
+      docNomor: nomor,
+      action: "Buat Invoice (Auto-Approved)",
+      detail: `${so?.customerNama || ""} — ${fmt(invoiceTotal)} (approval GM tidak lagi diwajibkan, per kebijakan 2026-09-25)`
+    });
     setModal(false);
     setForm({
       soNomor: "",
@@ -29102,10 +29169,10 @@ function InvoiceModule({
         size: "sm",
         variant: "ghost",
         onClick: () => openFaktur(inv)
-      }, "+ Input"), /*#__PURE__*/React.createElement("span", null, fmt(invoiceDisplayFinancials(inv).total), isOwnerLike && inv.terminLabel && !invoiceDisplayFinancials(inv).total && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(Btn, {
+      }, "+ Input"), /*#__PURE__*/React.createElement("span", null, fmt(invoiceDisplayFinancials(inv).total), isOwnerLike && terminAmountMismatch(inv) && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(Btn, {
         size: "sm",
         variant: "warning",
-        title: "Invoice ini Rp 0 karena bug perhitungan Pelunasan (sudah diperbaiki) — klik untuk hitung ulang nominal yang benar",
+        title: "Nominal invoice ini tidak sesuai Term of Payment (bug perhitungan sudah diperbaiki) — klik untuk hitung ulang nominal yang benar",
         onClick: () => fixStuckTerminInvoice(inv)
       }, "🔧 Hitung Ulang"))), fmt(inv.terbayar || 0), /*#__PURE__*/React.createElement(Badge, {
         color: approvalColor[inv.statusApproval]
