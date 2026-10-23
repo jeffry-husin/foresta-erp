@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-09-25.1";
+const APP_BUILD = "2026-10-23.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -1511,7 +1511,7 @@ const ROLE_DEFS = {
   finance_director: {
     label: "Finance Director",
     color: "#f59e0b",
-    modules: ["dashboard", "invoice", "payroll", "customer", "supplier", "financial_dashboard", "client_history", "attendance", "jurnal", "bank_recon", "laporan_keuangan", "price_analysis", "price_analysis_purchase", "client_analysis", "komisi"]
+    modules: ["dashboard", "invoice", "payroll", "customer", "supplier", "financial_dashboard", "client_history", "attendance", "jurnal", "bank_recon", "laporan_keuangan", "price_analysis", "price_analysis_purchase", "supplier_analysis", "client_analysis", "komisi"]
   },
   sales_manager: {
     label: "Sales Manager",
@@ -1536,12 +1536,12 @@ const ROLE_DEFS = {
   purchasing: {
     label: "Purchasing",
     color: "#f97316",
-    modules: ["dashboard", "po_local", "supplier", "part_request", "attendance", "mutasi_barang", "price_analysis_purchase"]
+    modules: ["dashboard", "po_local", "supplier", "part_request", "attendance", "mutasi_barang", "price_analysis_purchase", "supplier_analysis"]
   },
   purchasing_overseas: {
     label: "Purchasing Overseas",
     color: "#fb923c",
-    modules: ["dashboard", "po_overseas", "supplier", "part_request", "attendance", "mutasi_barang", "price_analysis_purchase"]
+    modules: ["dashboard", "po_overseas", "supplier", "part_request", "attendance", "mutasi_barang", "price_analysis_purchase", "supplier_analysis"]
   },
   storage: {
     label: "Storage / Gudang",
@@ -1924,6 +1924,10 @@ const ALL_MODULES = [{
   icon: "📉",
   label: "Analisa Harga Pembelian"
 }, {
+  id: "supplier_analysis",
+  icon: "🏭",
+  label: "Analisa Supplier"
+}, {
   id: "payroll",
   icon: "💵",
   label: "Payroll (Akses Terbatas)"
@@ -1988,7 +1992,7 @@ const SIDEBAR_GROUPS = [{
 }, {
   key: "operation",
   label: "OPERATION",
-  moduleIds: ["sales_order", "item_requisition", "po_local", "po_overseas", "price_analysis_purchase"]
+  moduleIds: ["sales_order", "item_requisition", "po_local", "po_overseas", "price_analysis_purchase", "supplier_analysis"]
 }, {
   key: "logistik",
   label: "LOGISTIK",
@@ -21787,6 +21791,173 @@ function PurchaseOrderModule({
   const [irPick, setIrPick] = useState(null);
   const [irPickedIdx, setIrPickedIdx] = useState([]);
   const [irPickTarget, setIrPickTarget] = useState("create"); // 'create' | 'revise'
+  // ── REKOMENDASI PEMBELIAN (2026-10-19) ─────────────────────────────────────────────────────
+  // Saran dari histori PO (modul ini saja: Lokal ATAU Overseas) per partNumber per supplier.
+  // Hanya SARAN: tidak pernah mengisi otomatis tanpa klik "Pakai supplier ini", dan harga hasil
+  // isian tetap bisa diedit. PO berstatus "Ditolak GM" diabaikan. Untuk Overseas, pembanding adalah
+  // harga IDR setelah biaya impor (Bea Masuk + PPh Impor + Ekspedisi, dialokasikan proporsional
+  // terhadap nilai item; PPN Import tidak dihitung karena umumnya bisa dikreditkan).
+  const [irPickPrices, setIrPickPrices] = useState({});
+  const buyHistory = React.useMemo(() => {
+    const map = {};
+    (po || []).forEach(p => {
+      if (!p || p.status === "Ditolak GM" || !p.supplierId) return;
+      const cur = p.currency || "IDR";
+      const kurs = isLocal || cur === "IDR" ? 1 : parseFloat(p.kursReferensi) || 0;
+      const ic = p.importCost || null;
+      const itemsIdr = (p.items || []).reduce((t, i) => t + (i.qty || 0) * (i.harga || 0) * kurs, 0);
+      const extra = ic ? (ic.beaMasuk || 0) + (ic.pphImport || 0) + (ic.ekspedisiBiaya || 0) : 0;
+      (p.items || []).forEach(it => {
+        if (!it.partNumber || !(it.harga > 0)) return;
+        const unitIdr = kurs ? it.harga * kurs : null;
+        let rank = unitIdr;
+        let landed = isLocal || cur === "IDR";
+        if (!isLocal && cur !== "IDR" && ic && unitIdr != null && itemsIdr > 0 && it.qty > 0) {
+          rank = unitIdr + extra * ((it.qty * unitIdr) / itemsIdr) / it.qty;
+          landed = true;
+        }
+        const rec = {
+          nomor: p.nomor,
+          tanggal: p.tanggal || "",
+          harga: it.harga,
+          currency: cur,
+          rank,
+          landed
+        };
+        const byPart = map[it.partNumber] || (map[it.partNumber] = {});
+        const e = byPart[p.supplierId] || (byPart[p.supplierId] = {
+          supplierId: p.supplierId,
+          supplierNama: p.supplierNama || "-",
+          n: 0,
+          last: null,
+          best: null
+        });
+        e.n += 1;
+        if (!e.last || rec.tanggal >= e.last.tanggal) e.last = rec;
+        if (rec.rank != null && (!e.best || rec.rank < e.best.rank)) e.best = rec;
+      });
+    });
+    return map;
+  }, [po, isLocal]);
+  // Saran harga di bawah kolom "Harga Satuan": acuan terakhir dari supplier terpilih (atau yang termurah
+  // bila supplier belum dipilih/belum pernah dipakai) + peringatan bila selisih >= 15%.
+  const priceHint = (pn, harga, sid, cur) => {
+    const h = buyHistory[pn];
+    if (!h) return null;
+    const mine = sid ? h[sid] : null;
+    const small = {
+      fontSize: 11,
+      marginTop: 3,
+      lineHeight: 1.3
+    };
+    if (mine && mine.last) {
+      const l = mine.last;
+      const base = `${fmtMoney(l.harga, l.currency)} (${l.tanggal || "-"}, ${l.nomor})`;
+      if (l.currency !== cur) return /*#__PURE__*/React.createElement("div", {
+        style: { ...small, color: theme.muted }
+      }, `Acuan terakhir: ${base} — beda mata uang`);
+      const v = parseFloat(harga) || 0;
+      if (!v) return /*#__PURE__*/React.createElement("div", {
+        style: { ...small, color: theme.muted }
+      }, `Acuan terakhir: ${base}`);
+      const dev = (v - l.harga) / l.harga * 100;
+      const big = Math.abs(dev) >= 15;
+      return /*#__PURE__*/React.createElement("div", {
+        style: { ...small, color: big ? theme.yellow : theme.muted, fontWeight: big ? 700 : 400 }
+      }, Math.round(dev) === 0 ? `Sama dengan terakhir ${base}` : `${big ? "⚠ " : ""}${dev >= 0 ? "+" : ""}${dev.toFixed(0)}% vs terakhir ${base}`);
+    }
+    const all = Object.values(h).filter(e => e.best);
+    if (all.length === 0) return null;
+    all.sort((a, b) => a.best.rank - b.best.rank);
+    const b = all[0];
+    const comparable = all.every(e => e.best.landed);
+    return /*#__PURE__*/React.createElement("div", {
+      style: { ...small, color: theme.muted }
+    }, `Supplier ini belum pernah dipakai untuk part ini. ${comparable ? "Termurah" : "Harga terendah (belum landed cost, bandingkan manual)"}: ${b.supplierNama} ${fmtMoney(b.best.harga, b.best.currency)}${b.best.landed ? "" : " *"}`);
+  };
+  const pickRecoPanel = () => {
+    if (!irPick) return null;
+    const picked = irPickedIdx.filter(i => irPick.items[i] && !irPick.items[i].sudahDiPO);
+    if (picked.length === 0) return null;
+    const isRev = irPickTarget === "revise";
+    const curSid = isRev ? reviseSupplierId : form.supplierId;
+    const curCount = isRev ? reviseItems.length : form.items.length;
+    const curCur = isLocal ? "IDR" : isRev ? reviseCurrency : form.currency;
+    const locked = !!curSid && curCount > 0;
+    const pns = [...new Set(picked.map(i => irPick.items[i].partNumber))];
+    const cover = {};
+    pns.forEach(pn => Object.values(buyHistory[pn] || {}).forEach(s => {
+      if (!suppliers.some(x => x.id === s.supplierId)) return;
+      const c = cover[s.supplierId] || (cover[s.supplierId] = {
+        supplierId: s.supplierId,
+        supplierNama: s.supplierNama,
+        parts: [],
+        lastDate: ""
+      });
+      c.parts.push(pn);
+      if ((s.last.tanggal || "") > c.lastDate) c.lastDate = s.last.tanggal || "";
+    }));
+    const cands = Object.values(cover).sort((a, b) => b.parts.length - a.parts.length || b.lastDate.localeCompare(a.lastDate)).slice(0, 4);
+    const apply = c => {
+      const keep = picked.filter(i => c.parts.includes(irPick.items[i].partNumber));
+      const firstCur = buyHistory[c.parts[0]][c.supplierId].last.currency;
+      const cur = locked ? curCur : isLocal ? "IDR" : firstCur;
+      const prices = {};
+      c.parts.forEach(pn => {
+        const l = buyHistory[pn][c.supplierId].last;
+        if (l.currency === cur) prices[pn] = l.harga;
+      });
+      if (!locked) {
+        if (isRev) {
+          setReviseSupplierId(c.supplierId);
+          if (!isLocal) setReviseCurrency(cur);
+        } else setForm(f => ({
+          ...f,
+          supplierId: c.supplierId,
+          ...(isLocal ? {} : { currency: cur })
+        }));
+      }
+      setIrPickedIdx(keep);
+      setIrPickPrices(prices);
+    };
+    const box = {
+      padding: 10,
+      background: theme.bg || theme.surface,
+      border: `1px dashed ${theme.accent}88`,
+      borderRadius: 8,
+      fontSize: 12,
+      color: theme.text,
+      display: "flex",
+      flexDirection: "column",
+      gap: 6
+    };
+    const noHist = pns.filter(pn => !buyHistory[pn]);
+    return /*#__PURE__*/React.createElement("div", { style: box },
+      /*#__PURE__*/React.createElement("div", { style: { fontWeight: 700 } }, "Saran dari riwayat pembelian (hanya saran, bisa diedit)"),
+      pns.map(pn => {
+        const h = buyHistory[pn];
+        if (!h) return /*#__PURE__*/React.createElement("div", { key: pn, style: { color: theme.muted } }, `${pn}: belum ada riwayat pembelian`);
+        const list = Object.values(h).filter(e => e.last).sort((a, b) => (b.last.tanggal || "").localeCompare(a.last.tanggal || ""));
+        const ranked = list.filter(e => e.best).sort((a, b) => a.best.rank - b.best.rank);
+        // "termurah" hanya diberikan bila semua pembanding setara (sama-sama landed cost / lokal);
+        // kalau ada yang belum punya biaya impor, perbandingannya tidak adil.
+        const cheapest = ranked.length > 1 && ranked.every(e => e.best.landed) ? ranked[0].supplierId : null;
+        return /*#__PURE__*/React.createElement("div", { key: pn },
+          /*#__PURE__*/React.createElement("strong", null, pn),
+          list.slice(0, 3).map(e => /*#__PURE__*/React.createElement("div", { key: e.supplierId, style: { marginLeft: 10, color: theme.muted } },
+            `${e.supplierNama}: ${fmtMoney(e.last.harga, e.last.currency)} (terakhir ${e.last.tanggal || "-"}, ${e.n}x beli)${e.supplierId === cheapest ? " · termurah" : ""}${e.last.landed ? "" : " *"}`)));
+      }),
+      !isLocal && /*#__PURE__*/React.createElement("div", { style: { color: theme.muted, fontSize: 11 } }, "* belum ada biaya impor tercatat / kurs kosong, perbandingan belum landed cost. Perbandingan termurah memakai IDR setelah Bea Masuk + PPh Impor + Ekspedisi."),
+      cands.length > 0 && /*#__PURE__*/React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
+        /*#__PURE__*/React.createElement("div", { style: { fontWeight: 700 } }, "Kelompokkan dalam 1 PO per supplier:"),
+        cands.map(c => {
+          const blocked = locked && c.supplierId !== curSid;
+          return /*#__PURE__*/React.createElement("div", { key: c.supplierId, style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } },
+            /*#__PURE__*/React.createElement("span", null, `${c.supplierNama} — pernah menyuplai ${c.parts.length} dari ${pns.length} item terpilih`),
+            blocked ? /*#__PURE__*/React.createElement("span", { style: { color: theme.muted } }, "(PO ini sudah memakai supplier lain)") : /*#__PURE__*/React.createElement(Btn, { size: "sm", variant: "ghost", onClick: () => apply(c) }, "Pakai supplier ini"));
+        }),
+        /*#__PURE__*/React.createElement("div", { style: { color: theme.muted, fontSize: 11 } }, "Item di luar supplier yang dipilih otomatis tidak dicentang dan tetap tersedia untuk PO berikutnya.")));
+  };
   // PO Overseas prefix changed from "PO" to "POV" (2026-08-12) so it's not confused with the
   // "PL" (Lokal) prefix at a glance. Only NEW PO Overseas get "POV" going forward — genDocNumber
   // just looks at existing docs with the SAME prefix to compute the next sequence number, so
@@ -21895,6 +22066,7 @@ function PurchaseOrderModule({
     // instead of everything being pre-selected and needing to be manually unchecked (which was
     // easy to miss and could pull unrelated items onto a supplier's PO by accident).
     setIrPickedIdx([]);
+    setIrPickPrices({});
     setIrPickTarget(target);
   };
   const toggleIrPickedIdx = i => setIrPickedIdx(arr => arr.includes(i) ? arr.filter(x => x !== i) : [...arr, i]);
@@ -21920,7 +22092,7 @@ function PurchaseOrderModule({
         partName: it.partName,
         partDescription: part?.description || "",
         qty: liveQtyKurang,
-        harga: "",
+        harga: irPickPrices[it.partNumber] || "",
         fromIR: irPick.nomor,
         fromIRIdx: i
       };
@@ -21937,6 +22109,7 @@ function PurchaseOrderModule({
     }
     setIrPick(null);
     setIrPickedIdx([]);
+    setIrPickPrices({});
   };
   const irPickPanel = () => irPick && /*#__PURE__*/React.createElement("div", {
     style: {
@@ -22010,7 +22183,7 @@ function PurchaseOrderModule({
     }, /*#__PURE__*/React.createElement(Badge, {
       color: theme.green
     }, "Sudah di-PO"))));
-  }), /*#__PURE__*/React.createElement("div", {
+  }), pickRecoPanel(), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
@@ -23234,7 +23407,7 @@ function PurchaseOrderModule({
         color: theme.muted,
         fontSize: 12
       }
-    }, it.partDescription || "-"), fmtNum(it.qty), /*#__PURE__*/React.createElement("input", {
+    }, it.partDescription || "-"), fmtNum(it.qty), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("input", {
       type: "number",
       value: it.harga,
       onChange: e => updateItemHarga(i, e.target.value),
@@ -23248,7 +23421,7 @@ function PurchaseOrderModule({
         width: 110,
         fontFamily: "inherit"
       }
-    }), fmtMoney(it.qty * (it.harga || 0), isLocal ? "IDR" : form.currency), /*#__PURE__*/React.createElement("span", {
+    }), priceHint(it.partNumber, it.harga, form.supplierId, isLocal ? "IDR" : form.currency)), fmtMoney(it.qty * (it.harga || 0), isLocal ? "IDR" : form.currency), /*#__PURE__*/React.createElement("span", {
       style: {
         fontSize: 11,
         color: theme.muted
@@ -23792,7 +23965,7 @@ function PurchaseOrderModule({
     }
   })), irPick && irPickTarget === "revise" && irPickPanel(), /*#__PURE__*/React.createElement(Table, {
     headers: ["Part Number", "Part Name", "Qty", "Harga Satuan", "Subtotal"],
-    rows: reviseItems.map((it, i) => [it.partNumber, it.partName, fmtNum(it.qty), /*#__PURE__*/React.createElement("input", {
+    rows: reviseItems.map((it, i) => [it.partNumber, it.partName, fmtNum(it.qty), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("input", {
       type: "number",
       value: it.harga,
       onChange: e => updateReviseHarga(i, e.target.value),
@@ -23805,7 +23978,7 @@ function PurchaseOrderModule({
         width: 110,
         fontFamily: "inherit"
       }
-    }), fmtMoney(it.qty * (it.harga || 0), isLocal ? "IDR" : reviseCurrency)]),
+    }), priceHint(it.partNumber, it.harga, reviseSupplierId, isLocal ? "IDR" : reviseCurrency)), fmtMoney(it.qty * (it.harga || 0), isLocal ? "IDR" : reviseCurrency)]),
     onDelete: removeReviseItem,
     emptyMsg: "Belum ada item"
   }), /*#__PURE__*/React.createElement("label", {
@@ -37489,6 +37662,220 @@ function PurchasePriceAnalysisModule({
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// ANALISA SUPPLIER — (OPERATION) answers "kita beli barang apa saja dari supplier X?".
+// Read-only over PO Local + PO Overseas line items (PO "Ditolak GM" excluded). Supplier list
+// shows PO count, number of distinct items and total purchase value (per currency, never blended
+// across IDR/USD/SGD); clicking a supplier drills into every item ever bought from them (grouped
+// per part number) plus the full PO line history.
+// ════════════════════════════════════════════════════════════════════════════
+function SupplierAnalysisModule({
+  store,
+  session
+}) {
+  const {
+    poLocal,
+    poOverseas
+  } = store;
+  const points = [];
+  const pushPO = (p, jenis, defCcy) => {
+    if (p.status === "Ditolak GM") return;
+    (p.items || []).forEach(it => {
+      const code = (it.partNumber || "").trim();
+      const name = it.partName || it.deskripsi || "";
+      if (!code && !name) return;
+      points.push({
+        jenis,
+        poNomor: p.nomor,
+        tanggal: p.tanggal || "",
+        status: p.status,
+        supplierNama: (p.supplierNama || "-").trim() || "-",
+        code,
+        name,
+        harga: it.harga || 0,
+        qty: it.qty || 0,
+        currency: p.currency || defCcy
+      });
+    });
+  };
+  (poLocal || []).forEach(p => pushPO(p, "Lokal", "IDR"));
+  (poOverseas || []).forEach(p => pushPO(p, "Overseas", "USD"));
+  const supMap = new Map();
+  points.forEach(p => {
+    const key = p.supplierNama.toLowerCase();
+    if (!supMap.has(key)) supMap.set(key, {
+      supplierNama: p.supplierNama,
+      pos: new Set(),
+      items: new Set(),
+      totals: {},
+      lastTanggal: ""
+    });
+    const s = supMap.get(key);
+    s.pos.add(p.poNomor);
+    s.items.add(p.code || p.name);
+    s.totals[p.currency] = (s.totals[p.currency] || 0) + p.harga * p.qty;
+    if (p.tanggal > s.lastTanggal) s.lastTanggal = p.tanggal;
+  });
+  const fmtTotals = totals => {
+    const ks = Object.keys(totals);
+    if (ks.length === 0) return "-";
+    return ks.map(c => c === "IDR" ? fmt(totals[c]) : `${c} ${fmtNum(totals[c])}`).join(" + ");
+  };
+  const suppliers = [...supMap.values()].sort((a, b) => b.pos.size - a.pos.size || a.supplierNama.localeCompare(b.supplierNama));
+  const [search, setSearch] = useState("");
+  const [selected, setSelected] = useState("");
+  const [itemSearch, setItemSearch] = useState("");
+  const q = search.trim().toLowerCase();
+  const filteredSuppliers = q ? suppliers.filter(s => s.supplierNama.toLowerCase().includes(q)) : suppliers;
+  const sel = selected ? supMap.get(selected.toLowerCase()) : null;
+  const supPoints = sel ? points.filter(p => p.supplierNama.toLowerCase() === selected.toLowerCase()) : [];
+  // Group by item (part number, or name when there's no PN) + currency so prices aren't blended.
+  const itemMap = new Map();
+  supPoints.forEach(p => {
+    const key = (p.code || p.name) + "||" + p.currency;
+    if (!itemMap.has(key)) itemMap.set(key, {
+      code: p.code,
+      name: p.name,
+      currency: p.currency,
+      count: 0,
+      qty: 0,
+      total: 0,
+      min: Infinity,
+      max: -Infinity,
+      lastTanggal: "",
+      lastHarga: 0
+    });
+    const c = itemMap.get(key);
+    c.count++;
+    c.qty += p.qty;
+    c.total += p.harga * p.qty;
+    c.min = Math.min(c.min, p.harga);
+    c.max = Math.max(c.max, p.harga);
+    if (p.tanggal >= c.lastTanggal) {
+      c.lastTanggal = p.tanggal;
+      c.lastHarga = p.harga;
+      if (p.name) c.name = p.name;
+    }
+  });
+  const iq = itemSearch.trim().toLowerCase();
+  const itemRows = [...itemMap.values()].filter(c => !iq || [c.code, c.name].some(x => String(x || "").toLowerCase().includes(iq))).sort((a, b) => b.count - a.count || (b.lastTanggal || "").localeCompare(a.lastTanggal || ""));
+  const fmtC = (n, ccy) => ccy === "IDR" ? fmt(n) : `${ccy} ${fmtNum(n)}`;
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      flexWrap: "wrap",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("h2", {
+    style: {
+      margin: 0,
+      color: theme.text
+    }
+  }, "Analisa Supplier"), selected && /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => {
+      setSelected("");
+      setItemSearch("");
+    }
+  }, "← Kembali ke daftar supplier")), !selected && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      background: theme.surface,
+      padding: "8px 14px",
+      borderRadius: 8,
+      border: `1px dashed ${theme.border}`
+    }
+  }, "ℹ️ Data ditarik dari seluruh riwayat PO Local dan PO Overseas (kecuali yang Ditolak GM). Klik nama supplier untuk melihat barang apa saja yang pernah dibeli di sana."), !selected && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari nama supplier...",
+    value: search,
+    onChange: setSearch,
+    style: {
+      marginBottom: 12
+    }
+  }), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Supplier", "Jumlah PO", "Jumlah Jenis Barang", "Total Pembelian", "PO Terakhir"],
+    rows: filteredSuppliers.map(s => [/*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.accentLight,
+        fontWeight: 600,
+        cursor: "pointer"
+      },
+      onClick: () => setSelected(s.supplierNama)
+    }, s.supplierNama), s.pos.size, s.items.size, fmtTotals(s.totals), s.lastTanggal || "-"]),
+    emptyMsg: "Belum ada data pembelian dari PO."
+  })), selected && sel && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.text
+    }
+  }, sel.supplierNama), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+      gap: 12
+    }
+  }, [["Jumlah PO", sel.pos.size, theme.text], ["Jenis Barang", sel.items.size, theme.text], ["Total Pembelian", fmtTotals(sel.totals), theme.green], ["PO Terakhir", sel.lastTanggal || "-", theme.text]].map(([label, val, color], i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      background: theme.surface,
+      borderRadius: 8,
+      padding: "10px 14px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: theme.muted,
+      marginBottom: 4
+    }
+  }, label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      fontWeight: 700,
+      color
+    }
+  }, val))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.text,
+      fontSize: 15
+    }
+  }, "Barang yang Dibeli dari Supplier Ini"), /*#__PURE__*/React.createElement(Input, {
+    placeholder: "Cari Part Number / Nama barang...",
+    value: itemSearch,
+    onChange: setItemSearch,
+    style: {
+      marginBottom: 12
+    }
+  }), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Part Number", "Nama Barang", "Jumlah Transaksi", "Total Qty", "Harga Terendah", "Harga Tertinggi", "Harga Terakhir", "Total Nilai", "Terakhir Dibeli"],
+    rows: itemRows.map(c => [c.code || "-", c.name || "-", c.count, fmtNum(c.qty), fmtC(c.min, c.currency), fmtC(c.max, c.currency), fmtC(c.lastHarga, c.currency), fmtC(c.total, c.currency), c.lastTanggal || "-"]),
+    emptyMsg: "-"
+  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: "0 0 12px",
+      color: theme.text,
+      fontSize: 15
+    }
+  }, "Riwayat PO"), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Tanggal", "No. PO", "Jenis", "Status", "Part Number", "Nama Barang", "Qty", "Harga", "Subtotal"],
+    rows: supPoints.slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || "")).map(p => [p.tanggal, p.poNomor, /*#__PURE__*/React.createElement(Badge, {
+      color: p.jenis === "Lokal" ? theme.purple : theme.cyan
+    }, p.jenis), /*#__PURE__*/React.createElement(Badge, {
+      color: p.status === "Sudah Diterima" ? theme.green : theme.yellow
+    }, p.status), p.code || "-", p.name || "-", fmtNum(p.qty), fmtC(p.harga, p.currency), fmtC(p.harga * p.qty, p.currency)]),
+    emptyMsg: "-"
+  }))));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // ANALISA USER — login frequency + module-usage breakdown per user (Owner/GM/HRD only), reading
 // erp_user_activity_log (see logUserActivity + the App()-level login/navigate hooks). Separate
 // from erp_audit_log, which only captures write/approval actions — this captures plain login and
@@ -47193,6 +47580,11 @@ function App() {
         });
       case "price_analysis_purchase":
         return /*#__PURE__*/React.createElement(PurchasePriceAnalysisModule, {
+          store: store,
+          session: session
+        });
+      case "supplier_analysis":
+        return /*#__PURE__*/React.createElement(SupplierAnalysisModule, {
           store: store,
           session: session
         });
