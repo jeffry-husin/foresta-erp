@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-10-23.2";
+const APP_BUILD = "2026-10-23.5";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -641,6 +641,17 @@ const fmtDateRev = dateStr => {
 // everything else (numbers, Badges, other elements, non-date strings) untouched.
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const autoFormatTableCell = cell => typeof cell === "string" && ISO_DATE_RE.test(cell) ? fmtDateRev(cell) : cell;
+// Per Jef 2026-10-23: nominal/money columns must have ONE fixed, generous width everywhere (screen
+// tables AND printed documents) so a long amount never wraps mid-number ("Rp 887.38" / "7") and the
+// column width doesn't jump from one row/table/page to the next. 19ch fits "Rp 999.999.999.999"
+// (up to hundreds of billions) in any font with room to spare; used as a min-width, so even larger
+// values still just expand the column instead of ever being cut.
+// UPDATE 2026-10-23 (Jef): 11 digits is enough ("Rp 99.999.999.999" = 17 chars) -> 17ch, and money
+// columns are right-aligned everywhere (screen + print) so digits line up.
+const MONEY_COL_MIN = "17ch";
+// A cell counts as a money cell if it's a string with a currency prefix (Rp / Rp. / USD / SGD / ...)
+// followed by a number, or a bare number written with thousand separators (1.250.000 / 1,234.50).
+const isMoneyText = c => typeof c === "string" && (/^\s*-?\s*(Rp\.?|[A-Z]{3})\s*-?[\d.,]+\s*$/.test(c) || /^\s*-?\d{1,3}([.,]\d{3})+([.,]\d+)?\s*$/.test(c));
 // SECURITY (2026-09-04, external audit finding #6): Math.random() is not cryptographically strong
 // and its output space here (7 base-36 chars ≈ 3.7e10 combinations) isn't collision-resistant
 // enough for record IDs used across many concurrent users/browsers. Prefer the browser's built-in
@@ -5047,6 +5058,9 @@ function Table({
   }, [totalPages]);
   const startIdx = safePage * pageSize;
   const pageRows = sortedRows.slice(startIdx, startIdx + pageSize);
+  // Columns holding money amounts (checked across ALL rows, not just this page/sort, so the width is
+  // identical on every page) get a fixed minimum width — see MONEY_COL_MIN.
+  const moneyCols = headers.map((_, j) => searchedRows.some(r => isMoneyText(r.row[j])));
   const toggleSort = colIdx => {
     if (sortCol !== colIdx) {
       setSortCol(colIdx);
@@ -5183,6 +5197,11 @@ function Table({
         width: colWidths[hIdx],
         minWidth: colWidths[hIdx],
         maxWidth: colWidths[hIdx]
+      } : moneyCols[hIdx] ? {
+        minWidth: MONEY_COL_MIN
+      } : {}),
+      ...(moneyCols[hIdx] ? {
+        textAlign: "right"
       } : {}),
       // First column stays visible while scrolling right on wide tables (many columns) — sorting
       // still works exactly the same (this only pins position, it doesn't change table behavior),
@@ -5252,6 +5271,11 @@ function Table({
           maxWidth: colWidths[j],
           overflow: "hidden",
           textOverflow: "ellipsis"
+        } : moneyCols[j] ? {
+          minWidth: MONEY_COL_MIN
+        } : {}),
+        ...(moneyCols[j] ? {
+          textAlign: "right"
         } : {}),
         ...(j === 0 ? {
           position: "sticky",
@@ -33842,8 +33866,19 @@ function printDocument({
     alert("Popup diblokir browser. Izinkan popup untuk mencetak dokumen.");
     return;
   }
-  const rows = items.map(r => `<tr>${r.map(c => `<td style="padding:8px 10px;border-bottom:1px solid #ddd;font-size:${fs(13)}px;white-space:pre-wrap;word-break:break-word;">${escapeHtml(c)}</td>`).join("")}</tr>`).join("");
-  const headerCols = itemHeaders.map(h => `<th style="padding:8px 10px;text-align:left;font-size:${fs(12)}px;color:#555;border-bottom:2px solid #333;">${escapeHtml(h)}</th>`).join("");
+  // BUG FIX (2026-10-23, PL-218-FRT-X-2026): amounts like "Rp 887.387" were being split mid-number
+  // ("Rp 887.38" + "7" on the next line) because every cell used word-break:break-word and the
+  // price/subtotal columns were squeezed by long Part Name/Description text. Money/number cells
+  // (optionally prefixed by Rp / a 3-letter currency code, thousand separators, decimals, minus sign)
+  // are now never wrapped — the table's auto layout gives that column the width it needs and the
+  // free-text columns absorb the squeeze instead.
+  const isNumericCell = c => /^\s*-?\s*(Rp\.?|[A-Z]{3})?\s*-?[\d.,\s]+%?\s*$/.test(String(c ?? "")) && /\d/.test(String(c ?? ""));
+  // Per Jef 2026-10-23: every money column (any column with at least one Rp/currency/thousand-
+  // separated amount) gets the SAME fixed minimum width (MONEY_COL_MIN) in every printed document,
+  // so Harga/Subtotal never change width from one document to the next or wrap mid-number.
+  const moneyColsPrint = itemHeaders.map((_, j) => items.some(r => isMoneyText(String(r[j] ?? ""))));
+  const rows = items.map(r => `<tr>${r.map((c, j) => `<td style="padding:8px 10px;border-bottom:1px solid #ddd;font-size:${fs(13)}px;${moneyColsPrint[j] ? `min-width:${MONEY_COL_MIN};white-space:nowrap;text-align:right;` : isNumericCell(c) ? "white-space:nowrap;" : "white-space:pre-wrap;word-break:break-word;"}">${escapeHtml(c)}</td>`).join("")}</tr>`).join("");
+  const headerCols = itemHeaders.map((h, j) => `<th style="padding:8px 10px;text-align:${moneyColsPrint[j] ? "right" : "left"};font-size:${fs(12)}px;color:#555;border-bottom:2px solid #333;${moneyColsPrint[j] ? `min-width:${MONEY_COL_MIN};white-space:nowrap;` : ""}">${escapeHtml(h)}</th>`).join("");
   const extraRowsHtml = (extraInfoRows || []).map(([k, v]) => `<div style="display:flex;justify-content:space-between;font-size:${fs(13)}px;padding:2px 0;"><span style="color:#666;">${escapeHtml(k)}</span><span style="font-weight:600;">${escapeHtml(v)}</span></div>`).join("");
   // Task #176: the on-screen Term of Payment forms (Quotation/SO) always show each termin's Rupiah
   // nominal alongside its %, but the printed document only ever showed the % — so a client reading
