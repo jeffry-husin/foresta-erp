@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-10-23.1";
+const APP_BUILD = "2026-10-23.2";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -22269,7 +22269,10 @@ function PurchaseOrderModule({
       catatan: form.catatan,
       urgent: !!form.urgent,
       createdBy: session.nama,
-      status: "Menunggu Approval GM",
+      // Per Jef 2026-10-23: PO Lokal/Overseas tidak lagi butuh approval GM — langsung disetujui
+      // begitu dibuat (status sama dengan hasil gmApprove, jadi alur Penerimaan Barang tetap jalan).
+      approvedByNama: session.nama,
+      status: "Disetujui GM - Kirim ke Supplier",
       statusBayar: "Belum Dibayar",
       jumlahDibayar: 0,
       tanggalBayar: "",
@@ -22500,11 +22503,8 @@ function PurchaseOrderModule({
       ppnAmount: revisePpnAmount,
       total: reviseTotal,
       urgent: !!reviseUrgent,
-      currency: isLocal ? "IDR" : reviseCurrency,
-      ...(wasApproved ? {
-        status: "Menunggu Approval GM",
-        approvedByNama: null
-      } : {})
+      currency: isLocal ? "IDR" : reviseCurrency
+      // 2026-10-23: edit PO tidak lagi mengembalikan status ke "Menunggu Approval GM" (approval GM dihapus).
     } : x));
     // Reconcile IR item consumption: release items removed from the PO during this edit, and
     // mark newly-added items (pulled in via the IR picker while editing) as consumed.
@@ -22541,7 +22541,7 @@ function PurchaseOrderModule({
       module: `Purchase Order ${isLocal ? "Lokal" : "Overseas"}`,
       docNomor: reviseModal.nomor,
       action: "Edit PO",
-      detail: `${sup?.nama || reviseModal.supplierNama} — Total baru: ${fmtMoney(reviseTotal, isLocal ? "IDR" : reviseCurrency)}${wasApproved ? " — status dikembalikan ke Menunggu Approval GM" : ""}`
+      detail: `${sup?.nama || reviseModal.supplierNama} — Total baru: ${fmtMoney(reviseTotal, isLocal ? "IDR" : reviseCurrency)}`
     });
     setReviseModal(null);
   };
@@ -22887,7 +22887,7 @@ function PurchaseOrderModule({
       }, (isHandler || isMaria || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
         size: "sm",
         variant: "ghost",
-        title: p.status === "Disetujui GM - Kirim ke Supplier" ? "Edit PO — tambah item/IR lain (akan kembali ke Menunggu Approval GM)" : "Edit PO — tambah/ubah item dari IR lain",
+        title: "Edit PO — tambah/ubah item dari IR lain",
         onClick: () => openRevise(p)
       }, "✏️"), (isHandler || isMaria || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
         size: "sm",
@@ -22916,7 +22916,9 @@ function PurchaseOrderModule({
     }),
     onDelete: isOwnerLike || isHandler || isMaria ? async i => {
       const target = poFiltered.filter(p => !isPoClosed(p))[i];
-      if (!isOwnerLike && target.status !== "Menunggu Approval GM") {
+      // 2026-10-23: PO kini langsung "Disetujui GM - Kirim ke Supplier" saat dibuat, jadi PO yang belum
+      // diterima/dibayar sama sekali tetap boleh diajukan hapus oleh Purchasing (tetap lewat gatedDelete).
+      if (!isOwnerLike && !(target.status === "Menunggu Approval GM" || target.status === "Disetujui GM - Kirim ke Supplier" && !(target.jumlahDibayar > 0))) {
         return alert("PO yang sudah diproses (disetujui/ditolak GM) hanya dapat dihapus oleh Owner/GM/Finance Director.");
       }
       const moduleName = isLocal ? "Purchase Order Lokal" : "Purchase Order Overseas";
@@ -23905,16 +23907,7 @@ function PurchaseOrderModule({
       flexDirection: "column",
       gap: 14
     }
-  }, reviseModal.status === "Disetujui GM - Kirim ke Supplier" && /*#__PURE__*/React.createElement("p", {
-    style: {
-      margin: 0,
-      fontSize: 12,
-      color: theme.yellow,
-      background: `${theme.yellow}18`,
-      padding: "8px 12px",
-      borderRadius: 8
-    }
-  }, "⚠️ PO ini sudah disetujui GM. Mengedit PO akan mengembalikan status ke Menunggu Approval GM."), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
       gridTemplateColumns: !isLocal ? "2fr 1fr" : "1fr",
