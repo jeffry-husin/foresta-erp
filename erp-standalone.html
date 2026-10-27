@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-10-23.5";
+const APP_BUILD = "2026-10-27.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -6159,8 +6159,41 @@ function MasterPart({
     editRequests,
     setEditRequests,
     partSubCategories,
-    setPartSubCategories
+    setPartSubCategories,
+    suppliersLocal,
+    suppliersOverseas
   } = store;
+  // ── SUPPLIER PER PART (2026-10-27) ─────────────────────────────────────────────────────────
+  // Setiap part boleh punya beberapa supplier (part.suppliers = [{id, nama, jenis, terakhir?}]),
+  // dipilih dari Database Supplier (Lokal/Overseas). `terakhir` = tanggal PO terakhir (diisi oleh
+  // "Sinkron Supplier dari PO"); dipakai PO Lokal/Overseas untuk rekomendasi tempat beli terakhir.
+  const allSuppliers = React.useMemo(() => [...(suppliersLocal || []).map(s => ({
+    ...s,
+    jenis: "Lokal"
+  })), ...(suppliersOverseas || []).map(s => ({
+    ...s,
+    jenis: "Overseas"
+  }))], [suppliersLocal, suppliersOverseas]);
+  const [supPick, setSupPick] = useState("");
+  const addSupplierToForm = () => {
+    if (!supPick) return alert("Pilih supplier dari daftar.");
+    const s = allSuppliers.find(x => x.id === supPick);
+    if (!s) return;
+    if ((form.suppliers || []).some(x => x.id === s.id)) return alert("Supplier ini sudah ada di part ini.");
+    setForm(f => ({
+      ...f,
+      suppliers: [...(f.suppliers || []), {
+        id: s.id,
+        nama: s.nama,
+        jenis: s.jenis
+      }]
+    }));
+    setSupPick("");
+  };
+  const removeSupplierFromForm = i => setForm(f => ({
+    ...f,
+    suppliers: (f.suppliers || []).filter((_, j) => j !== i)
+  }));
   // Sub-Kategori management (Master Group-style editable list) — replaces the old free-text
   // Input, which had drifted into duplicate/inconsistent values in real data ("Consumable" vs
   // "consumable" vs "Consumables"). Renaming here cascades onto every Part already using the old
@@ -6364,6 +6397,86 @@ function MasterPart({
     variant: "ghost",
     onClick: addBomLine
   }, "+ Add")));
+  const supplierSectionEl = /*#__PURE__*/React.createElement("div", {
+    style: {
+      gridColumn: "1/-1",
+      marginTop: 4,
+      paddingTop: 14,
+      borderTop: `1px solid ${theme.border}`
+    }
+  }, /*#__PURE__*/React.createElement("h4", {
+    style: {
+      margin: "0 0 8px",
+      color: theme.muted,
+      fontSize: 13
+    }
+  }, "Supplier (dari Database Supplier — boleh lebih dari satu)"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 10px",
+      fontSize: 11,
+      color: theme.muted
+    }
+  }, "Dipakai PO Lokal & PO Overseas untuk memberi rekomendasi tempat pembelian."), (form.suppliers || []).length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6,
+      marginBottom: 10
+    }
+  }, (form.suppliers || []).map((s, i) => /*#__PURE__*/React.createElement("div", {
+    key: s.id + i,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      padding: "6px 10px",
+      background: theme.surface,
+      borderRadius: 8
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1,
+      fontSize: 12,
+      color: theme.text
+    }
+  }, s.nama, " ", /*#__PURE__*/React.createElement(Badge, {
+    color: s.jenis === "Overseas" ? theme.yellow : theme.green
+  }, s.jenis || "-"), s.terakhir ? /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted,
+      marginLeft: 8
+    }
+  }, "terakhir beli ", s.terakhir) : null), /*#__PURE__*/React.createElement("span", {
+    style: {
+      cursor: "pointer",
+      color: theme.red,
+      fontSize: 13
+    },
+    onClick: () => removeSupplierFromForm(i)
+  }, "🗑")))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      alignItems: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    label: "Tambah Supplier",
+    value: supPick,
+    onChange: setSupPick,
+    options: [{
+      value: "",
+      label: "-- Pilih Supplier --"
+    }, ...allSuppliers.filter(s => !(form.suppliers || []).some(x => x.id === s.id)).map(s => ({
+      value: s.id,
+      label: `${s.nama} (${s.jenis})`
+    }))],
+    style: {
+      flex: 1
+    }
+  }), /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: addSupplierToForm
+  }, "+ Add")));
   const [search, setSearch] = useState("");
   const canSeePrice = session.role === "owner" || session.role === "gm"; // price restriction rule
   // STANDARDIZED (2026-08-21): isOwnerLike now consistently = owner/gm/finance_director across the
@@ -6523,7 +6636,7 @@ function MasterPart({
   // inputs (parts/search/subKatFilter/sortBy) means it's only recomputed when one of those changes.
   const filtered = React.useMemo(() => parts.filter(p => {
     const q = search.toLowerCase();
-    return (p.partNumber.toLowerCase().includes(q) || p.partName.toLowerCase().includes(q) || (p.description || "").toLowerCase().includes(q)) && (subKatFilter === "Semua" || p.subKategori === subKatFilter);
+    return (p.partNumber.toLowerCase().includes(q) || p.partName.toLowerCase().includes(q) || (p.description || "").toLowerCase().includes(q) || (p.suppliers || []).some(s => String(s.nama || "").toLowerCase().includes(q))) && (subKatFilter === "Semua" || p.subKategori === subKatFilter);
   }).slice().sort((a, b) => {
     const field = SORT_FIELDS[sortBy] || "partNumber";
     return (a[field] || "").toString().localeCompare((b[field] || "").toString(), "id", {
@@ -6561,7 +6674,12 @@ function MasterPart({
       color: theme.accent
     }, p.subKategori) : "-", p.satuan, p.brand || "-", /*#__PURE__*/React.createElement(Badge, {
       color: p.asal === "Overseas" ? theme.yellow : theme.green
-    }, p.asal)];
+    }, p.asal), (p.suppliers || []).length ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 12
+      },
+      title: (p.suppliers || []).map(s => s.nama + (s.terakhir ? ` (terakhir ${s.terakhir})` : "")).join("\n")
+    }, (p.suppliers || []).map(s => s.nama).join(", ")) : "-"];
     const priceCols = canSeePrice ? [fmt(p.hargaBeli), fmt(p.hargaJual)] : [];
     const stokCol = p.stok === null ? "-" : /*#__PURE__*/React.createElement(Badge, {
       color: p.stok > 10 ? theme.green : p.stok > 0 ? theme.yellow : theme.red
@@ -6584,6 +6702,89 @@ function MasterPart({
     }
     return [...base, ...priceCols, stokCol, teralokasiCol, freeStockCol];
   }), [filtered, canSeePrice, allocationByPart]);
+  // SINKRON SUPPLIER DARI PO (2026-10-27): satu kali jalan (aman diulang — hanya menambah, tidak
+  // menduplikasi). Membaca seluruh PO Lokal + PO Overseas (kecuali "Ditolak GM"), per item (Part
+  // Number), lalu mengisi part.suppliers di Master Part + tanggal beli terakhir per supplier. Part
+  // di PO yang Part Number-nya tidak ada di Master Part dilewati dan diekspor ke Excel untuk dicek.
+  const syncSuppliersFromPO = async () => {
+    const partSet = new Set((parts || []).map(p => p.partNumber));
+    const found = {}; // pn -> key -> {id,nama,jenis,terakhir}
+    const unmatched = {}; // pn||sup -> row
+    let poCount = 0;
+    const scan = (arr, jenis) => (arr || []).forEach(po => {
+      if (!po || po.status === "Ditolak GM") return;
+      const sNama = (po.supplierNama || "").trim();
+      if (!po.supplierId && !sNama) return;
+      poCount++;
+      (po.items || []).forEach(it => {
+        const pn = String(it.partNumber || "").trim();
+        if (!pn) return;
+        if (!partSet.has(pn)) {
+          const k = pn + "||" + sNama;
+          if (!unmatched[k]) unmatched[k] = {
+            partNumber: pn,
+            partName: it.partName || "",
+            supplier: sNama,
+            jenisPO: jenis,
+            noPO: po.nomor,
+            tanggal: po.tanggal || ""
+          };
+          return;
+        }
+        const key = po.supplierId || sNama.toLowerCase();
+        const byPart = found[pn] || (found[pn] = {});
+        const e = byPart[key] || (byPart[key] = {
+          id: po.supplierId || "",
+          nama: sNama,
+          jenis,
+          terakhir: ""
+        });
+        if ((po.tanggal || "") > e.terakhir) e.terakhir = po.tanggal || "";
+      });
+    });
+    scan(store.poLocal, "Lokal");
+    scan(store.poOverseas, "Overseas");
+    const partsHit = Object.keys(found).length;
+    const entries = Object.values(found).reduce((t, o) => t + Object.keys(o).length, 0);
+    const unmatchedRows = Object.values(unmatched);
+    if (partsHit === 0) return alert(`Tidak ada part di PO yang cocok dengan Master Part.${unmatchedRows.length ? ` (${unmatchedRows.length} part PO tidak ditemukan di Master Part)` : ""}`);
+    if (!(await askConfirm(`Dari ${poCount} PO (Lokal + Overseas) ditemukan ${entries} relasi supplier untuk ${partsHit} part di Master Part. Isi/lengkapi kolom Supplier di Master Part sekarang? (Data supplier yang sudah ada tidak dihapus.)${unmatchedRows.length ? `\n\n${unmatchedRows.length} baris part PO tidak ada di Master Part — akan diekspor ke Excel untuk dicek.` : ""}`))) return;
+    let added = 0;
+    setParts(prev => (prev || []).map(part => {
+      const byPart = found[part.partNumber];
+      if (!byPart) return part;
+      const cur = [...(part.suppliers || [])];
+      Object.values(byPart).forEach(e => {
+        const idx = cur.findIndex(s => e.id && s.id === e.id || String(s.nama || "").toLowerCase() === e.nama.toLowerCase());
+        if (idx >= 0) {
+          if ((e.terakhir || "") > (cur[idx].terakhir || "")) cur[idx] = {
+            ...cur[idx],
+            terakhir: e.terakhir
+          };
+        } else {
+          cur.push({
+            id: e.id,
+            nama: e.nama,
+            jenis: e.jenis,
+            terakhir: e.terakhir
+          });
+          added++;
+        }
+      });
+      return {
+        ...part,
+        suppliers: cur
+      };
+    }));
+    logAudit(store, session, {
+      module: "Master Part",
+      docNomor: "Sinkron Supplier dari PO",
+      action: "Edit",
+      detail: `${partsHit} part, ${entries} relasi supplier dari ${poCount} PO`
+    });
+    if (unmatchedRows.length) exportToExcel(unmatchedRows, "Part_PO_Tidak_Ada_di_Master_Part.xlsx", "Tidak Cocok");
+    alert(`Selesai: ${partsHit} part di Master Part diperbarui dari data PO.${unmatchedRows.length ? ` ${unmatchedRows.length} baris part PO tidak ada di Master Part (file Excel daftar sudah diunduh).` : ""}`);
+  };
   const wipeAllParts = () => {
     setParts([]);
     setWipeConfirm(false);
@@ -6713,7 +6914,8 @@ function MasterPart({
     asal: p.asal,
     hargaBeli: p.hargaBeli,
     hargaJual: p.hargaJual,
-    stok: p.stok ?? ""
+    stok: p.stok ?? "",
+    supplier: (p.suppliers || []).map(s => s.nama).join(", ")
   })), "Master_Part.xlsx", "Master Part");
   // Auto-generate a unique Part Number against a given (possibly still-growing) parts array —
   // used during import so rows with a blank Part Number get a fresh one that can't collide with
@@ -6900,7 +7102,12 @@ function MasterPart({
     variant: "ghost",
     size: "sm",
     onClick: () => downloadTemplate(PART_TEMPLATE_HEADERS, "Template_Master_Part.xlsx")
-  }, "📄 Template"), isOwnerLike && parts.length > 0 && /*#__PURE__*/React.createElement(Btn, {
+  }, "📄 Template"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    size: "sm",
+    title: "Isi kolom Supplier di Master Part dari seluruh riwayat PO Lokal & Overseas",
+    onClick: syncSuppliersFromPO
+  }, "🔄 Sinkron Supplier dari PO"), isOwnerLike && parts.length > 0 && /*#__PURE__*/React.createElement(Btn, {
     variant: "danger",
     size: "sm",
     onClick: () => setWipeConfirm(true)
@@ -7024,7 +7231,7 @@ function MasterPart({
     variant: "danger",
     onClick: () => rejectEditRequest(req)
   }, "✗ Tolak"))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
-    headers: canSeePrice ? ["Part Number", "Part Name", "Description", "Kategori", "Sub-Kategori", "Satuan", "Brand", "Asal", "Harga Beli", "Harga Jual", "Stok", "Teralokasi", "Free Stock"] : ["Part Number", "Part Name", "Description", "Kategori", "Sub-Kategori", "Satuan", "Brand", "Asal", "Stok", "Teralokasi", "Free Stock"],
+    headers: canSeePrice ? ["Part Number", "Part Name", "Description", "Kategori", "Sub-Kategori", "Satuan", "Brand", "Asal", "Supplier", "Harga Beli", "Harga Jual", "Stok", "Teralokasi", "Free Stock"] : ["Part Number", "Part Name", "Description", "Kategori", "Sub-Kategori", "Satuan", "Brand", "Asal", "Supplier", "Stok", "Teralokasi", "Free Stock"],
     rows: partRows,
     onEdit: onEdit,
     onDelete: onDelete
@@ -7160,7 +7367,7 @@ function MasterPart({
     style: {
       gridColumn: "1/-1"
     }
-  })), bomSectionEl, /*#__PURE__*/React.createElement("div", {
+  })), supplierSectionEl, bomSectionEl, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
@@ -17096,6 +17303,34 @@ function QuotationPS({
   // family nomor set used everywhere else (quotationFamilyNomors), since an SO's sourceNomor points
   // at whichever revision was current when it was pulled, not necessarily this exact nomor.
   const soNomorsForQuotPS = q => (salesOrders || []).filter(so => quotationFamilyNomors(quotationsUnit, quotationsPS, q.nomor).includes(so.sourceNomor)).map(so => so.nomor);
+  // Shared print (detail view + 🖨️ icon on every list row, per Jef 2026-10-26).
+  const printQuotPS = q => printDocument({
+    company: store.companySettings,
+    docTitle: "PARTS & SERVICE QUOTATION",
+    nomor: q.nomor,
+    tanggal: q.tanggal,
+    partyLabel: "Kepada:",
+    partyName: liveNama(q),
+    itemHeaders: ["No", "Part Number", "Part Name", "Qty", "Harga", "Subtotal"],
+    items: q.items.map((it, i) => [i + 1, it.partNumber, it.partName, fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)]),
+    subtotal: q.subtotal,
+    // Sales Discount (internal kickback) is never shown on the client-facing print — only the
+    // separate client-visible Discount (`clientDiskon`).
+    diskon: q.clientDiskon || 0,
+    diskonLabel: q.clientDiskonPersen ? `Discount (${q.clientDiskonPersen}%)` : "Discount",
+    pajak: q.pajak,
+    pajakLabel: "PPN",
+    total: q.total,
+    catatan: combinedQuotationCatatan(q),
+    dibuatOleh: {
+      nama: q.createdByNama,
+      signature: getSignature(store, q.createdByUsername)
+    },
+    disetujuiOleh: q.status === "Disetujui GM" ? {
+      nama: q.approvedByNama || "GM",
+      signature: getSignature(store, q.approvedByUsername)
+    } : null
+  });
   const buildRowPS = (q, showSONomor) => [/*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.accentLight,
@@ -17138,7 +17373,9 @@ function QuotationPS({
       gap: 4,
       flexWrap: "wrap"
     }
-  }, ((q.status === "Menunggu Approval GM" || q.status === "Draft") && isAsil || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
+  }, /*#__PURE__*/React.createElement(PrintBtn, {
+    onClick: () => printQuotPS(q)
+  }), ((q.status === "Menunggu Approval GM" || q.status === "Draft") && isAsil || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     variant: "ghost",
     title: isOwnerLike && q.status !== "Menunggu Approval GM" && q.status !== "Draft" ? "Edit (Superuser) — termasuk quotation yang sudah jadi SO" : "Edit",
@@ -17827,34 +18064,7 @@ function QuotationPS({
       justifyContent: "flex-end"
     }
   }, /*#__PURE__*/React.createElement(PrintBtn, {
-    onClick: () => printDocument({
-      company: store.companySettings,
-      docTitle: "PARTS & SERVICE QUOTATION",
-      nomor: detail.nomor,
-      tanggal: detail.tanggal,
-      partyLabel: "Kepada:",
-      partyName: liveNama(detail),
-      itemHeaders: ["No", "Part Number", "Part Name", "Qty", "Harga", "Subtotal"],
-      items: detail.items.map((it, i) => [i + 1, it.partNumber, it.partName, fmtNum(it.qty), fmt(it.harga), fmt(it.subtotal)]),
-      subtotal: detail.subtotal,
-      // Sales Discount (internal kickback, `detail.diskon`/`detail.salesDiscount`) is internal-only
-      // and never shown or applied on the client-facing print — only the separate client-visible
-      // Discount (`detail.clientDiskon`) appears here.
-      diskon: detail.clientDiskon || 0,
-      diskonLabel: detail.clientDiskonPersen ? `Discount (${detail.clientDiskonPersen}%)` : "Discount",
-      pajak: detail.pajak,
-      pajakLabel: "PPN",
-      total: detail.total,
-      catatan: combinedQuotationCatatan(detail),
-      dibuatOleh: {
-        nama: detail.createdByNama,
-        signature: getSignature(store, detail.createdByUsername)
-      },
-      disetujuiOleh: detail.status === "Disetujui GM" ? {
-        nama: detail.approvedByNama || "GM",
-        signature: getSignature(store, detail.approvedByUsername)
-      } : null
-    })
+    onClick: () => printQuotPS(detail)
   })))), /*#__PURE__*/React.createElement(Modal, {
     open: modal,
     title: editingQ ? `Edit Quotation ${editingQ.nomor}` : revisionOf ? `Buat Revisi dari ${revisionOf.nomor}` : "Buat Parts & Service Quotation",
@@ -21689,7 +21899,8 @@ function PurchaseOrderModule({
     setPoOverseas,
     itemRequisitions,
     suppliersLocal,
-    suppliersOverseas
+    suppliersOverseas,
+    parts: masterParts
   } = store;
   const po = isLocal ? poLocal : poOverseas;
   const setPo = isLocal ? setPoLocal : setPoOverseas;
@@ -21919,17 +22130,32 @@ function PurchaseOrderModule({
         lastDate: ""
       });
       c.parts.push(pn);
+      c.histN = (c.histN || 0) + 1;
       if ((s.last.tanggal || "") > c.lastDate) c.lastDate = s.last.tanggal || "";
+    }));
+    // Supplier terdaftar di Master Part (hanya yang ada di Database Supplier jenis PO ini) ikut
+    // jadi kandidat, juga untuk part yang belum punya riwayat PO.
+    const masterSup = pn => ((masterParts || []).find(p => p.partNumber === pn)?.suppliers || []).filter(s => suppliers.some(x => x.id === s.id));
+    pns.forEach(pn => masterSup(pn).forEach(ms => {
+      const c = cover[ms.id] || (cover[ms.id] = {
+        supplierId: ms.id,
+        supplierNama: suppliers.find(x => x.id === ms.id)?.nama || ms.nama,
+        parts: [],
+        lastDate: ""
+      });
+      if (!c.parts.includes(pn)) c.parts.push(pn);
+      if ((ms.terakhir || "") > c.lastDate) c.lastDate = ms.terakhir || "";
     }));
     const cands = Object.values(cover).sort((a, b) => b.parts.length - a.parts.length || b.lastDate.localeCompare(a.lastDate)).slice(0, 4);
     const apply = c => {
       const keep = picked.filter(i => c.parts.includes(irPick.items[i].partNumber));
-      const firstCur = buyHistory[c.parts[0]][c.supplierId].last.currency;
-      const cur = locked ? curCur : isLocal ? "IDR" : firstCur;
+      const histOf = pn => buyHistory[pn]?.[c.supplierId]?.last;
+      const firstHist = c.parts.map(histOf).find(Boolean);
+      const cur = locked ? curCur : isLocal ? "IDR" : firstHist ? firstHist.currency : curCur;
       const prices = {};
       c.parts.forEach(pn => {
-        const l = buyHistory[pn][c.supplierId].last;
-        if (l.currency === cur) prices[pn] = l.harga;
+        const l = histOf(pn);
+        if (l && l.currency === cur) prices[pn] = l.harga;
       });
       if (!locked) {
         if (isRev) {
@@ -21960,7 +22186,9 @@ function PurchaseOrderModule({
       /*#__PURE__*/React.createElement("div", { style: { fontWeight: 700 } }, "Saran dari riwayat pembelian (hanya saran, bisa diedit)"),
       pns.map(pn => {
         const h = buyHistory[pn];
-        if (!h) return /*#__PURE__*/React.createElement("div", { key: pn, style: { color: theme.muted } }, `${pn}: belum ada riwayat pembelian`);
+        const ms = masterSup(pn);
+        const msLine = ms.length ? /*#__PURE__*/React.createElement("div", { style: { marginLeft: 10, color: theme.accentLight } }, `Supplier di Master Part: ${[...ms].sort((a, b) => (b.terakhir || "").localeCompare(a.terakhir || "")).map(s => s.nama + (s.terakhir ? ` (terakhir ${s.terakhir})` : "")).join(", ")}`) : null;
+        if (!h) return /*#__PURE__*/React.createElement("div", { key: pn, style: { color: theme.muted } }, `${pn}: belum ada riwayat pembelian`, msLine);
         const list = Object.values(h).filter(e => e.last).sort((a, b) => (b.last.tanggal || "").localeCompare(a.last.tanggal || ""));
         const ranked = list.filter(e => e.best).sort((a, b) => a.best.rank - b.best.rank);
         // "termurah" hanya diberikan bila semua pembanding setara (sama-sama landed cost / lokal);
@@ -21968,6 +22196,7 @@ function PurchaseOrderModule({
         const cheapest = ranked.length > 1 && ranked.every(e => e.best.landed) ? ranked[0].supplierId : null;
         return /*#__PURE__*/React.createElement("div", { key: pn },
           /*#__PURE__*/React.createElement("strong", null, pn),
+          msLine,
           list.slice(0, 3).map(e => /*#__PURE__*/React.createElement("div", { key: e.supplierId, style: { marginLeft: 10, color: theme.muted } },
             `${e.supplierNama}: ${fmtMoney(e.last.harga, e.last.currency)} (terakhir ${e.last.tanggal || "-"}, ${e.n}x beli)${e.supplierId === cheapest ? " · termurah" : ""}${e.last.landed ? "" : " *"}`)));
       }),
@@ -21977,7 +22206,7 @@ function PurchaseOrderModule({
         cands.map(c => {
           const blocked = locked && c.supplierId !== curSid;
           return /*#__PURE__*/React.createElement("div", { key: c.supplierId, style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } },
-            /*#__PURE__*/React.createElement("span", null, `${c.supplierNama} — pernah menyuplai ${c.parts.length} dari ${pns.length} item terpilih`),
+            /*#__PURE__*/React.createElement("span", null, `${c.supplierNama} — ${c.histN ? "pernah menyuplai" : "terdaftar di Master Part untuk"} ${c.parts.length} dari ${pns.length} item terpilih${c.lastDate ? ` (terakhir ${c.lastDate})` : ""}`),
             blocked ? /*#__PURE__*/React.createElement("span", { style: { color: theme.muted } }, "(PO ini sudah memakai supplier lain)") : /*#__PURE__*/React.createElement(Btn, { size: "sm", variant: "ghost", onClick: () => apply(c) }, "Pakai supplier ini"));
         }),
         /*#__PURE__*/React.createElement("div", { style: { color: theme.muted, fontSize: 11 } }, "Item di luar supplier yang dipilih otomatis tidak dicentang dan tetap tersedia untuk PO berikutnya.")));
