@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-10-27.1";
+const APP_BUILD = "2026-10-27.2";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -22135,7 +22135,7 @@ function PurchaseOrderModule({
     }));
     // Supplier terdaftar di Master Part (hanya yang ada di Database Supplier jenis PO ini) ikut
     // jadi kandidat, juga untuk part yang belum punya riwayat PO.
-    const masterSup = pn => ((masterParts || []).find(p => p.partNumber === pn)?.suppliers || []).filter(s => suppliers.some(x => x.id === s.id));
+    const masterSup = pn => (partByPn.get(pn)?.suppliers || []).filter(s => suppliers.some(x => x.id === s.id));
     pns.forEach(pn => masterSup(pn).forEach(ms => {
       const c = cover[ms.id] || (cover[ms.id] = {
         supplierId: ms.id,
@@ -22307,6 +22307,17 @@ function PurchaseOrderModule({
   // Step 1: user picked an IR from the dropdown (create form or revise/edit modal) — open a
   // per-item checklist instead of pulling every item in, since not all parts in one IR are
   // necessarily bought from the same supplier / go into the same PO.
+  // PERF FIX (2026-10-27, "PO Lokal jadi lama saat tarik data"): panel pilih-item-IR dulu memanggil
+  // reservedQtyFor() (yang meng-explode SELURUH SO aktif dari nol) untuk SETIAP item IR di SETIAP
+  // render (tiap centang = render ulang), plus store.parts.find 2x per item. Sekarang alokasi stok
+  // dihitung SEKALI per pembukaan panel (bulk, hasil identik) dan Master Part dicari lewat Map.
+  const allocPick = React.useMemo(() => irPick ? stockAllocationForAllParts(store) : null, [!!irPick, store.salesOrders, store.parts, store.partsUse, store.units]);
+  const partByPn = React.useMemo(() => {
+    const m = new Map();
+    (store.parts || []).forEach(p => m.set(p.partNumber, p));
+    return m;
+  }, [store.parts]);
+  const reservedFor = (pn, soNomor) => allocPick ? reservedQtyForAllExcluding(allocPick, pn, soNomor) : reservedQtyFor(store, pn, soNomor);
   const openIrPick = (irNomor, target) => {
     const ir = itemRequisitions.find(r => r.nomor === irNomor);
     if (!ir) return;
@@ -22331,14 +22342,14 @@ function PurchaseOrderModule({
     if (chosen.length === 0) return alert("Pilih minimal 1 item yang belum di-PO");
     const newItems = chosen.map(i => {
       const it = irPick.items[i];
-      const part = store.parts.find(p => p.partNumber === it.partNumber);
+      const part = partByPn.get(it.partNumber);
       // Use LIVE qty kurang (recomputed against current Master Part stock), not the frozen
       // it.qtyKurang snapshot from when the IR was created — otherwise a stock correction made
       // after the IR but before it's turned into a PO would silently order the wrong quantity.
       // Also net out stock already reserved by OTHER SOs' outstanding IRs (reservedQtyFor) so an
       // already-earmarked unit doesn't get treated as available here too.
       const rawStok = part ? (part.stok ?? 0) : (it.stokTersedia || 0);
-      const netStok = Math.max(0, rawStok - reservedQtyFor(store, it.partNumber, irPick.soNomor));
+      const netStok = Math.max(0, rawStok - reservedFor(it.partNumber, irPick.soNomor));
       const liveQtyKurang = Math.max(0, (it.qtyButuh || 0) - netStok);
       return {
         partNumber: it.partNumber,
@@ -22391,10 +22402,10 @@ function PurchaseOrderModule({
     }
   }, "Pilih item mana yang mau dibuat menjadi PO ini (item yang sudah di-PO tidak bisa dipilih lagi):"), irPick.items.map((it, i) => {
     const consumed = !!it.sudahDiPO;
-    const partDesc = store.parts.find(p => p.partNumber === it.partNumber)?.description || "";
-    const livePart = store.parts.find(p => p.partNumber === it.partNumber);
+    const livePart = partByPn.get(it.partNumber);
+    const partDesc = livePart?.description || "";
     const rawLiveStok = livePart ? (livePart.stok ?? 0) : (it.stokTersedia || 0);
-    const netLiveStok = Math.max(0, rawLiveStok - reservedQtyFor(store, it.partNumber, irPick.soNomor));
+    const netLiveStok = Math.max(0, rawLiveStok - reservedFor(it.partNumber, irPick.soNomor));
     const liveQtyKurang = Math.max(0, (it.qtyButuh || 0) - netLiveStok);
     return /*#__PURE__*/React.createElement("label", {
       key: i,
