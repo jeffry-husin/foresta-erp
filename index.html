@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-10-28.4";
+const APP_BUILD = "2026-10-28.5";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -35480,7 +35480,9 @@ function DocumentTrailModule({
     const irDone = irs.length === 0 ? null : irs.every(ir => ir.status === "Sudah di-PO");
     const poDone = pos.length === 0 ? null : pos.every(p => p.status === "Sudah Diterima");
     const grDone = pos.length === 0 ? null : grs.length > 0 && pos.every(p => p.status === "Sudah Diterima");
-    const doApplicable = ["Parts", "BOTH", undefined, null].includes(so.fulfillmentType) || dos.length > 0 || (so.items || []).some(it => it.partNumber);
+    // SO MR-only (jasa lewat Mekanik Report) tanpa DO → DO tidak berlaku, walau item jasa punya partNumber.
+    // Tetap berlaku bila sudah ada DO, atau fulfillmentType Parts/BOTH.
+    const doApplicable = so.fulfillmentType === "MR" && dos.length === 0 ? false : ["Parts", "BOTH", undefined, null].includes(so.fulfillmentType) || dos.length > 0 || (so.items || []).some(it => it.partNumber);
     const doDone = doApplicable ? dos.length > 0 && soFullyShipped(so) : null;
     const mrApplicable = ["MR", "BOTH"].includes(so.fulfillmentType);
     const mrDone = mrApplicable ? mrVisits.some(v => v.status === "Selesai") : null;
