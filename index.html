@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-10-27.2";
+const APP_BUILD = "2026-10-28.3";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -3260,10 +3260,17 @@ function useStore() {
   // user/role/username list (Database Client access assignment, User Management, Cuti-on-behalf,
   // etc.) without each duplicating its own query.
   const [authUsers, setAuthUsers] = useState([]);
-  const refreshAuthUsers = () => sb.from("profiles").select("*").order("nama").then(({
+  const refreshAuthUsers = (retried = false) => sb.from("profiles").select("*").order("nama").then(async ({
     data,
     error
   }) => {
+    // Gagal/kosong (mis. token kedaluwarsa) → segarkan sesi dan ulangi sekali, jangan diam-diam kosong.
+    if ((error || !data || data.length === 0) && !retried) {
+      try {
+        await sb.auth.refreshSession();
+      } catch (e) {}
+      return refreshAuthUsers(true);
+    }
     if (!error) setAuthUsers((data || []).map(p => {
       const row = {
         id: p.id,
@@ -5853,8 +5860,11 @@ function LoginPage({
         loginAt: new Date().toISOString()
       };
       onLogin(session);
-    } catch {
-      setError("Terjadi kesalahan sistem");
+    } catch (e) {
+      // Tampilkan penyebab sebenarnya (jaringan / sesi / dll) agar bisa didiagnosis, bukan pesan generik.
+      console.error("Login error:", e);
+      const msg = String(e && e.message || e || "");
+      setError(/fetch|network|timeout|lock/i.test(msg) ? "Koneksi ke server bermasalah, coba lagi sebentar lagi. (" + msg + ")" : "Terjadi kesalahan sistem: " + msg);
     }
     setLoading(false);
   };
@@ -46201,10 +46211,17 @@ function MasterMillModule({
   const {
     mills,
     setMills,
-    customers
+    customers,
+    setCustomers,
+    clientGroups
   } = store;
   const isOwnerLike = ["owner", "gm", "finance_director"].includes(session.role);
   const canEdit = isOwnerLike || ["workshop_manager", "service_manager", "mekanik"].includes(session.role);
+  // Group sumber utamanya Master Client (customer.groupId → Master Group). Teks `group` di mill hanya
+  // cadangan bila client belum punya group.
+  const clientGroupNama = cust => cust && cust.groupId ? (clientGroups || []).find(g => g.id === cust.groupId)?.nama || "" : "";
+  const millGroup = m => clientGroupNama(customers.find(c => c.id === m.customerId)) || m.group || "";
+  const isSawitCat = c => /^(sawit|plantation|palm oil)$/i.test(String(c.category || "").trim());
   const [modal, setModal] = useState(false);
   const [editIdx, setEditIdx] = useState(null);
   const [search, setSearch] = useState("");
@@ -46257,6 +46274,84 @@ function MasterMillModule({
     });
     if (changed) setMills(updated);
   }, [customers, mills]);
+  // Selaraskan teks `group` di mill dengan group Master Client (modul lain masih membaca m.group).
+  useEffect(() => {
+    if (!customers || customers.length === 0 || mills.length === 0) return;
+    let changed = false;
+    const updated = mills.map(m => {
+      const g = clientGroupNama(customers.find(c => c.id === m.customerId));
+      if (!g || m.group === g) return m;
+      changed = true;
+      return {
+        ...m,
+        group: g
+      };
+    });
+    if (changed) setMills(updated);
+  }, [customers, clientGroups, mills]);
+  // Sekali jalan (Owner/GM): rapikan kategori client + group client dari data mill.
+  const CAT_MAP = {
+    plantation: "SAWIT",
+    "palm oil": "SAWIT",
+    sawit: "SAWIT",
+    umum: "UMUM",
+    mining: "MINING",
+    marine: "MARINE",
+    karoseri: "KAROSERI",
+    "oil and gas": "OIL & GAS",
+    "oil & gas": "OIL & GAS",
+    kontraktor: "KONTRAKTOR",
+    "shipyard": "MARINE"
+  };
+  const NON_SAWIT_NAME = /timber|international/i;
+  const tidyClients = async () => {
+    const linkedIds = new Set(mills.map(m => m.customerId).filter(Boolean));
+    let catFixed = 0,
+      toSawit = 0,
+      grpFilled = 0;
+    const skipped = [];
+    const grpByName = new Map((clientGroups || []).map(g => [String(g.nama).trim().toLowerCase(), g.id]));
+    const millByCust = new Map();
+    mills.forEach(m => {
+      if (m.customerId && !millByCust.has(m.customerId)) millByCust.set(m.customerId, m);
+    });
+    const plan = customers.map(c => {
+      let n = c;
+      const raw = String(c.category || "").trim();
+      const mapped = CAT_MAP[raw.toLowerCase()];
+      if (mapped && mapped !== c.category) {
+        n = {
+          ...n,
+          category: mapped
+        };
+        catFixed++;
+      }
+      if (linkedIds.has(c.id) && !isSawitCat(n)) {
+        if (NON_SAWIT_NAME.test(c.nama || "")) skipped.push(c.nama);else {
+          n = {
+            ...n,
+            category: "SAWIT"
+          };
+          toSawit++;
+        }
+      }
+      if (!n.groupId && millByCust.has(c.id)) {
+        const gid = grpByName.get(String(millByCust.get(c.id).group || "").trim().toLowerCase());
+        if (gid) {
+          n = {
+            ...n,
+            groupId: gid
+          };
+          grpFilled++;
+        }
+      }
+      return n;
+    });
+    const ok = await askConfirm(`Rapikan Master Client?\n\n• ${catFixed} kategori diseragamkan (Plantation/Palm Oil→SAWIT, Umum/UMUM, Mining, dll)\n• ${toSawit} client yang punya mill dipindah ke kategori SAWIT\n• ${grpFilled} client kosong-group diisi dari group mill\n• Dilewati (bukan sawit?): ${skipped.join(", ") || "-"}`);
+    if (!ok) return;
+    setCustomers(prev => (prev || []).map(c => plan.find(p => p.id === c.id) || c));
+    alert("Selesai. Kategori & group client sudah dirapikan.");
+  };
   const emptyForm = {
     group: "",
     customerId: "",
@@ -46273,7 +46368,7 @@ function MasterMillModule({
   };
   const [form, setForm] = useState(emptyForm);
   const [importSummary, setImportSummary] = useState(null);
-  const filtered = mills.filter(m => m.millName.toLowerCase().includes(search.toLowerCase()) || millClientNama(m).toLowerCase().includes(search.toLowerCase()) || (m.group || "").toLowerCase().includes(search.toLowerCase()));
+  const filtered = mills.filter(m => m.millName.toLowerCase().includes(search.toLowerCase()) || millClientNama(m).toLowerCase().includes(search.toLowerCase()) || millGroup(m).toLowerCase().includes(search.toLowerCase()));
   const activeFiltered = filtered.filter(m => m.aktif !== false);
   const inactiveFiltered = filtered.filter(m => m.aktif === false);
   // Toggle a mill in/out of "Tidak Ditangani Lagi" — data is always kept, this only hides it from
@@ -46287,7 +46382,7 @@ function MasterMillModule({
   };
   const MILL_TEMPLATE_HEADERS = ["group", "companyName", "millName", "lokasi", "provinsi", "grapple", "snGrapple", "crane", "snCrane", "year"];
   const doExport = () => exportToExcel(mills.map(m => ({
-    group: m.group || "",
+    group: millGroup(m),
     companyName: m.companyName || "",
     millName: m.millName,
     lokasi: millLokasi(m),
@@ -46376,6 +46471,7 @@ function MasterMillModule({
   };
   const save = () => {
     if (!form.millName) return alert("Nama Mill wajib diisi");
+    if (!form.customerId) return alert("Client wajib dipilih dari Database Client (kategori Sawit). Bila client belum ada atau kategorinya salah, perbaiki dulu di Master Client.");
     if (editIdx !== null) {
       const a = [...mills];
       a[editIdx] = form;
@@ -46418,7 +46514,12 @@ function MasterMillModule({
     variant: "ghost",
     size: "sm",
     onClick: () => downloadTemplate(MILL_TEMPLATE_HEADERS, "Template_Master_Mill.xlsx")
-  }, "📄 Template"), canEdit && /*#__PURE__*/React.createElement(Btn, {
+  }, "📄 Template"), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    size: "sm",
+    title: "Seragamkan kategori client, pindahkan client bermill ke SAWIT, isi group kosong",
+    onClick: tidyClients
+  }, "🧹 Rapikan Kategori & Group"), canEdit && /*#__PURE__*/React.createElement(Btn, {
     onClick: openCreate
   }, "+ Tambah Lokasi Mill"))), /*#__PURE__*/React.createElement(PendingHapusCard, {
     module: "Master Mill",
@@ -46451,7 +46552,7 @@ function MasterMillModule({
     onChange: setSearch
   }), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
     headers: ["Group", "Client", "Mill Name", "Lokasi", "Provinsi", "Grapple", "SN Grapple", "Crane", "SN Crane", "Year", ""],
-    rows: activeFiltered.map(m => [m.group || "-", m.customerId ? millClientNama(m) : /*#__PURE__*/React.createElement("span", {
+    rows: activeFiltered.map(m => [millGroup(m) || "-", m.customerId ? millClientNama(m) : /*#__PURE__*/React.createElement("span", {
       title: "Belum terhubung ke Database Client — edit untuk pilih client"
     }, millClientNama(m), " ⚠️"), m.millName, millLokasi(m) || "-", m.provinsi || "-", m.grapple || "-", m.snGrapple || "-", m.crane || "-", m.snCrane || "-", m.year || "-", canEdit && /*#__PURE__*/React.createElement("div", {
       style: {
@@ -46492,7 +46593,7 @@ function MasterMillModule({
     }
   }, showInactive ? "▾" : "▸", " Tidak Ditangani Lagi (", inactiveFiltered.length, ")"), showInactive && /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
     headers: ["Group", "Client", "Mill Name", "Lokasi", "Provinsi", "Grapple", "SN Grapple", "Crane", "SN Crane", "Year", ""],
-    rows: inactiveFiltered.map(m => [m.group || "-", millClientNama(m), m.millName, millLokasi(m) || "-", m.provinsi || "-", m.grapple || "-", m.snGrapple || "-", m.crane || "-", m.snCrane || "-", m.year || "-", canEdit && /*#__PURE__*/React.createElement("div", {
+    rows: inactiveFiltered.map(m => [millGroup(m) || "-", millClientNama(m), m.millName, millLokasi(m) || "-", m.provinsi || "-", m.grapple || "-", m.snGrapple || "-", m.crane || "-", m.snCrane || "-", m.year || "-", canEdit && /*#__PURE__*/React.createElement("div", {
       style: {
         display: "flex",
         gap: 6
@@ -46528,27 +46629,27 @@ function MasterMillModule({
       gap: 14
     }
   }, /*#__PURE__*/React.createElement(Input, {
-    label: "Group",
-    value: form.group,
-    onChange: v => setForm({
-      ...form,
-      group: v
-    })
+    label: "Group (dari Master Client)",
+    value: clientGroupNama(customers.find(c => c.id === form.customerId)) || form.group || "",
+    onChange: () => {},
+    disabled: true,
+    placeholder: "Atur group di Master Client"
   }), /*#__PURE__*/React.createElement(Select, {
-    label: "Client (Database Client)",
+    label: "Client (Database Client) *",
     value: form.customerId,
     onChange: v => {
       const cust = customers.find(c => c.id === v);
       setForm({
         ...form,
         customerId: v,
-        companyName: cust ? cust.nama : form.companyName
+        companyName: cust ? cust.nama : form.companyName,
+        group: clientGroupNama(cust) || form.group
       });
     },
     options: [{
       value: "",
-      label: "— Pilih Client —"
-    }, ...customers.map(c => ({
+      label: "— Pilih Client (kategori Sawit) —"
+    }, ...customers.filter(c => isSawitCat(c) || c.id === form.customerId).map(c => ({
       value: c.id,
       label: c.nama
     }))]
@@ -46689,11 +46790,20 @@ function UserManagement({
   const [accessModal, setAccessModal] = useState(null);
   const [accessList, setAccessList] = useState([]);
   const [creating, setCreating] = useState(false);
-  const loadUsers = async () => {
-    const {
+  const [loadErr, setLoadErr] = useState("");
+  const loadUsers = async (retried = false) => {
+    let {
       data,
       error
     } = await sb.from("profiles").select("*").order("nama");
+    // Sesi kedaluwarsa / tidak ada hasil → coba segarkan sesi sekali lalu ulangi, jangan diam-diam kosong.
+    if ((error || !data || data.length === 0) && !retried) {
+      try {
+        await sb.auth.refreshSession();
+      } catch (e) {}
+      return loadUsers(true);
+    }
+    if (error) setLoadErr("Gagal memuat data user: " + (error.message || "tidak diketahui") + ". Silakan Logout lalu Login ulang.");else if (!data || data.length === 0) setLoadErr("Data user kosong dari server (kemungkinan sesi login habis). Silakan Logout lalu Login ulang — data di database tidak terhapus.");else setLoadErr("");
     if (!error) setUsersRaw((data || []).map(p => ({
       id: p.id,
       nama: p.nama,
@@ -46938,7 +47048,23 @@ function UserManagement({
     }
   }), isOwnerLike && /*#__PURE__*/React.createElement(Btn, {
     onClick: openCreateModal
-  }, "+ Tambah User"))), isOwnerLike && /*#__PURE__*/React.createElement("div", {
+  }, "+ Tambah User"))), loadErr && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: theme.red || "#dc2626",
+      background: (theme.red || "#dc2626") + "11",
+      padding: "10px 14px",
+      borderRadius: 8,
+      border: `1px solid ${(theme.red || "#dc2626")}55`,
+      display: "flex",
+      justifyContent: "space-between",
+      gap: 10,
+      alignItems: "center"
+    }
+  }, /*#__PURE__*/React.createElement("span", null, "⚠️ ", loadErr), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    onClick: () => loadUsers()
+  }, "Coba lagi")), isOwnerLike && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
       color: theme.muted,
@@ -47513,9 +47639,14 @@ function App() {
   const handleLoginSuccess = sess => {
     setSession(sess);
     markAuthReady();
-    logUserActivity(store, sess, {
-      type: "login"
-    });
+    // Pencatatan aktivitas hanya pelengkap — tidak boleh menggagalkan login.
+    try {
+      logUserActivity(store, sess, {
+        type: "login"
+      });
+    } catch (e) {
+      console.warn("logUserActivity gagal:", e);
+    }
   };
   // Analisa User: record every module the logged-in user actually lands on — covers explicit
   // sidebar clicks (selectMenu above) AND programmatic cross-module handoffs that call setActive
