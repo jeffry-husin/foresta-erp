@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-10-29.4";
+const APP_BUILD = "2026-10-29.6";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -512,6 +512,46 @@ const reservedQtyForAllExcluding = (allocationByPart, partNumber, excludeSoNomor
 const catatanStyle = {
   whiteSpace: "pre-wrap",
   wordBreak: "break-word"
+};
+// DAR berbasis pilihan (2026-10-29): mekanik memilih jenis aktivitas, bukan mengetik. Tiap entri di
+// dar.catatanHarian menyimpan {tanggal, jamMulai?, jamSelesai?, jenis, detail, catatan}; `catatan` selalu
+// dibangkitkan dari pilihan (darAktivitasText) sehingga cetak/preview/approval lama tetap jalan. Entri lama
+// tanpa `jenis` dianggap "Other" (teks aslinya tidak diubah).
+const DAR_JENIS = [
+  { id: "Perjalanan", fields: ["dari", "menuju"] },
+  { id: "Lapor", opts: ["Manager Mill", "KTU", "Other"], other: true },
+  { id: "Induksi" },
+  { id: "Check Kondisi", opts: ["Crane", "HPU", "System Hydraulic", "System Electric"], multi: true },
+  { id: "Mengganti", part: true },
+  { id: "Pemasangan" },
+  { id: "Service / Inspection" },
+  { id: "Training" },
+  { id: "Test Run" },
+  { id: "Menunggu", opts: ["Alat Angkut", "Other"], other: true },
+  { id: "Standby", opts: ["Menunggu Parts", "Other"], other: true },
+  { id: "Monitoring" },
+  { id: "Pengurusan Document" },
+  { id: "Libur" },
+  { id: "Other", teksWajib: true }
+];
+const darAktivitasText = a => {
+  const d = a.detail || {};
+  const jenis = a.jenis || "Other";
+  let t = jenis;
+  if (jenis === "Perjalanan") t += (d.dari || d.menuju) ? ": " + (d.dari || "?") + " → " + (d.menuju || "?") : "";
+  else if (jenis === "Mengganti") t += d.partNumber || d.partName ? ": " + [d.partNumber, d.partName].filter(Boolean).join(" ") + " x" + (d.qty || 1) + (d.manual ? " (belum dari DO)" : "") : "";
+  else if (d.pilih && d.pilih.length) t += ": " + d.pilih.map(x => x === "Other" && d.teks ? d.teks : x).join(", ");
+  else if (d.teks) t += ": " + d.teks;
+  if (a.catatan) t += " — " + a.catatan;
+  return t;
+};
+const darPekerjaanSummary = list => {
+  const seen = [];
+  (list || []).forEach(a => {
+    const j = a.jenis || "Other";
+    if (!seen.includes(j)) seen.push(j);
+  });
+  return seen.join(", ");
 };
 // Convert a number into Indonesian words (terbilang), e.g. 1500000 -> "Satu Juta Lima Ratus Ribu Rupiah"
 const terbilang = n => {
@@ -10781,6 +10821,31 @@ function MekanikReport({
     jamSelesai: "",
     catatan: ""
   });
+  const emptyDarAkt = tgl => ({
+    tanggal: tgl || today(),
+    jenis: "",
+    pilih: [],
+    teks: "",
+    dari: "",
+    menuju: "",
+    partNumber: "",
+    partName: "",
+    qty: 1,
+    manual: false,
+    jamMulai: "",
+    jamSelesai: "",
+    showJam: false,
+    catatan: ""
+  });
+  const [darAkt, setDarAkt] = useState(emptyDarAkt());
+  const [darDraftInfo, setDarDraftInfo] = useState("");
+  // Draft di HP: form DAR disimpan ke localStorage tiap berubah, dipulihkan bila tertutup sebelum Simpan.
+  const darDraftKeyFor = (visitId, editId) => "erp_dar_draft_" + (session.username || session.nama) + "_" + (visitId || "") + "_" + (editId || "new");
+  const darDraftRemove = (visitId, editId) => {
+    try {
+      localStorage.removeItem(darDraftKeyFor(visitId, editId));
+    } catch (e) {}
+  };
   const [recCart, setRecCart] = useState([]); // items being collected before submitting 1 Part Recommendation doc for this visit
   const [recSearch, setRecSearch] = useState(""); // Part Recommendation inline search box (visitPage) — kept for back-compat but no longer rendered; see recAddForm below
   const [recRowInputs, setRecRowInputs] = useState({}); // Qty/Alasan staged per part number while browsing search results, keyed by partNumber
@@ -11058,6 +11123,17 @@ function MekanikReport({
         namaPenerima: "",
         catatanHarian: []
       });
+      setDarAkt(emptyDarAkt(editingDar ? editingDar.tanggalMulai : visit.tanggal));
+      setDarDraftInfo("");
+      try {
+        const raw = localStorage.getItem(darDraftKeyFor(visit.id, editingDar ? editingDar.id : null));
+        const dr = raw ? JSON.parse(raw) : null;
+        if (dr && dr.darForm) {
+          setDarForm(dr.darForm);
+          if (dr.darAkt) setDarAkt(dr.darAkt);
+          setDarDraftInfo("Draft yang belum disimpan dipulihkan (" + (dr.savedAt || "") + "). Tekan Batal untuk membuang draft.");
+        }
+      } catch (e) {}
     }
     if (type === "bast") {
       const editingBast = editingRecord;
@@ -11187,40 +11263,254 @@ function MekanikReport({
     },
     title: "Klik untuk lihat detail lengkap"
   }, v.id);
-  const addCatatanHarian = () => {
-    if (!catatanHarianInput.catatan) return alert("Isi catatan harian");
+  const addDarAktivitas = () => {
+    const a = darAkt;
+    const def = DAR_JENIS.find(j => j.id === a.jenis);
+    if (!def) return alert("Pilih jenis aktivitas dulu");
+    if (def.teksWajib && !a.teks.trim()) return alert("Isi keterangan aktivitas");
+    if (def.part && !a.partName && !a.partNumber) return alert("Pilih part yang diganti");
+    if (def.opts && !def.multi && a.pilih.length === 0) return alert("Pilih salah satu opsi");
+    if (def.multi && a.pilih.length === 0) return alert("Pilih minimal satu yang dicek");
+    if (def.other && a.pilih.includes("Other") && !a.teks.trim()) return alert("Isi keterangan untuk Other");
+    const detail = {};
+    if (def.fields) {
+      detail.dari = a.dari.trim();
+      detail.menuju = a.menuju.trim();
+    }
+    if (def.opts) detail.pilih = [...a.pilih];
+    if (def.part) {
+      detail.partNumber = a.partNumber;
+      detail.partName = a.partName;
+      detail.qty = parseInt(a.qty) || 1;
+      detail.manual = true; // belum terhubung ke DO/Parts Used (Fase 3) — ditandai untuk review kemudian
+    }
+    if (a.teks.trim()) detail.teks = a.teks.trim();
+    const entry = {
+      tanggal: a.tanggal,
+      jamMulai: a.jamMulai || "",
+      jamSelesai: a.jamSelesai || "",
+      jenis: a.jenis,
+      detail,
+      catatan: a.catatan.trim()
+    };
+    // `catatan` = teks lengkap hasil pilihan (dipakai cetak/preview); `ket` = catatan bebas aslinya.
+    entry.ket = a.catatan.trim();
+    entry.catatan = darAktivitasText(entry);
     setDarForm(f => ({
       ...f,
-      catatanHarian: [...f.catatanHarian, {
-        ...catatanHarianInput
-      }]
+      catatanHarian: [...f.catatanHarian, entry]
     }));
-    setCatatanHarianInput({
-      tanggal: catatanHarianInput.tanggal,
-      jamMulai: "",
-      jamSelesai: "",
-      catatan: ""
-    });
+    setDarAkt(emptyDarAkt(a.tanggal));
   };
+  // UI pilihan aktivitas DAR (tombol besar, minim mengetik — dipakai mekanik di layar HP).
+  const renderDarAktivitas = () => {
+    const a = darAkt;
+    const def = DAR_JENIS.find(j => j.id === a.jenis);
+    const upd = patch => setDarAkt(prev => ({
+      ...prev,
+      ...patch
+    }));
+    const chip = (label, active, onClick) => React.createElement("button", {
+      key: label,
+      type: "button",
+      onClick,
+      style: {
+        padding: "10px 14px",
+        minHeight: 44,
+        borderRadius: 10,
+        border: `1px solid ${active ? theme.accentLight : theme.border}`,
+        background: active ? theme.accentLight : "transparent",
+        color: active ? "#fff" : theme.text,
+        fontSize: 14,
+        fontWeight: active ? 700 : 500,
+        cursor: "pointer"
+      }
+    }, label);
+    const wrap = {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 8
+    };
+    const togglePilih = o => upd({
+      pilih: def.multi ? a.pilih.includes(o) ? a.pilih.filter(x => x !== o) : [...a.pilih, o] : [o]
+    });
+    return React.createElement("div", {
+      style: {
+        border: `1px solid ${theme.border}`,
+        borderRadius: 10,
+        padding: 14,
+        display: "flex",
+        flexDirection: "column",
+        gap: 12
+      }
+    }, React.createElement("p", {
+      style: {
+        margin: 0,
+        color: theme.muted,
+        fontSize: 13,
+        fontWeight: 600
+      }
+    }, "AKTIVITAS (pilih, tidak perlu mengetik)"), React.createElement(Input, {
+      label: "Tanggal",
+      value: a.tanggal,
+      onChange: v => upd({
+        tanggal: v
+      }),
+      type: "date"
+    }), React.createElement("div", {
+      style: wrap
+    }, DAR_JENIS.map(j => chip(j.id, a.jenis === j.id, () => setDarAkt(a.jenis === j.id ? emptyDarAkt(a.tanggal) : {
+      ...emptyDarAkt(a.tanggal),
+      jenis: j.id
+    })))), def && def.fields && React.createElement("div", {
+      style: {
+        display: "grid",
+        gridTemplateColumns: "1fr 1fr",
+        gap: 10
+      }
+    }, React.createElement(Input, {
+      label: "Dari",
+      value: a.dari,
+      onChange: v => upd({
+        dari: v
+      })
+    }), React.createElement(Input, {
+      label: "Menuju",
+      value: a.menuju,
+      onChange: v => upd({
+        menuju: v
+      })
+    })), def && def.opts && React.createElement("div", {
+      style: wrap
+    }, def.opts.map(o => chip(o, a.pilih.includes(o), () => togglePilih(o)))), def && (def.teksWajib || def.other && a.pilih.includes("Other")) && React.createElement(Input, {
+      label: def.teksWajib ? "Keterangan" : "Keterangan Other",
+      value: a.teks,
+      onChange: v => upd({
+        teks: v
+      }),
+      placeholder: "Tulis singkat"
+    }), def && def.part && React.createElement("div", {
+      style: {
+        display: "grid",
+        gridTemplateColumns: "2fr 1fr",
+        gap: 10,
+        alignItems: "end"
+      }
+    }, React.createElement(PartPicker, {
+      label: "Part yang diganti",
+      value: a.partNumber,
+      parts: parts,
+      showDescription: true,
+      onChange: pn => {
+        const p = parts.find(x => x.partNumber === pn);
+        upd({
+          partNumber: pn,
+          partName: p?.partName || ""
+        });
+      }
+    }), React.createElement(Input, {
+      label: "Qty",
+      type: "number",
+      value: a.qty,
+      onChange: v => upd({
+        qty: v
+      })
+    })), def && !def.teksWajib && !def.other && !def.fields && !def.opts && !def.part && React.createElement("div", {
+      style: {
+        fontSize: 12,
+        color: theme.muted
+      }
+    }, "Tidak ada isian tambahan — cukup tekan Tambah."), def && React.createElement(React.Fragment, null, a.showJam ? React.createElement("div", {
+      style: {
+        display: "grid",
+        gridTemplateColumns: "1fr 1fr",
+        gap: 10
+      }
+    }, React.createElement(Input, {
+      label: "Jam Mulai (opsional)",
+      value: a.jamMulai,
+      onChange: v => upd({
+        jamMulai: v
+      }),
+      type: "time",
+      lang: "en-GB",
+      style: {
+        colorScheme: "dark"
+      }
+    }), React.createElement(Input, {
+      label: "Jam Selesai (opsional)",
+      value: a.jamSelesai,
+      onChange: v => upd({
+        jamSelesai: v
+      }),
+      type: "time",
+      lang: "en-GB",
+      style: {
+        colorScheme: "dark"
+      }
+    })) : chip("+ Jam (opsional)", false, () => upd({
+      showJam: true
+    })), React.createElement(Input, {
+      label: "Catatan (opsional)",
+      value: a.catatan,
+      onChange: v => upd({
+        catatan: v
+      }),
+      placeholder: "Tambahan bila perlu"
+    }), React.createElement(Btn, {
+      onClick: addDarAktivitas
+    }, "+ Tambah Aktivitas")), darForm.catatanHarian.length > 0 && React.createElement(Table, {
+      headers: ["Tanggal", "Aktivitas", ""],
+      rows: darForm.catatanHarian.map((c, i) => [c.tanggal + (c.jamMulai || c.jamSelesai ? " " + (c.jamMulai || "-") + "–" + (c.jamSelesai || "-") : ""), React.createElement("span", {
+        style: catatanStyle
+      }, c.catatan), React.createElement(Btn, {
+        size: "sm",
+        variant: "danger",
+        onClick: () => removeCatatanHarian(i)
+      }, "×")])
+    }));
+  };
+  // Simpan draft otomatis (HP sering tertutup/sinyal hilang sebelum sempat menekan Simpan).
+  useEffect(() => {
+    if (formType !== "dar" || !formVisit) return;
+    const dirty = darForm.catatanHarian.length > 0 || darAkt.jenis || darForm.namaPenerima || darForm.catatan;
+    try {
+      const key = darDraftKeyFor(formVisit.id, editingDarId);
+      if (dirty) localStorage.setItem(key, JSON.stringify({
+        darForm,
+        darAkt,
+        savedAt: new Date().toLocaleString("id-ID")
+      }));
+    } catch (e) {}
+  }, [darForm, darAkt, formType, formVisit, editingDarId]);
   const removeCatatanHarian = i => setDarForm(f => ({
     ...f,
     catatanHarian: f.catatanHarian.filter((_, j) => j !== i)
   }));
   const saveDar = () => {
-    if (!darForm.pekerjaan) return alert("Isi pekerjaan yang dilakukan");
+    // Aktivitas yang sedang dipilih tapi belum ditekan "+ Tambah" jangan sampai hilang diam-diam.
+    if (darAkt.jenis) return alert("Ada aktivitas yang belum ditambahkan — tekan \"+ Tambah Aktivitas\" atau pilih ulang jenisnya untuk membatalkan.");
+    if (darForm.catatanHarian.length === 0 && !darForm.pekerjaan) return alert("Tambahkan minimal 1 aktivitas");
+    // Ringkasan `pekerjaan` dibangkitkan otomatis dari jenis aktivitas (entri lama tanpa jenis tetap memakai teks aslinya).
+    const hasJenis = darForm.catatanHarian.some(c => c.jenis);
+    const darData = hasJenis ? {
+      ...darForm,
+      pekerjaan: darPekerjaanSummary(darForm.catatanHarian)
+    } : darForm;
+    darDraftRemove(formVisit?.id, editingDarId);
     if (editingDarId) {
       const arr = [...dars];
       const idx = arr.findIndex(d => d.id === editingDarId);
       if (idx >= 0) arr[idx] = {
         ...arr[idx],
-        ...darForm
+        ...darData
       };
       setDars(arr);
     } else {
       setDars([...dars, {
         id: "DAR-" + uid(),
         visitId: formVisit.id,
-        ...darForm,
+        ...darData,
         mekanikNama: session.nama,
         status: "Menunggu Approval Septi"
       }]);
@@ -11847,7 +12137,7 @@ function MekanikReport({
       partyLabel: "Customer:",
       partyName: v.customerNama || "-",
       partyExtra: `Lokasi: ${v.lokasi || "-"} · Unit: ${v.unitTerkait || "-"}`,
-      extraInfoRows: [["Mekanik", d.mekanikNama], ["Jam Kerja", `${d.jamMulai || "-"} – ${d.jamSelesai || "-"} (24 Jam)`], ["Pekerjaan", d.pekerjaan]],
+      extraInfoRows: [["Mekanik", d.mekanikNama], ...(d.jamMulai || d.jamSelesai ? [["Jam Kerja", `${d.jamMulai || "-"} – ${d.jamSelesai || "-"} (24 Jam)`]] : []), ["Pekerjaan", d.pekerjaan]],
       itemHeaders: ["Tanggal", "Jam Mulai", "Jam Selesai", "Catatan Harian"],
       items: d.catatanHarian.length ? d.catatanHarian.map(c => [c.tanggal, c.jamMulai || d.jamMulai || "-", c.jamSelesai || d.jamSelesai || "-", c.catatan]) : [[d.tanggalMulai + " s/d " + d.tanggalSelesai, d.jamMulai || "-", d.jamSelesai || "-", d.pekerjaan]],
       showPrice: false,
@@ -11996,8 +12286,8 @@ function MekanikReport({
       variant: "ghost",
       onClick: () => openForm(v, "surattugas")
     }, "📜 + Surat Tugas")), type === "dar" && !formType && /*#__PURE__*/React.createElement(Table, {
-      headers: ["Periode", "Pekerjaan", "Hari Tercatat", "Status", "Aksi"],
-      rows: visitDars(v.id).map(d => [`${d.tanggalMulai} s/d ${d.tanggalSelesai}`, d.pekerjaan, `${d.catatanHarian.length} hari`, /*#__PURE__*/React.createElement(Badge, {
+      headers: ["Periode", "Pekerjaan", "Aktivitas", "Status", "Aksi"],
+      rows: visitDars(v.id).map(d => [`${d.tanggalMulai} s/d ${d.tanggalSelesai}`, d.pekerjaan, `${d.catatanHarian.length} entri`, /*#__PURE__*/React.createElement(Badge, {
         color: darStatusColor[d.status]
       }, d.status), /*#__PURE__*/React.createElement("div", {
         style: {
@@ -12065,125 +12355,15 @@ function MekanikReport({
       tanggalSelesai: v
     }),
     type: "date"
-  })), /*#__PURE__*/React.createElement("div", {
+  })), darDraftInfo && React.createElement("div", {
     style: {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr",
-      gap: 14
+      fontSize: 12,
+      color: theme.yellow,
+      border: `1px solid ${theme.yellow}`,
+      borderRadius: 8,
+      padding: "8px 10px"
     }
-  }, /*#__PURE__*/React.createElement(Input, {
-    label: "Jam Mulai (24 Jam)",
-    value: darForm.jamMulai,
-    onChange: v => setDarForm({
-      ...darForm,
-      jamMulai: v
-    }),
-    type: "time",
-    lang: "en-GB",
-    style: {
-      colorScheme: "dark"
-    }
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "Jam Selesai (24 Jam)",
-    value: darForm.jamSelesai,
-    onChange: v => setDarForm({
-      ...darForm,
-      jamSelesai: v
-    }),
-    type: "time",
-    lang: "en-GB",
-    style: {
-      colorScheme: "dark"
-    }
-  })), /*#__PURE__*/React.createElement(Input, {
-    label: "Pekerjaan yang Dilakukan (Ringkasan)",
-    value: darForm.pekerjaan,
-    onChange: v => setDarForm({
-      ...darForm,
-      pekerjaan: v
-    }),
-    required: true,
-    placeholder: "Misal: Ganti hydraulic oil, cek wire rope..."
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      border: `1px solid ${theme.border}`,
-      borderRadius: 10,
-      padding: 14
-    }
-  }, /*#__PURE__*/React.createElement("p", {
-    style: {
-      margin: "0 0 12px",
-      color: theme.muted,
-      fontSize: 13,
-      fontWeight: 600
-    }
-  }, "CATATAN PER HARI"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr 1fr",
-      gap: 10,
-      marginBottom: 10
-    }
-  }, /*#__PURE__*/React.createElement(Input, {
-    value: catatanHarianInput.tanggal,
-    onChange: v => setCatatanHarianInput({
-      ...catatanHarianInput,
-      tanggal: v
-    }),
-    type: "date"
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "Jam Mulai",
-    value: catatanHarianInput.jamMulai,
-    onChange: v => setCatatanHarianInput({
-      ...catatanHarianInput,
-      jamMulai: v
-    }),
-    type: "time",
-    lang: "en-GB",
-    style: {
-      colorScheme: "dark"
-    }
-  }), /*#__PURE__*/React.createElement(Input, {
-    label: "Jam Selesai",
-    value: catatanHarianInput.jamSelesai,
-    onChange: v => setCatatanHarianInput({
-      ...catatanHarianInput,
-      jamSelesai: v
-    }),
-    type: "time",
-    lang: "en-GB",
-    style: {
-      colorScheme: "dark"
-    }
-  })), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "2fr auto",
-      gap: 10,
-      marginBottom: 10
-    }
-  }, /*#__PURE__*/React.createElement(Input, {
-    value: catatanHarianInput.catatan,
-    onChange: v => setCatatanHarianInput({
-      ...catatanHarianInput,
-      catatan: v
-    }),
-    multiline: true,
-    rows: 2,
-    placeholder: "Catatan kegiatan hari ini..."
-  }), /*#__PURE__*/React.createElement(Btn, {
-    size: "sm",
-    onClick: addCatatanHarian
-  }, "+ Add")), darForm.catatanHarian.length > 0 && /*#__PURE__*/React.createElement(Table, {
-    headers: ["Tanggal", "Jam Mulai", "Jam Selesai", "Catatan", ""],
-    rows: darForm.catatanHarian.map((c, i) => [c.tanggal, c.jamMulai || "-", c.jamSelesai || "-", /*#__PURE__*/React.createElement("span", {
-      style: catatanStyle
-    }, c.catatan), /*#__PURE__*/React.createElement(Btn, {
-      size: "sm",
-      variant: "danger",
-      onClick: () => removeCatatanHarian(i)
-    }, "×")])
-  })), /*#__PURE__*/React.createElement(Input, {
+  }, darDraftInfo), renderDarAktivitas(), /*#__PURE__*/React.createElement(Input, {
     label: "Nama Penerima (Client)",
     value: darForm.namaPenerima,
     onChange: v => setDarForm({
@@ -12208,6 +12388,7 @@ function MekanikReport({
   }, /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
     onClick: () => {
+      darDraftRemove(formVisit?.id, editingDarId);
       closeForm();
       setEditingDarId(null);
     }
@@ -34179,7 +34360,7 @@ function printDocument({
   const moneyColsPrint = itemHeaders.map((_, j) => items.some(r => isMoneyText(String(r[j] ?? ""))));
   const rows = items.map(r => `<tr>${r.map((c, j) => `<td style="padding:8px 10px;border-bottom:1px solid #ddd;font-size:${fs(13)}px;${colWidths ? "overflow-wrap:anywhere;" : ""}${moneyColsPrint[j] ? `min-width:${MONEY_COL_MIN};white-space:nowrap;text-align:right;` : isNumericCell(c) ? "white-space:nowrap;" : "white-space:pre-wrap;word-break:break-word;"}">${escapeHtml(c)}</td>`).join("")}</tr>`).join("");
   const headerCols = itemHeaders.map((h, j) => `<th style="padding:8px 10px;text-align:${moneyColsPrint[j] ? "right" : "left"};font-size:${fs(12)}px;color:#555;border-bottom:2px solid #333;${colWidths ? "overflow-wrap:anywhere;" : ""}${moneyColsPrint[j] ? `min-width:${MONEY_COL_MIN};white-space:nowrap;` : ""}">${escapeHtml(h)}</th>`).join("");
-  const extraRowsHtml = (extraInfoRows || []).map(([k, v]) => `<div style="display:flex;justify-content:space-between;font-size:${fs(13)}px;padding:2px 0;"><span style="color:#666;">${escapeHtml(k)}</span><span style="font-weight:600;">${escapeHtml(v)}</span></div>`).join("");
+  const extraRowsHtml = (extraInfoRows || []).map(([k, v]) => `<div style="display:flex;justify-content:space-between;font-size:${fs(13)}px;padding:2px 0;"><span class="xr-k" style="color:#666;">${escapeHtml(k)}</span><span class="xr-v" style="font-weight:600;">${escapeHtml(v)}</span></div>`).join("");
   // Task #176: the on-screen Term of Payment forms (Quotation/SO) always show each termin's Rupiah
   // nominal alongside its %, but the printed document only ever showed the % — so a client reading
   // the printed Quotation/SO had to do the math themselves. Add a Nominal column here, computed the
@@ -34205,7 +34386,29 @@ function printDocument({
     <style>
       @page { size: A4 portrait; margin: 12mm; }
       body { font-family: 'Segoe UI', Arial, sans-serif; margin: 20px; color: #1a1a1a; }
-      ${uniformFont ? "* { font-family: Arial, Helvetica, sans-serif !important; color: #000 !important; font-weight: 700 !important; letter-spacing: 0.4px; -webkit-font-smoothing: none; text-rendering: optimizeSpeed; background: none !important; } img.co-logo { display: none !important; } th, td { border-bottom: 2px solid #000 !important; } .header { border-bottom: 3px solid #000 !important; } .doctitle { color: #000 !important; }" : ""}
+      ${uniformFont ? `/* DO typography copied from the office's Surat Jalan Excel template (SURAT JALAN AMP.xls):
+         letterhead Tahoma 16 bold / 12; title Tahoma 18; customer name+address Arial 14 bold; No/header/
+         signature Arial 13; table body + info Arial 12; Up/Catatan Calibri-sized per template; disclaimer Calibri 11. */
+      * { font-family: Arial, sans-serif !important; color: #000 !important; font-weight: 400 !important; background: none !important; }
+      img.co-logo { display: none !important; }
+      th, td { border-bottom: 2px solid #000 !important; }
+      .header { border-bottom: 3px solid #000 !important; }
+      .company { font-family: Tahoma, Arial, sans-serif !important; font-size: 16pt !important; font-weight: 700 !important; }
+      .co-line { font-family: Tahoma, Arial, sans-serif !important; font-size: 12pt !important; }
+      .doctitle { font-family: Tahoma, Arial, sans-serif !important; font-size: 18pt !important; font-weight: 400 !important; }
+      .doc-meta { font-size: 13pt !important; }
+      .doc-meta strong { font-weight: 400 !important; }
+      .party-label { font-size: 12pt !important; }
+      .party-name, .party-extra { font-size: 14pt !important; font-weight: 700 !important; }
+      .xr-k { font-size: 12pt !important; font-weight: 700 !important; }
+      .xr-v { font-size: 12pt !important; font-weight: 400 !important; }
+      th { font-size: 13pt !important; font-weight: 400 !important; }
+      td { font-size: 12pt !important; font-weight: 400 !important; }
+      .note-row { font-size: 12pt !important; }
+      .note-row strong { font-weight: 700 !important; }
+      .sig-row { font-size: 13pt !important; }
+      .disc { font-family: Calibri, Arial, sans-serif !important; font-size: 11pt !important; }
+      .disc-t { font-size: 12pt !important; }` : ""}
       .header { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 3px solid #1a1a1a; padding-bottom: 16px; margin-bottom: 24px; }
       .company { font-size: ${fs(20)}px; font-weight: 800; white-space: nowrap; }
       .doctitle { font-size: ${fs(26)}px; font-weight: 800; text-align: right; color: #2563eb; }
@@ -34222,19 +34425,19 @@ function printDocument({
           ${co.logo ? `<img class="co-logo" src="${co.logo}" style="max-height:56px;max-width:120px;object-fit:contain;" />` : ""}
           <div>
             <div class="company">${escapeHtml(co.nama)}</div>
-            ${co.alamat ? `<div style="font-size:${fs(12)}px;color:#666;margin-top:2px;white-space:pre-line;">${escapeHtml(co.alamat)}</div>` : ""}
-            <div style="font-size:${fs(12)}px;color:#666;margin-top:2px;">${escapeHtml(co.telepon)} · ${escapeHtml(co.email)}${co.npwp ? ` · NPWP: ${escapeHtml(co.npwp)}` : ""}</div>
+            ${co.alamat ? `<div class="co-line" style="font-size:${fs(12)}px;color:#666;margin-top:2px;white-space:pre-line;">${escapeHtml(co.alamat)}</div>` : ""}
+            <div class="co-line" style="font-size:${fs(12)}px;color:#666;margin-top:2px;">${escapeHtml(co.telepon)} · ${escapeHtml(co.email)}${co.npwp ? ` · NPWP: ${escapeHtml(co.npwp)}` : ""}</div>
           </div>
         </div>
         <div>
           <div class="doctitle">${escapeHtml(docTitle)}</div>
-          <div style="text-align:right;font-size:${fs(13)}px;margin-top:6px;">No: <strong>${escapeHtml(nomor)}</strong><br/>${escapeHtml(tanggalLabel)}: ${fmtDateRev(tanggal)}</div>
+          <div class="doc-meta" style="text-align:right;font-size:${fs(13)}px;margin-top:6px;">No: <strong>${escapeHtml(nomor)}</strong><br/>${escapeHtml(tanggalLabel)}: ${fmtDateRev(tanggal)}</div>
         </div>
       </div>
       <div style="margin-bottom:20px;">
-        <div style="font-size:${fs(12)}px;color:#666;">${escapeHtml(partyLabel)}</div>
-        <div style="font-size:${fs(15)}px;font-weight:700;">${escapeHtml(partyName)}</div>
-        ${partyExtra ? `<div style="font-size:${fs(12)}px;color:#666;">${escapeHtml(partyExtra)}</div>` : ""}
+        <div class="party-label" style="font-size:${fs(12)}px;color:#666;">${escapeHtml(partyLabel)}</div>
+        <div class="party-name" style="font-size:${fs(15)}px;font-weight:700;">${escapeHtml(partyName)}</div>
+        ${partyExtra ? `<div class="party-extra" style="font-size:${fs(12)}px;color:#666;">${escapeHtml(partyExtra)}</div>` : ""}
       </div>
       ${extraRowsHtml ? `<div style="background:#f5f5f5;border-radius:8px;padding:10px 14px;margin-bottom:16px;">${extraRowsHtml}</div>` : ""}
       <table${colWidths ? ` style="table-layout:fixed;" class="${colWidths.length >= 8 ? "wide" : ""}"` : ""}>${colWidths ? `<colgroup>${colWidths.map(w => `<col style="width:${w};" />`).join("")}</colgroup>` : ""}
@@ -34253,13 +34456,13 @@ function printDocument({
       ${terbilangText ? `<div style="text-align:right;font-size:${fs(11)}px;color:#666;font-style:italic;margin-top:4px;">Terbilang: ${terbilangText}</div>` : ""}` : ""}
       ${bankInfoText ? `<div style="margin-top:16px;background:#f5f5f5;border-radius:8px;padding:10px 14px;font-size:${fs(12)}px;"><strong>Informasi Pembayaran:</strong><br/>${escapeHtml(bankInfoText)}</div>` : ""}
       ${paymentTermsHtml}
-      ${catatan ? `<div style="margin-top:24px;font-size:${fs(12)}px;color:#666;white-space:pre-wrap;word-break:break-word;"><strong>Catatan:</strong> ${escapeHtml(catatan)}</div>` : ""}
-      <div style="margin-top:20px;display:flex;justify-content:${disetujuiAlign === "left" ? "flex-start" : hideCreatedBy ? "center" : "space-between"};font-size:${fs(12)}px;">
+      ${catatan ? `<div class="note-row" style="margin-top:24px;font-size:${fs(12)}px;color:#666;white-space:pre-wrap;word-break:break-word;"><strong>Catatan:</strong> ${escapeHtml(catatan)}</div>` : ""}
+      <div class="sig-row" style="margin-top:20px;display:flex;justify-content:${disetujuiAlign === "left" ? "flex-start" : hideCreatedBy ? "center" : "space-between"};font-size:${fs(12)}px;">
         ${hideCreatedBy ? "" : `<div style="text-align:center;width:200px;">${escapeHtml(dibuatOlehLabel)}<br/><br/>${sigBlock(dibuatOleh)}</div>`}
         <div style="text-align:center;width:200px;">${escapeHtml(disetujuiLabel)}${showMateraiSpace ? Array(materaiSpasi).fill("<br/>").join("") : "<br/>"}${sigBlock(disetujuiOleh, showMateraiSpace)}</div>
       </div>
-      <div style="margin-top:40px;text-align:center;font-style:italic;font-size:${fs(7)}px;color:#888;border-top:1px solid #ddd;padding-top:10px;line-height:1.5;">
-        DISCLAIMER<br/>
+      <div class="disc" style="margin-top:40px;text-align:center;font-style:italic;font-size:${fs(7)}px;color:#888;border-top:1px solid #ddd;padding-top:10px;line-height:1.5;">
+        <span class="disc-t">DISCLAIMER</span><br/>
         "Dokumen ini telah diterbitkan dan ditandatangani secara elektronik melalui sistem PT. SENTRA MULIA MANDIRI sehingga sah dan mengikat secara hukum tanpa memerlukan tanda tangan basah maupun stempel perusahaan, sesuai dengan ketentuan UU ITE No. 11 Tahun 2008.<br/>
         Lampiran ini merupakan bukti sah dan hanya berlaku sesuai dengan nomor, tanggal, serta syarat dan ketentuan yang tercantum di dalamnya.<br/>
         Segala bentuk perubahan, pemalsuan, atau penggunaan dokumen di luar peruntukan tanpa persetujuan tertulis dari PT. SENTRA MULIA MANDIRI adalah tidak sah."
