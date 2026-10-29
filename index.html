@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-10-29.9";
+const APP_BUILD = "2026-10-29.10";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -14236,7 +14236,7 @@ function MekanikReport({
     keyFor: v => v.id,
     fields: [{
       label: "No. Kunjungan",
-      render: v => v.id
+      render: v => visitIdCell(v)
     }, {
       label: "Client",
       render: v => v.customerNama
