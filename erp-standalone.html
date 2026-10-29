@@ -28163,6 +28163,7 @@ function DeliveryOrderModule({
         },
         disetujuiLabel: "Penerima",
         sizeBoost: 2,
+        colWidths: ["28%", "58%", "14%"],
         uniformFont: true
       });
     }
@@ -34048,6 +34049,31 @@ const COMPANY_INFO = {
   telepon: "021-5550-0000",
   email: "info@heavyequipment.co.id"
 };
+// Fixed print column widths (% of table width, each set sums to 100), keyed by the item header row, so a
+// document type prints with identical column widths every time regardless of its content. Money columns
+// (Harga/Subtotal/Uang...) get >=16-18% so a full "Rp 1.234.567" never has to wrap. A caller can still
+// override by passing its own colWidths to printDocument().
+const PRINT_COL_WIDTHS = {
+  "Part Number|Nama Barang|Qty": [28, 58, 14],
+  "Part Number|Part Name|Qty": [28, 58, 14],
+  "Part Number|Part Name|Deskripsi|Satuan|Qty": [20, 28, 30, 10, 12],
+  "Kategori|Komponen|Kondisi|Deskripsi": [18, 26, 16, 40],
+  "Nama|Jabatan|Jenis Pekerjaan|Berangkat|Sampai|Kendaraan": [20, 16, 24, 14, 12, 14],
+  "Jenis Laporan|Jumlah": [75, 25],
+  "Tanggal|Jam Mulai|Jam Selesai|Catatan Harian": [15, 12, 12, 61],
+  "Part Number|Part Name|Qty|Alasan": [22, 33, 8, 37],
+  "Keterangan|Detail": [30, 70],
+  "No|Kode|Nama Item|Qty|Harga|Subtotal": [5, 14, 37, 8, 18, 18],
+  "No|Part Number|Part Name|Qty|Harga|Subtotal": [5, 17, 33, 8, 18, 19],
+  "Unit Code|Unit Name|Description|Qty|Harga|Subtotal": [14, 20, 22, 8, 18, 18],
+  "Part Number|Part Name|Description|Qty|Harga|Subtotal": [15, 21, 21, 7, 18, 18],
+  "Part Number|Part Name|Description|Qty|Price|Subtotal": [15, 21, 21, 7, 18, 18],
+  "Part Number|Part Name|Deskripsi|Qty Dibutuhkan|Stok Tersedia|Qty Kurang|Catatan": [15, 20, 19, 10, 10, 10, 16],
+  "PN|Nama Barang/Jasa|Qty|Harga|Subtotal": [15, 41, 8, 18, 18],
+  "Nama|Jabatan|Riil Hari|\u00bd Hari|Absen Hari|Uang Makan|Uang Kerajinan|Total": [16, 12, 8, 7, 8, 16, 17, 16],
+  "Nama|Normal|Riil|\u00bd Hari|Absen|D.Luar|Trlmbt(j)|Lembur(j)|Cuti|Cuti Khusus|Ijin|Sakit|Jam Kerja|Uang Makan": [12, 6, 5, 6, 6, 6, 8, 8, 5, 7, 5, 5, 7, 14],
+  "Nama|Status|Normal|Riil|D.Luar|Absen|Uang Kerajinan|Uang Harian Kerja|Total": [15, 9, 7, 7, 7, 7, 15, 16, 17]
+};
 function printDocument({
   docType,
   docTitle,
@@ -34102,9 +34128,14 @@ function printDocument({
   // weight (`!important`, since inline styles like `color:#555` otherwise win over a plain rule),
   // not just a consistent font family. Scoped to DO only (uniformFont: true at the DO call site)
   // so other document types keep their normal (screen-oriented) muted grays.
-  uniformFont = false
+  uniformFont = false,
+  // Optional fixed column widths (array of CSS widths, one per itemHeaders entry, e.g. ["28%","58%","14%"]).
+  // When given, the item table uses table-layout:fixed + <colgroup>, so column widths are identical on
+  // every printed document regardless of content (Delivery Order uses this). Long text wraps in-cell.
+  colWidths
 }) {
   const fs = n => n + sizeBoost;
+  if (!colWidths) { const w = PRINT_COL_WIDTHS[itemHeaders.join("|")]; if (w && w.length === itemHeaders.length) colWidths = w.map(n => n + "%"); }
   // Always use the live company settings from the Setting Perusahaan module (falls back to
   // the original hardcoded defaults only if a caller hasn't been updated to pass it yet).
   const co = {
@@ -34127,8 +34158,8 @@ function printDocument({
   // separated amount) gets the SAME fixed minimum width (MONEY_COL_MIN) in every printed document,
   // so Harga/Subtotal never change width from one document to the next or wrap mid-number.
   const moneyColsPrint = itemHeaders.map((_, j) => items.some(r => isMoneyText(String(r[j] ?? ""))));
-  const rows = items.map(r => `<tr>${r.map((c, j) => `<td style="padding:8px 10px;border-bottom:1px solid #ddd;font-size:${fs(13)}px;${moneyColsPrint[j] ? `min-width:${MONEY_COL_MIN};white-space:nowrap;text-align:right;` : isNumericCell(c) ? "white-space:nowrap;" : "white-space:pre-wrap;word-break:break-word;"}">${escapeHtml(c)}</td>`).join("")}</tr>`).join("");
-  const headerCols = itemHeaders.map((h, j) => `<th style="padding:8px 10px;text-align:${moneyColsPrint[j] ? "right" : "left"};font-size:${fs(12)}px;color:#555;border-bottom:2px solid #333;${moneyColsPrint[j] ? `min-width:${MONEY_COL_MIN};white-space:nowrap;` : ""}">${escapeHtml(h)}</th>`).join("");
+  const rows = items.map(r => `<tr>${r.map((c, j) => `<td style="padding:8px 10px;border-bottom:1px solid #ddd;font-size:${fs(13)}px;${colWidths ? "overflow-wrap:anywhere;" : ""}${moneyColsPrint[j] ? `min-width:${MONEY_COL_MIN};white-space:nowrap;text-align:right;` : isNumericCell(c) ? "white-space:nowrap;" : "white-space:pre-wrap;word-break:break-word;"}">${escapeHtml(c)}</td>`).join("")}</tr>`).join("");
+  const headerCols = itemHeaders.map((h, j) => `<th style="padding:8px 10px;text-align:${moneyColsPrint[j] ? "right" : "left"};font-size:${fs(12)}px;color:#555;border-bottom:2px solid #333;${colWidths ? "overflow-wrap:anywhere;" : ""}${moneyColsPrint[j] ? `min-width:${MONEY_COL_MIN};white-space:nowrap;` : ""}">${escapeHtml(h)}</th>`).join("");
   const extraRowsHtml = (extraInfoRows || []).map(([k, v]) => `<div style="display:flex;justify-content:space-between;font-size:${fs(13)}px;padding:2px 0;"><span style="color:#666;">${escapeHtml(k)}</span><span style="font-weight:600;">${escapeHtml(v)}</span></div>`).join("");
   // Task #176: the on-screen Term of Payment forms (Quotation/SO) always show each termin's Rupiah
   // nominal alongside its %, but the printed document only ever showed the % — so a client reading
@@ -34160,6 +34191,7 @@ function printDocument({
       .company { font-size: ${fs(20)}px; font-weight: 800; white-space: nowrap; }
       .doctitle { font-size: ${fs(26)}px; font-weight: 800; text-align: right; color: #2563eb; }
       table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+      table.wide th, table.wide td { padding-left: 4px !important; padding-right: 4px !important; }
       .totals { margin-top: 16px; width: 320px; margin-left: auto; }
       .totals .row { display: flex; justify-content: space-between; padding: 4px 0; font-size: ${fs(13)}px; }
       .totals .final { font-size: ${fs(18)}px; font-weight: 800; border-top: 2px solid #333; padding-top: 8px; margin-top: 6px; color: #16a34a; }
@@ -34186,7 +34218,7 @@ function printDocument({
         ${partyExtra ? `<div style="font-size:${fs(12)}px;color:#666;">${escapeHtml(partyExtra)}</div>` : ""}
       </div>
       ${extraRowsHtml ? `<div style="background:#f5f5f5;border-radius:8px;padding:10px 14px;margin-bottom:16px;">${extraRowsHtml}</div>` : ""}
-      <table>
+      <table${colWidths ? ` style="table-layout:fixed;" class="${colWidths.length >= 8 ? "wide" : ""}"` : ""}>${colWidths ? `<colgroup>${colWidths.map(w => `<col style="width:${w};" />`).join("")}</colgroup>` : ""}
         <thead><tr>${headerCols}</tr></thead>
         <tbody>${rows}</tbody>
       </table>
