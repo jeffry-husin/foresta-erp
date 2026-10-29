@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-10-29.10";
+const APP_BUILD = "2026-10-29.11";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -2005,6 +2005,10 @@ const ALL_MODULES = [{
   icon: "📈",
   label: "Analisa Harga"
 }, {
+  id: "price_list",
+  icon: "🏷️",
+  label: "Price List"
+}, {
   id: "client_analysis",
   icon: "📇",
   label: "Analisa Client"
@@ -2081,7 +2085,7 @@ const SIDEBAR_GROUPS = [{
 }, {
   key: "sales",
   label: "SALES",
-  moduleIds: ["quotation_unit", "quotation_ps", "sales_activity", "client_history", "price_analysis", "client_analysis", "komisi"]
+  moduleIds: ["quotation_unit", "quotation_ps", "price_list", "sales_activity", "client_history", "price_analysis", "client_analysis", "komisi"]
 }, {
   key: "operation",
   label: "OPERATION",
@@ -2127,6 +2131,9 @@ function getAllowedModules(role, customModules) {
   }
   // Form Cuti (leave request) is available to every user regardless of role or custom module config.
   if (!list.includes("cuti")) list = [...list, "cuti"];
+  // Price List (acuan harga penawaran, memuat modal & margin) — Manager Sales/Service selalu mendapatkannya
+  // walau daftar modul custom-nya tidak memuat; Owner/GM/Finance Director lewat role ALL atau diatur manual.
+  if ((role === "sales_manager" || role === "service_manager") && !list.includes("price_list")) list = [...list, "price_list"];
   // Uang Makan (own monthly meal allowance report) is available to every user regardless of role
   // or custom module config, same rationale as Form Cuti — it's a self-service view of their own
   // data (Owner/GM/HRD Payroll additionally see everyone's, enforced inside UangMakanModule itself
@@ -3295,6 +3302,8 @@ function useStore() {
   const [workshopOpsExpenses, setWorkshopOpsExpenses] = usePersisted("erp_workshop_ops", []); // Workshop operational expenses (Epy inputs, from Master COA)
   const [basts, setBasts] = usePersisted("erp_basts", []); // BAPP (Berita Acara Penyelesaian Pekerjaan) entries, per visit
   const [suratTugas, setSuratTugas] = usePersisted("erp_surat_tugas", []); // Surat Perintah Tugas entries, per visit
+  const [priceList, setPriceList] = usePersisted("erp_price_list", []); // Price List: acuan harga per Part No (import FRT - PRICE LIST 2026 / PM)
+  const [kursRates, setKursRates] = usePersisted("erp_kurs", []); // Kurs: spot + hedging per mata uang (EUR/USD/SGD)
   const [dinasCatatan, setDinasCatatan] = usePersisted("erp_uang_dinas", []); // Uang Dinas: per-mekanik-per-perjalanan cost record, auto-created when a Kunjungan (visit) is marked Selesai, or as a project-level placeholder when a SO becomes fulfillmentType "MR"
   const [mills, setMills] = usePersisted("erp_mills", []); // Master Mill: mill/site location database (Mill Name, Company, Alamat, Provinsi, Kabupaten)
   const [clientGroups, setClientGroups] = usePersisted("erp_client_groups", []); // Master Group: corporate group names that multiple Database Client companies can belong to (e.g. several PT under one group holding), managed by Owner/GM from Database Client
@@ -3593,6 +3602,10 @@ function useStore() {
     setBasts,
     suratTugas,
     setSuratTugas,
+    priceList,
+    setPriceList,
+    kursRates,
+    setKursRates,
     dinasCatatan,
     setDinasCatatan,
     mills,
@@ -33181,6 +33194,1004 @@ function uangDinasSisaTransfer(r, rateOverride) {
   const rate = rateOverride ?? r.uangDinasRate;
   return (Number(r.jumlahHari) || 0) * (Number(rate) || 0) - totalUangSaku(r);
 }
+// ════════════════════════════════════════════════════════════════════════════
+// PRICE LIST (2026-10-29) — acuan harga untuk penawaran Parts & Service.
+// Data: erp_price_list (acuan harga per Part No, diimpor dari FRT - PRICE LIST 2026 / PM) dan erp_kurs
+// (kurs spot per mata uang + kurs hedging dengan masa berlaku). Modul ini hanya ACUAN: harga akhir di
+// penawaran tetap diputuskan Manager Sales. Perbandingan harga beli (PO Lokal/Overseas) dan histori
+// penawaran dihitung langsung dari data yang ada, bukan disalin.
+// ════════════════════════════════════════════════════════════════════════════
+const PL_KURS_CURRENCIES = ["EUR", "USD", "SGD"];
+const plNorm = s => String(s || "").trim().toUpperCase();
+const plTokens = pn => [String(pn || "").trim(), ...String(pn || "").split("/").map(t => t.trim().replace(/\*/g, ""))].filter(Boolean);
+const plNum = v => {
+  if (v === null || v === undefined || v === "") return null;
+  const n = typeof v === "number" ? v : parseFloat(String(v).replace(/[^0-9.,-]/g, "").replace(/,/g, ""));
+  return Number.isFinite(n) ? n : null;
+};
+// Kurs yang dipakai untuk perhitungan: kurs hedging yang masih berlaku (yang masa berlakunya paling dekat
+// habis, yaitu yang sedang berjalan), bila tidak ada → kurs spot terbaru.
+function kursDipakai(kursRates, cur) {
+  if (!cur || cur === "IDR") return {
+    kurs: 1,
+    dasar: "IDR"
+  };
+  const r = (kursRates || []).find(x => x.mataUang === cur);
+  if (!r) return {
+    kurs: 0,
+    dasar: "belum diisi"
+  };
+  const t = today();
+  const h = (r.hedging || []).filter(x => Number(x.kurs) > 0 && x.berlakuSampai && x.berlakuSampai >= t).sort((a, b) => a.berlakuSampai.localeCompare(b.berlakuSampai))[0];
+  if (h) return {
+    kurs: Number(h.kurs),
+    dasar: "hedging s/d " + h.berlakuSampai
+  };
+  return Number(r.spot) > 0 ? {
+    kurs: Number(r.spot),
+    dasar: "spot" + (r.spotTanggal ? " " + r.spotTanggal : "")
+  } : {
+    kurs: 0,
+    dasar: "belum diisi"
+  };
+}
+const plMargin = (jual, beli) => jual > 0 && beli > 0 ? (jual - beli) / jual : null;
+const plPct = m => m === null || m === undefined ? "-" : (m * 100).toFixed(1) + "%";
+const plHargaAcuan = e => {
+  if (Number(e.hargaPembulatan) > 0) return {
+    harga: Number(e.hargaPembulatan),
+    dasar: "Pembulatan 2026"
+  };
+  if (Number(e.hargaBaru) > 0) return {
+    harga: Number(e.hargaBaru),
+    dasar: "Baru 2026"
+  };
+  if (Number(e.hargaLama) > 0) return {
+    harga: Number(e.hargaLama),
+    dasar: "Lama"
+  };
+  return {
+    harga: 0,
+    dasar: ""
+  };
+};
+// Baca semua sheet file Price List (FRT - PRICE LIST 2026 / PM): cari baris header yang berisi "Parts No",
+// petakan kolom berdasarkan nama header, lalu ambil baris datanya. Sheet tanpa header itu (landed cost, OLD) dilewati.
+function plParseWorkbookRows(sheetsAOA) {
+  const out = [];
+  const nrm = s => String(s === null || s === undefined ? "" : s).toLowerCase().replace(/\s+/g, " ").trim();
+  Object.entries(sheetsAOA).forEach(([sheetName, aoa]) => {
+    let hi = -1;
+    for (let i = 0; i < Math.min(aoa.length, 20); i++) {
+      const row = (aoa[i] || []).map(nrm);
+      if (row.some(c => c.startsWith("parts no")) && row.some(c => c.startsWith("harga lama") || c.startsWith("harga baru"))) {
+        hi = i;
+        break;
+      }
+    }
+    if (hi < 0) return;
+    const hdr = (aoa[hi] || []).map(nrm);
+    const col = fn => hdr.findIndex(fn);
+    const c = {
+      pn: col(h => h.startsWith("parts no")),
+      nama: col(h => h === "parts name"),
+      desk: col(h => h === "parts description"),
+      crane: col(h => h === "type crane"),
+      satuan: col(h => h === "satuan"),
+      modal: col(h => h.includes("price") && h.includes("lokal")),
+      lama: col(h => h === "harga lama"),
+      baru: col(h => h === "harga baru 2026"),
+      bulat: col(h => h.includes("pembulatan")),
+      supplier: col(h => h === "supplayer" || h === "supplier"),
+      note: col(h => h === "note")
+    };
+    for (let i = hi + 1; i < aoa.length; i++) {
+      const r = aoa[i] || [];
+      const pn = c.pn >= 0 ? String(r[c.pn] === null || r[c.pn] === undefined ? "" : r[c.pn]).trim() : "";
+      if (!pn) continue;
+      const g = k => c[k] >= 0 ? r[c[k]] : null;
+      out.push({
+        partNumber: pn,
+        partName: String(g("nama") || g("desk") || "").trim(),
+        deskripsi: String(g("desk") || "").trim(),
+        tipeCrane: String(g("crane") || "").trim(),
+        satuan: String(g("satuan") || "").trim(),
+        modal: plNum(g("modal")),
+        hargaLama: plNum(g("lama")),
+        hargaBaru: plNum(g("baru")),
+        hargaPembulatan: plNum(g("bulat")),
+        supplier: String(g("supplier") || "").trim(),
+        catatan: String(g("note") || "").trim(),
+        sheet: sheetName
+      });
+    }
+  });
+  return out;
+}
+async function plReadWorkbookAOA(file) {
+  const XLSX = await loadXLSXLibrary();
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, {
+    type: "array"
+  });
+  const out = {};
+  wb.SheetNames.forEach(n => {
+    out[n] = XLSX.utils.sheet_to_json(wb.Sheets[n], {
+      header: 1,
+      defval: null,
+      raw: true
+    });
+  });
+  return out;
+}
+const PL_FIELDS = [["partName", "Nama"], ["tipeCrane", "Tipe Crane"], ["satuan", "Satuan"], ["modal", "Modal"], ["hargaLama", "Harga Lama"], ["hargaBaru", "Harga Baru"], ["hargaPembulatan", "Harga Pembulatan"], ["supplier", "Supplier"], ["catatan", "Catatan"]];
+function PriceListModule({
+  store,
+  session
+}) {
+  const {
+    priceList,
+    setPriceList,
+    kursRates,
+    setKursRates,
+    poLocal,
+    poOverseas,
+    quotationsPS,
+    parts
+  } = store;
+  const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
+  const canManage = isOwnerLike || session.role === "service_manager" || session.role === "sales_manager";
+  const [search, setSearch] = useState("");
+  const [craneFilter, setCraneFilter] = useState("Semua");
+  const [flagFilter, setFlagFilter] = useState("Semua");
+  const [page, setPage] = useState(0);
+  const [editing, setEditing] = useState(null); // {mode:'add'|'edit', form}
+  const [kursDraft, setKursDraft] = useState(null);
+  const [hedgeForm, setHedgeForm] = useState({
+    cur: "EUR",
+    kurs: "",
+    berlakuSampai: "",
+    catatan: ""
+  });
+  const [importPreview, setImportPreview] = useState(null);
+  const [historyOf, setHistoryOf] = useState(null);
+  const PAGE = 100;
+  const kursRows = PL_KURS_CURRENCIES.map(c => (kursDraft || kursRates || []).find(x => x.mataUang === c) || {
+    mataUang: c,
+    spot: "",
+    spotTanggal: "",
+    sumber: "Bank Mandiri TT Counter Jual",
+    hedging: []
+  });
+  const updKurs = (cur, patch) => {
+    const base = PL_KURS_CURRENCIES.map(c => (kursDraft || kursRates || []).find(x => x.mataUang === c) || {
+      mataUang: c,
+      spot: "",
+      spotTanggal: "",
+      sumber: "Bank Mandiri TT Counter Jual",
+      hedging: []
+    });
+    setKursDraft(base.map(x => x.mataUang === cur ? {
+      ...x,
+      ...patch
+    } : x));
+  };
+  const saveKurs = () => {
+    setKursRates(kursDraft.map(x => ({
+      ...x,
+      spot: Number(x.spot) || 0,
+      diubahOleh: session.nama,
+      diubahPada: new Date().toISOString()
+    })));
+    logAudit(store, session, {
+      module: "Price List",
+      docNomor: "KURS",
+      action: "Update Kurs",
+      detail: kursDraft.map(x => `${x.mataUang} spot ${x.spot || "-"}, hedging ${(x.hedging || []).length}`).join("; ")
+    });
+    setKursDraft(null);
+  };
+  const addHedge = () => {
+    if (!(Number(hedgeForm.kurs) > 0) || !hedgeForm.berlakuSampai) return alert("Isi kurs hedging dan tanggal berlaku sampai");
+    const cur = hedgeForm.cur;
+    const row = kursRows.find(x => x.mataUang === cur);
+    updKurs(cur, {
+      hedging: [...(row.hedging || []), {
+        id: "H-" + uid(),
+        kurs: Number(hedgeForm.kurs),
+        berlakuSampai: hedgeForm.berlakuSampai,
+        catatan: hedgeForm.catatan || ""
+      }]
+    });
+    setHedgeForm({
+      ...hedgeForm,
+      kurs: "",
+      berlakuSampai: "",
+      catatan: ""
+    });
+  };
+  // ── Indeks harga beli (PO terakhir) dan histori penawaran, per Part No ─────────────────────────
+  const buyIdx = React.useMemo(() => {
+    const m = new Map();
+    const add = (p, cur) => (p.items || []).forEach(it => {
+      const k = plNorm(it.partNumber);
+      if (!k || !(it.harga > 0)) return;
+      const rec = m.get(k) || {
+        n: 0,
+        last: null
+      };
+      rec.n++;
+      if (!rec.last || (p.tanggal || "") > (rec.last.tanggal || "")) rec.last = {
+        harga: it.harga,
+        cur,
+        tanggal: p.tanggal,
+        nomor: p.nomor,
+        supplier: p.supplierNama
+      };
+      m.set(k, rec);
+    });
+    (poLocal || []).forEach(p => add(p, "IDR"));
+    (poOverseas || []).forEach(p => add(p, p.currency));
+    return m;
+  }, [poLocal, poOverseas]);
+  const quoteIdx = React.useMemo(() => {
+    const m = new Map();
+    (quotationsPS || []).forEach(q => (q.items || []).forEach(it => {
+      const k = plNorm(it.partNumber);
+      if (!k || !(it.harga > 0)) return;
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push({
+        h: it.harga,
+        tgl: q.tanggal,
+        cust: q.customerNama,
+        so: q.status === "Sudah jadi SO"
+      });
+    }));
+    return m;
+  }, [quotationsPS]);
+  const rows = React.useMemo(() => (priceList || []).map(e => {
+    const toks = plTokens(e.partNumber).map(plNorm);
+    let buy = null,
+      qs = [];
+    toks.forEach(t => {
+      const b = buyIdx.get(t);
+      if (b && (!buy || b.n > buy.n)) buy = b;
+      const q = quoteIdx.get(t);
+      if (q && q.length > qs.length) qs = q;
+    });
+    const ac = plHargaAcuan(e);
+    const kd = buy && buy.last ? kursDipakai(kursRates, buy.last.cur) : null;
+    const beliIDR = buy && buy.last && kd && kd.kurs > 0 ? buy.last.harga * kd.kurs : null;
+    const hs = qs.map(x => x.h).sort((a, b) => a - b);
+    const med = hs.length ? hs.length % 2 ? hs[hs.length >> 1] : (hs[hs.length / 2 - 1] + hs[hs.length / 2]) / 2 : null;
+    const lastQ = qs.slice().sort((a, b) => (b.tgl || "").localeCompare(a.tgl || ""))[0] || null;
+    const flags = [];
+    if (!(ac.harga > 0)) flags.push("Belum ada harga");
+    if (ac.harga > 0 && beliIDR && ac.harga < beliIDR) flags.push("Rugi");
+    if (e.modal > 0 && beliIDR && Math.abs(beliIDR - e.modal) / e.modal > 0.25) flags.push("Modal ≠ PO");
+    if (buy && buy.last && buy.last.cur !== "IDR") flags.push("Beli impor");
+    return {
+      e,
+      ac,
+      buy,
+      beliIDR,
+      kd,
+      qs,
+      med,
+      lastQ,
+      flags,
+      mModal: plMargin(ac.harga, Number(e.modal)),
+      mBeli: plMargin(ac.harga, beliIDR),
+      mMed: plMargin(med, beliIDR)
+    };
+  }).sort((a, b) => a.e.partNumber.localeCompare(b.e.partNumber, undefined, {
+    numeric: true
+  })), [priceList, buyIdx, quoteIdx, kursRates]);
+  const craneOptions = ["Semua", ...new Set((priceList || []).map(e => e.tipeCrane).filter(Boolean))];
+  const filtered = rows.filter(r => {
+    const q = search.trim().toLowerCase();
+    if (q && ![r.e.partNumber, r.e.partName, r.e.deskripsi, r.e.tipeCrane].filter(Boolean).some(x => String(x).toLowerCase().includes(q))) return false;
+    if (craneFilter !== "Semua" && r.e.tipeCrane !== craneFilter) return false;
+    if (flagFilter === "Belum ada harga") return r.flags.includes("Belum ada harga");
+    if (flagFilter === "Rugi") return r.flags.includes("Rugi");
+    if (flagFilter === "Modal ≠ PO") return r.flags.includes("Modal ≠ PO");
+    if (flagFilter === "Ada beli PO") return !!r.buy;
+    if (flagFilter === "Ada penawaran") return r.qs.length > 0;
+    return true;
+  });
+  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE));
+  const pageRows = filtered.slice(page * PAGE, page * PAGE + PAGE);
+  const emptyForm = {
+    partNumber: "",
+    partName: "",
+    deskripsi: "",
+    tipeCrane: "",
+    satuan: "",
+    modal: "",
+    hargaLama: "",
+    hargaBaru: "",
+    hargaPembulatan: "",
+    supplier: "",
+    catatan: ""
+  };
+  const openAdd = () => setEditing({
+    mode: "add",
+    form: emptyForm
+  });
+  const openEdit = e => setEditing({
+    mode: "edit",
+    form: {
+      ...emptyForm,
+      ...e,
+      modal: e.modal ?? "",
+      hargaLama: e.hargaLama ?? "",
+      hargaBaru: e.hargaBaru ?? "",
+      hargaPembulatan: e.hargaPembulatan ?? ""
+    }
+  });
+  const saveEntry = () => {
+    const f = editing.form;
+    const pn = String(f.partNumber || "").trim();
+    if (!pn) return alert("Isi Part No");
+    const clean = {
+      partNumber: pn,
+      partName: f.partName || "",
+      deskripsi: f.deskripsi || "",
+      tipeCrane: f.tipeCrane || "",
+      satuan: f.satuan || "",
+      modal: plNum(f.modal),
+      hargaLama: plNum(f.hargaLama),
+      hargaBaru: plNum(f.hargaBaru),
+      hargaPembulatan: plNum(f.hargaPembulatan),
+      supplier: f.supplier || "",
+      catatan: f.catatan || ""
+    };
+    const now = new Date().toISOString();
+    if (editing.mode === "add") {
+      if ((priceList || []).some(x => plNorm(x.partNumber) === plNorm(pn))) return alert("Part No ini sudah ada di Price List");
+      setPriceList(prev => [...(prev || []), {
+        id: "PL-" + uid(),
+        ...clean,
+        sumber: "Manual",
+        dibuatOleh: session.nama,
+        diubahPada: now,
+        riwayat: []
+      }]);
+      logAudit(store, session, {
+        module: "Price List",
+        docNomor: pn,
+        action: "Tambah",
+        detail: `${clean.partName}`
+      });
+    } else {
+      const old = (priceList || []).find(x => x.id === f.id);
+      const changes = PL_FIELDS.filter(([k]) => String(old?.[k] ?? "") !== String(clean[k] ?? "")).map(([k, l]) => `${l}: ${old?.[k] ?? "-"} → ${clean[k] ?? "-"}`);
+      setPriceList(prev => (prev || []).map(x => x.id === f.id ? {
+        ...x,
+        ...clean,
+        diubahPada: now,
+        diubahOleh: session.nama,
+        riwayat: changes.length ? [...(x.riwayat || []), {
+          tanggal: now,
+          oleh: session.nama,
+          ket: "Edit manual",
+          perubahan: changes
+        }].slice(-30) : x.riwayat || []
+      } : x));
+      if (changes.length) logAudit(store, session, {
+        module: "Price List",
+        docNomor: pn,
+        action: "Edit",
+        detail: changes.join("; ")
+      });
+    }
+    setEditing(null);
+  };
+  const onImportFile = async ev => {
+    const file = ev.target.files && ev.target.files[0];
+    ev.target.value = "";
+    if (!file) return;
+    try {
+      const aoa = await plReadWorkbookAOA(file);
+      const parsed = plParseWorkbookRows(aoa);
+      if (parsed.length === 0) return alert("Tidak ditemukan tabel Price List (baris header berisi 'Parts No' dan 'Harga Lama/Baru') di file ini.");
+      const seen = new Set();
+      const uniq = parsed.filter(p => {
+        const k = plNorm(p.partNumber);
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      });
+      const existing = new Map((priceList || []).map(x => [plNorm(x.partNumber), x]));
+      const baru = uniq.filter(p => !existing.has(plNorm(p.partNumber)));
+      const ubah = uniq.filter(p => {
+        const o = existing.get(plNorm(p.partNumber));
+        return o && PL_FIELDS.some(([k]) => p[k] !== null && p[k] !== "" && p[k] !== undefined && String(o[k] ?? "") !== String(p[k]));
+      });
+      setImportPreview({
+        file: file.name,
+        uniq,
+        baru: baru.length,
+        ubah: ubah.length,
+        sama: uniq.length - baru.length - ubah.length,
+        sheets: [...new Set(parsed.map(p => p.sheet))]
+      });
+    } catch (e) {
+      alert("Gagal membaca file: " + e.message);
+    }
+  };
+  const applyImport = () => {
+    const now = new Date().toISOString();
+    const imp = importPreview;
+    setPriceList(prev => {
+      const arr = [...(prev || [])];
+      const idx = new Map(arr.map((x, i) => [plNorm(x.partNumber), i]));
+      imp.uniq.forEach(p => {
+        const k = plNorm(p.partNumber);
+        const patch = {};
+        PL_FIELDS.forEach(([f]) => {
+          if (p[f] !== null && p[f] !== "" && p[f] !== undefined) patch[f] = p[f];
+        });
+        if (p.deskripsi) patch.deskripsi = p.deskripsi;
+        if (idx.has(k)) {
+          const i = idx.get(k);
+          const old = arr[i];
+          const changes = PL_FIELDS.filter(([f]) => patch[f] !== undefined && String(old[f] ?? "") !== String(patch[f])).map(([f, l]) => `${l}: ${old[f] ?? "-"} → ${patch[f]}`);
+          if (changes.length) arr[i] = {
+            ...old,
+            ...patch,
+            diubahPada: now,
+            diubahOleh: session.nama,
+            riwayat: [...(old.riwayat || []), {
+              tanggal: now,
+              oleh: session.nama,
+              ket: "Import " + imp.file,
+              perubahan: changes
+            }].slice(-30)
+          };
+        } else {
+          arr.push({
+            id: "PL-" + uid(),
+            partNumber: p.partNumber,
+            partName: p.partName,
+            deskripsi: p.deskripsi,
+            tipeCrane: p.tipeCrane,
+            satuan: p.satuan,
+            modal: p.modal,
+            hargaLama: p.hargaLama,
+            hargaBaru: p.hargaBaru,
+            hargaPembulatan: p.hargaPembulatan,
+            supplier: p.supplier,
+            catatan: p.catatan,
+            sumber: "Import " + imp.file,
+            dibuatOleh: session.nama,
+            diubahPada: now,
+            riwayat: []
+          });
+        }
+      });
+      return arr;
+    });
+    logAudit(store, session, {
+      module: "Price List",
+      docNomor: "-",
+      action: "Import",
+      detail: `${imp.file}: ${imp.baru} baru, ${imp.ubah} diubah, ${imp.sama} tanpa perubahan`
+    });
+    setImportPreview(null);
+    setPage(0);
+  };
+  const doExport = () => exportToExcel(filtered.map(r => ({
+    "Part No": r.e.partNumber,
+    "Nama": r.e.partName,
+    "Tipe Crane": r.e.tipeCrane,
+    "Satuan": r.e.satuan,
+    "Modal": r.e.modal,
+    "Harga Lama": r.e.hargaLama,
+    "Harga Baru": r.e.hargaBaru,
+    "Harga Pembulatan": r.e.hargaPembulatan,
+    "Harga Acuan": r.ac.harga || "",
+    "Dasar": r.ac.dasar,
+    "Margin vs Modal": r.mModal === null ? "" : r.mModal,
+    "Beli PO Terakhir (IDR)": r.beliIDR === null ? "" : Math.round(r.beliIDR),
+    "Margin vs Beli PO": r.mBeli === null ? "" : r.mBeli,
+    "Jml Penawaran": r.qs.length,
+    "Median Penawaran": r.med === null ? "" : r.med,
+    "Catatan": r.flags.join("; ")
+  })), "Price_List_Margin.xlsx", "Price List");
+  const flagColor = f => f === "Rugi" ? theme.red : f === "Belum ada harga" ? theme.muted : theme.yellow;
+  const card = {
+    border: `1px solid ${theme.border}`,
+    borderRadius: 10,
+    padding: 12,
+    display: "flex",
+    flexDirection: "column",
+    gap: 8
+  };
+  if (!canManage) return /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: theme.muted
+    }
+  }, "Price List hanya dapat dilihat oleh Manager dan Owner/GM."));
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      flexWrap: "wrap",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("h2", {
+    style: {
+      margin: 0,
+      color: theme.text
+    }
+  }, "Price List (Acuan Harga Penawaran)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement(ExportExcelBtn, {
+    onClick: doExport
+  }), /*#__PURE__*/React.createElement("label", {
+    style: {
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "file",
+    accept: ".xlsx,.xlsm,.xls",
+    onChange: onImportFile,
+    style: {
+      display: "none"
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      background: theme.purple,
+      color: "#fff",
+      padding: "6px 14px",
+      borderRadius: 8,
+      fontSize: 13,
+      fontWeight: 600,
+      display: "inline-block"
+    }
+  }, "📥 Import Price List")), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    onClick: openAdd
+  }, "+ Tambah Part"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "ℹ️ Harga di sini hanya ACUAN — harga akhir penawaran diputuskan Manager Sales. Margin = (Jual − Beli) / Jual. Harga acuan: Pembulatan 2026 → Baru 2026 → Lama. Harga beli diambil dari PO Lokal/Overseas terakhir (impor dikonversi memakai kurs di bawah, belum termasuk freight & bea masuk)."), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      flexWrap: "wrap",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("h4", {
+    style: {
+      margin: 0,
+      color: theme.text
+    }
+  }, "Kurs (sumber default: Bank Mandiri — TT Counter Jual)"), kursDraft && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => setKursDraft(null)
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    onClick: saveKurs
+  }, "Simpan Kurs"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+      gap: 12
+    }
+  }, kursRows.map(k => {
+    const kd = kursDipakai(kursDraft || kursRates, k.mataUang);
+    return /*#__PURE__*/React.createElement("div", {
+      key: k.mataUang,
+      style: card
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        justifyContent: "space-between"
+      }
+    }, /*#__PURE__*/React.createElement("strong", {
+      style: {
+        color: theme.text
+      }
+    }, k.mataUang), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 12,
+        color: theme.muted
+      }
+    }, "Dipakai: ", /*#__PURE__*/React.createElement("strong", {
+      style: {
+        color: theme.text
+      }
+    }, kd.kurs ? fmtNum(kd.kurs) : "-"), " (", kd.dasar, ")")), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "grid",
+        gridTemplateColumns: "1fr 1fr",
+        gap: 8
+      }
+    }, /*#__PURE__*/React.createElement(Input, {
+      label: "Spot (IDR)",
+      type: "number",
+      value: k.spot,
+      onChange: v => updKurs(k.mataUang, {
+        spot: v
+      })
+    }), /*#__PURE__*/React.createElement(Input, {
+      label: "Tanggal spot",
+      type: "date",
+      value: k.spotTanggal || "",
+      onChange: v => updKurs(k.mataUang, {
+        spotTanggal: v
+      })
+    })), /*#__PURE__*/React.createElement(Input, {
+      label: "Sumber",
+      value: k.sumber || "",
+      onChange: v => updKurs(k.mataUang, {
+        sumber: v
+      })
+    }), (k.hedging || []).length > 0 && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12,
+        color: theme.text
+      }
+    }, (k.hedging || []).map(h => /*#__PURE__*/React.createElement("div", {
+      key: h.id,
+      style: {
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center"
+      }
+    }, /*#__PURE__*/React.createElement("span", null, "Hedging ", fmtNum(h.kurs), " s/d ", h.berlakuSampai, h.berlakuSampai < today() ? " (lewat)" : "", h.catatan ? " · " + h.catatan : ""), /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => updKurs(k.mataUang, {
+        hedging: (k.hedging || []).filter(x => x.id !== h.id)
+      })
+    }, "×")))));
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      flexWrap: "wrap",
+      alignItems: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Select, {
+    label: "Tambah hedging",
+    value: hedgeForm.cur,
+    onChange: v => setHedgeForm({
+      ...hedgeForm,
+      cur: v
+    }),
+    options: PL_KURS_CURRENCIES.map(c => ({
+      value: c,
+      label: c
+    }))
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Kurs hedging",
+    type: "number",
+    value: hedgeForm.kurs,
+    onChange: v => setHedgeForm({
+      ...hedgeForm,
+      kurs: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Berlaku sampai",
+    type: "date",
+    value: hedgeForm.berlakuSampai,
+    onChange: v => setHedgeForm({
+      ...hedgeForm,
+      berlakuSampai: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Catatan",
+    value: hedgeForm.catatan,
+    onChange: v => setHedgeForm({
+      ...hedgeForm,
+      catatan: v
+    })
+  }), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    onClick: addHedge
+  }, "+ Hedging")), !kursDraft && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Ubah angka lalu tekan \"Simpan Kurs\". Selama kurs hedging masih berlaku, perhitungan memakai kurs hedging; setelah lewat otomatis kembali ke spot."))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      flexWrap: "wrap",
+      alignItems: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: "1 1 220px"
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Cari",
+    value: search,
+    onChange: v => {
+      setSearch(v);
+      setPage(0);
+    },
+    placeholder: "Part No / nama / tipe crane"
+  })), /*#__PURE__*/React.createElement(Select, {
+    label: "Tipe Crane",
+    value: craneFilter,
+    onChange: v => {
+      setCraneFilter(v);
+      setPage(0);
+    },
+    options: craneOptions.map(c => ({
+      value: c,
+      label: c
+    }))
+  }), /*#__PURE__*/React.createElement(Select, {
+    label: "Tampilkan",
+    value: flagFilter,
+    onChange: v => {
+      setFlagFilter(v);
+      setPage(0);
+    },
+    options: ["Semua", "Belum ada harga", "Rugi", "Modal ≠ PO", "Ada beli PO", "Ada penawaran"].map(c => ({
+      value: c,
+      label: c
+    }))
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      paddingBottom: 10
+    }
+  }, filtered.length, " dari ", rows.length, " part")), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Part No", "Nama", "Tipe", "Modal", "Harga Acuan", "Margin vs Modal", "Beli PO (IDR)", "Margin vs Beli", "Penawaran", "Catatan", ""],
+    rows: pageRows.map(r => [r.e.partNumber, r.e.partName, r.e.tipeCrane || "-", r.e.modal ? fmt(r.e.modal) : "-", r.ac.harga ? /*#__PURE__*/React.createElement("span", null, fmt(r.ac.harga), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 10,
+        color: theme.muted
+      }
+    }, r.ac.dasar)) : "-", plPct(r.mModal), r.beliIDR ? /*#__PURE__*/React.createElement("span", null, fmt(Math.round(r.beliIDR)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 10,
+        color: theme.muted
+      }
+    }, r.buy.last.nomor, r.buy.last.cur !== "IDR" ? ` · ${fmtNum(r.buy.last.harga)} ${r.buy.last.cur}` : "")) : "-", r.mBeli === null ? "-" : /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: r.mBeli < 0 ? theme.red : theme.text
+      }
+    }, plPct(r.mBeli)), r.qs.length ? /*#__PURE__*/React.createElement("span", null, r.qs.length, "x · median ", fmt(r.med), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 10,
+        color: theme.muted
+      }
+    }, "terakhir ", fmt(r.lastQ.h), " (", r.lastQ.tgl, ")")) : "-", /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 4,
+        flexWrap: "wrap"
+      }
+    }, r.flags.map(f => /*#__PURE__*/React.createElement(Badge, {
+      key: f,
+      color: flagColor(f)
+    }, f))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 4
+      }
+    }, /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => setHistoryOf(r.e)
+    }, "🕘"), /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => openEdit(r.e)
+    }, "✏️"))]),
+    emptyMsg: (priceList || []).length === 0 ? "Belum ada data. Klik \"Import Price List\" lalu pilih file FRT - PRICE LIST 2026 / PM." : "Tidak ada yang cocok"
+  }), pageCount > 1 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      alignItems: "center",
+      justifyContent: "center"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => setPage(Math.max(0, page - 1))
+  }, "← Sebelumnya"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13,
+      color: theme.muted
+    }
+  }, "Halaman ", page + 1, " / ", pageCount), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "ghost",
+    onClick: () => setPage(Math.min(pageCount - 1, page + 1))
+  }, "Berikutnya →")), /*#__PURE__*/React.createElement(Modal, {
+    open: !!editing,
+    title: editing && editing.mode === "add" ? "Tambah Part ke Price List" : "Edit Price List",
+    onClose: () => setEditing(null),
+    width: 560
+  }, editing && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 10
+    }
+  }, editing.mode === "add" ? /*#__PURE__*/React.createElement(PartPicker, {
+    label: "Cari dari Master Part (opsional)",
+    value: "",
+    parts: parts || [],
+    onChange: pn => {
+      const p = (parts || []).find(x => x.partNumber === pn);
+      if (p) setEditing(ed => ({
+        ...ed,
+        form: {
+          ...ed.form,
+          partNumber: p.partNumber,
+          partName: p.partName || "",
+          satuan: p.satuan || ed.form.satuan
+        }
+      }));
+    }
+  }) : null, /*#__PURE__*/React.createElement(Input, {
+    label: "Part No",
+    value: editing.form.partNumber,
+    disabled: editing.mode === "edit",
+    onChange: v => setEditing(ed => ({
+      ...ed,
+      form: {
+        ...ed.form,
+        partNumber: v
+      }
+    }))
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Nama",
+    value: editing.form.partName,
+    onChange: v => setEditing(ed => ({
+      ...ed,
+      form: {
+        ...ed.form,
+        partName: v
+      }
+    }))
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 10
+    }
+  }, [["tipeCrane", "Tipe Crane"], ["satuan", "Satuan"], ["modal", "Modal (IDR)", "number"], ["hargaLama", "Harga Lama", "number"], ["hargaBaru", "Harga Baru 2026", "number"], ["hargaPembulatan", "Harga Baru (Pembulatan)", "number"]].map(([k, l, t]) => /*#__PURE__*/React.createElement(Input, {
+    key: k,
+    label: l,
+    type: t || "text",
+    value: editing.form[k],
+    onChange: v => setEditing(ed => ({
+      ...ed,
+      form: {
+        ...ed.form,
+        [k]: v
+      }
+    }))
+  }))), /*#__PURE__*/React.createElement(Input, {
+    label: "Supplier",
+    value: editing.form.supplier,
+    onChange: v => setEditing(ed => ({
+      ...ed,
+      form: {
+        ...ed.form,
+        supplier: v
+      }
+    }))
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Catatan",
+    multiline: true,
+    value: editing.form.catatan,
+    onChange: v => setEditing(ed => ({
+      ...ed,
+      form: {
+        ...ed.form,
+        catatan: v
+      }
+    }))
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setEditing(null)
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: saveEntry
+  }, "Simpan")))), /*#__PURE__*/React.createElement(Modal, {
+    open: !!importPreview,
+    title: "Pratinjau Import Price List",
+    onClose: () => setImportPreview(null),
+    width: 520
+  }, importPreview && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 10,
+      fontSize: 13,
+      color: theme.text
+    }
+  }, /*#__PURE__*/React.createElement("div", null, "File: ", /*#__PURE__*/React.createElement("strong", null, importPreview.file)), /*#__PURE__*/React.createElement("div", null, "Sheet terbaca: ", importPreview.sheets.join(", ")), /*#__PURE__*/React.createElement("div", null, "Total part unik: ", /*#__PURE__*/React.createElement("strong", null, importPreview.uniq.length)), /*#__PURE__*/React.createElement("div", null, "• Baru: ", /*#__PURE__*/React.createElement("strong", null, importPreview.baru)), /*#__PURE__*/React.createElement("div", null, "• Diubah (harga/nama berbeda): ", /*#__PURE__*/React.createElement("strong", null, importPreview.ubah)), /*#__PURE__*/React.createElement("div", null, "• Tanpa perubahan: ", /*#__PURE__*/React.createElement("strong", null, importPreview.sama)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Hanya kolom yang terisi di file yang menimpa data; kolom kosong tidak menghapus apa pun. Setiap perubahan dicatat di riwayat part."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setImportPreview(null)
+  }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: applyImport
+  }, "Terapkan Import")))), /*#__PURE__*/React.createElement(Modal, {
+    open: !!historyOf,
+    title: historyOf ? `Riwayat — ${historyOf.partNumber}` : "",
+    onClose: () => setHistoryOf(null),
+    width: 560
+  }, historyOf && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+      fontSize: 13,
+      color: theme.text
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: theme.muted
+    }
+  }, "Sumber: ", historyOf.sumber || "-", historyOf.diubahPada ? ` · terakhir diubah ${historyOf.diubahPada.slice(0, 10)}${historyOf.diubahOleh ? " oleh " + historyOf.diubahOleh : ""}` : ""), (historyOf.riwayat || []).length === 0 && /*#__PURE__*/React.createElement("div", null, "Belum ada perubahan tercatat."), (historyOf.riwayat || []).slice().reverse().map((h, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      borderTop: `1px solid ${theme.border}`,
+      paddingTop: 6
+    }
+  }, /*#__PURE__*/React.createElement("strong", null, h.tanggal.slice(0, 10)), " · ", h.oleh, " · ", h.ket, (h.perubahan || []).map((c, j) => /*#__PURE__*/React.createElement("div", {
+    key: j,
+    style: {
+      color: theme.muted
+    }
+  }, c)))))));
+}
 function UangDinasModule({
   store,
   session
@@ -48815,6 +49826,11 @@ function App() {
         });
       case "komisi":
         return /*#__PURE__*/React.createElement(KomisiModule, {
+          store: store,
+          session: session
+        });
+      case "price_list":
+        return /*#__PURE__*/React.createElement(PriceListModule, {
           store: store,
           session: session
         });
