@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-10-29.8";
+const APP_BUILD = "2026-10-29.9";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -547,6 +547,27 @@ const darAktivitasText = a => {
 };
 // Semua SO yang tertaut ke sebuah kunjungan: SO service utama + SO Parts yang ditautkan manual (Fase 2).
 const visitSoNomors = v => [v && v.soNomor, ...((v && v.soPartsNomors) || [])].filter(Boolean);
+// Daftar tanggal (YYYY-MM-DD) dari a sampai b inklusif (aritmetika UTC supaya tidak geser karena zona waktu).
+const dateRangeList = (a, b) => {
+  const out = [];
+  if (!a || !b) return out;
+  const d = new Date(a + "T00:00:00Z");
+  const end = new Date(b + "T00:00:00Z");
+  while (d <= end) {
+    out.push(d.toISOString().slice(0, 10));
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return out;
+};
+// Hari kerja dinas seorang mekanik pada satu kunjungan menurut DAR: tanggal pada entri aktivitas DAR (bukan
+// jenis Libur, DAR yang tidak ditolak). Dasar perhitungan Uang Dinas (Fase "Uang Dinas dari DAR").
+const darHariDinas = (dars, visitId, mekanikNama) => {
+  const set = new Set();
+  (dars || []).filter(d => d.visitId === visitId && d.status !== "Ditolak Septi" && (!mekanikNama || d.mekanikNama === mekanikNama)).forEach(d => (d.catatanHarian || []).forEach(c => {
+    if (c.tanggal && c.jenis !== "Libur") set.add(c.tanggal);
+  }));
+  return [...set].sort();
+};
 const darPekerjaanSummary = list => {
   const seen = [];
   (list || []).forEach(a => {
@@ -12198,16 +12219,23 @@ function MekanikReport({
       tanggalSelesai
     } : x));
     const usernames = (v.mekanikUsernames && v.mekanikUsernames.length ? v.mekanikUsernames : [v.mekanikUsername]).filter(Boolean);
-    const dates = [];
-    let d = new Date(v.tanggal);
-    const end = new Date(tanggalSelesai);
-    while (d <= end) {
-      dates.push(d.toISOString().slice(0, 10));
-      d.setDate(d.getDate() + 1);
-    }
+    const dates = dateRangeList(v.tanggal, tanggalSelesai);
+    // Hari Uang Dinas = hari yang tercatat di DAR mekanik tsb (tanpa jenis Libur) dalam rentang kunjungan;
+    // bila mekanik belum punya DAR sama sekali, jatuh balik ke semua hari kalender (perilaku lama).
+    const datesFor = username => {
+      const emp = (employees || []).find(e => e.username === username);
+      const dd = darHariDinas(dars, v.id, emp?.nama).filter(t => t >= v.tanggal && t <= tanggalSelesai);
+      return dd.length ? {
+        list: dd,
+        sumber: "DAR"
+      } : {
+        list: dates,
+        sumber: "Kalender"
+      };
+    };
     const newAttendance = [];
     usernames.forEach(username => {
-      dates.forEach(tanggal => {
+      datesFor(username).list.forEach(tanggal => {
         const exists = (attendance || []).some(a => a.username === username && a.tanggal === tanggal);
         if (!exists) newAttendance.push({
           id: "ABS-" + uid(),
@@ -12229,6 +12257,7 @@ function MekanikReport({
       usernames.forEach(username => {
         const emp = (employees || []).find(e => e.username === username) || {};
         const idx = next.findIndex(r => r.kind === "mekanik" && r.visitId === v.id && r.username === username);
+        const dj = datesFor(username);
         const rec = {
           id: idx >= 0 ? next[idx].id : "UD-" + uid(),
           kind: "mekanik",
@@ -12239,7 +12268,9 @@ function MekanikReport({
           nama: emp.nama || username,
           tanggalMulai: v.tanggal,
           tanggalSelesai,
-          jumlahHari,
+          jumlahHari: dj.list.length,
+          hariList: dj.list,
+          sumberHari: dj.sumber,
           uangDinasRate: emp.uangDinasRate || 0,
           uangSaku: idx >= 0 ? next[idx].uangSaku : 0,
           status: idx >= 0 ? next[idx].status : "Belum Dibayar",
@@ -12254,7 +12285,10 @@ function MekanikReport({
       module: "Mekanik Report",
       docNomor: v.id,
       action: "Tandai Selesai",
-      detail: `${v.tanggal} s/d ${tanggalSelesai} (${jumlahHari} hari) — ${usernames.length} mekanik`
+      detail: `${v.tanggal} s/d ${tanggalSelesai} — ${usernames.map(u => {
+        const dj = datesFor(u);
+        return `${u}: ${dj.list.length} hari (${dj.sumber})`;
+      }).join("; ")}`
     });
   };
   const deleteDar = async d => {
@@ -33157,7 +33191,8 @@ function UangDinasModule({
     tickets,
     salesOrders,
     employees,
-    visits
+    visits,
+    dars
   } = store;
   // Client-name resolver for a mekanik row — new rows carry customerNama directly (set at creation
   // from the Kunjungan), but older rows created before that field existed don't, so fall back to
@@ -33258,6 +33293,10 @@ function UangDinasModule({
     setDinasCatatan(prev => (prev || []).map(r => r.id === editRow.id ? {
       ...r,
       jumlahHari: Number(editForm.jumlahHari) || 0,
+      ...(editForm.hariList ? {
+        hariList: editForm.hariList,
+        sumberHari: "DAR"
+      } : {}),
       uangSakuList,
       // Kept in sync as the sum so any other code path that still reads the old flat field (or an
       // export/report outside this module) doesn't silently see 0.
@@ -33563,6 +33602,12 @@ function UangDinasModule({
       flexDirection: "column",
       gap: 12
     }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6
+    }
   }, /*#__PURE__*/React.createElement(Input, {
     label: "Jumlah Hari",
     type: "number",
@@ -33571,7 +33616,27 @@ function UangDinasModule({
       ...editForm,
       jumlahHari: v
     })
-  }), /*#__PURE__*/React.createElement(Input, {
+  }), (() => {
+    const dd = darHariDinas(dars, editRow.visitId, editRow.nama);
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12,
+        color: theme.muted
+      }
+    }, "Menurut DAR (tanpa Libur): ", /*#__PURE__*/React.createElement("strong", {
+      style: {
+        color: theme.text
+      }
+    }, dd.length ? dd.length + " hari" : "belum ada DAR"), dd.length > 0 && Number(editForm.jumlahHari) !== dd.length && /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => setEditForm({
+        ...editForm,
+        jumlahHari: dd.length,
+        hariList: dd
+      })
+    }, "Pakai ini"));
+  })()), /*#__PURE__*/React.createElement(Input, {
     label: `Rate Uang Dinas / hari (opsional, khusus job ini — default Payroll: ${fmt((employees || []).find(e => e.username === editRow.username)?.uangDinasRate ?? editRow.uangDinasRate ?? 0)})`,
     type: "number",
     value: editForm.rateOverride,
@@ -33700,7 +33765,8 @@ function UangMakanModule({
   const {
     employees,
     setEmployees,
-    rekapAbsensi
+    rekapAbsensi,
+    dinasCatatan
   } = store;
   const isAdmin = hasPayrollAccess(session.role) || hasAdminModule(session, "uang_makan");
   const myEmp = (employees || []).find(e => e.username === session.username);
@@ -33745,6 +33811,44 @@ function UangMakanModule({
       total: uangMakan + uangKerajinan
     };
   };
+  // Cek selisih (admin): hari Uang Dinas karyawan pada periode ini (dari Uang Dinas — hari DAR bila ada) vs
+  // kolom D.Luar di Rekap Absensi mesin. Hari D.Luar tidak dibayar Uang Makan (riilHari sudah memisahkannya),
+  // jadi selisih menandakan salah satu sisi perlu dicek: Uang Dinas > D.Luar → Uang Makan berpotensi terbayar
+  // ganda; D.Luar > Uang Dinas → Uang Dinas berpotensi belum tercatat / D.Luar di mesin terlalu banyak.
+  const getSelisihDinasRows = () => !isAdmin || !selMulai ? [] : visibleEmployees.map(e => {
+    const set = new Set();
+    (dinasCatatan || []).filter(r => r.kind === "mekanik" && r.username === e.username).forEach(r => (r.hariList && r.hariList.length ? r.hariList : dateRangeList(r.tanggalMulai, r.tanggalSelesai)).forEach(t => {
+      if (t >= selMulai && t <= selSelesai) set.add(t);
+    }));
+    const rekap = (rekapAbsensi || []).find(r => r.periodeMulai === selMulai && r.periodeSelesai === selSelesai && String(r.namaKaryawan || "").toLowerCase().trim() === String(e.nama || "").toLowerCase().trim());
+    const dLuar = rekap ? Number(rekap.dLuarHari) || 0 : 0;
+    return {
+      emp: e,
+      dinas: set.size,
+      dLuar,
+      ada: !!rekap
+    };
+  }).filter(r => (r.dinas > 0 || r.dLuar > 0) && r.dinas !== r.dLuar);
+  const renderSelisihDinas = () => getSelisihDinasRows().length === 0 ? null : /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("h4", {
+    style: {
+      margin: 0,
+      color: theme.text
+    }
+  }, "Cek Selisih Uang Dinas vs D.Luar Mesin — ", periodeLabel), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted
+    }
+  }, "Hari D.Luar tidak mendapat Uang Makan. Selisih berarti hari Uang Dinas (dari DAR) dan D.Luar di mesin belum sama — periksa salah satunya sebelum laporan dibayar."), /*#__PURE__*/React.createElement(Table, {
+    headers: ["Nama", "Hari Uang Dinas", "D.Luar Mesin", "Selisih", "Catatan"],
+    rows: getSelisihDinasRows().map(r => [r.emp.nama, r.dinas, r.dLuar, (r.dinas - r.dLuar > 0 ? "+" : "") + (r.dinas - r.dLuar), !r.ada ? "Rekap mesin periode ini belum ada" : r.dinas > r.dLuar ? "Uang Dinas lebih banyak — Uang Makan berpotensi terbayar ganda" : "D.Luar lebih banyak — cek Uang Dinas / D.Luar mesin"])
+  })));
   const setUangMakanAktif = (emp, aktif, ev) => {
     if (ev) ev.stopPropagation();
     setEmployees(prev => (prev || []).map(e => e.username === emp.username ? {
@@ -33900,7 +34004,7 @@ function UangMakanModule({
       borderRadius: 8,
       border: `1px dashed ${theme.border}`
     }
-  }, "ℹ️ Uang Makan dihitung PER PERIODE (mingguan, Kamis–Rabu, sesuai periode Rekap Absensi yang tersimpan): Riil Hari × rate Uang Makan Harian. Uang Kerajinan (rate per karyawan, default Rp 50.000 — diatur di Manajemen User) diberikan bila hadir penuh (tidak ada hari Absen) sepanjang periode tersebut. Untuk koreksi hari hadir, edit di Rekap Absensi; untuk koreksi rate, edit di Manajemen User.", isAdmin ? " Hanya karyawan yang aktif di laporan ini yang muncul di daftar & total — klik \"Keluarkan\" untuk menghilangkan seseorang dari laporan, atau gunakan \"+ Tambah Karyawan\" di atas untuk memasukkannya kembali." : ""), periodeOptions.length === 0 ? /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("p", {
+  }, "ℹ️ Uang Makan dihitung PER PERIODE (mingguan, Kamis–Rabu, sesuai periode Rekap Absensi yang tersimpan): Riil Hari × rate Uang Makan Harian. Uang Kerajinan (rate per karyawan, default Rp 50.000 — diatur di Manajemen User) diberikan bila hadir penuh (tidak ada hari Absen) sepanjang periode tersebut. Untuk koreksi hari hadir, edit di Rekap Absensi; untuk koreksi rate, edit di Manajemen User.", isAdmin ? " Hanya karyawan yang aktif di laporan ini yang muncul di daftar & total — klik \"Keluarkan\" untuk menghilangkan seseorang dari laporan, atau gunakan \"+ Tambah Karyawan\" di atas untuk memasukkannya kembali." : ""), renderSelisihDinas(), periodeOptions.length === 0 ? /*#__PURE__*/React.createElement(Card, null,/*#__PURE__*/React.createElement("p", {
     style: {
       color: theme.muted,
       margin: 0
