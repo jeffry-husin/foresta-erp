@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-10-29.6";
+const APP_BUILD = "2026-10-29.8";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -545,6 +545,8 @@ const darAktivitasText = a => {
   if (a.catatan) t += " — " + a.catatan;
   return t;
 };
+// Semua SO yang tertaut ke sebuah kunjungan: SO service utama + SO Parts yang ditautkan manual (Fase 2).
+const visitSoNomors = v => [v && v.soNomor, ...((v && v.soPartsNomors) || [])].filter(Boolean);
 const darPekerjaanSummary = list => {
   const seen = [];
   (list || []).forEach(a => {
@@ -10794,6 +10796,396 @@ function MekanikReport({
     });
     setEditingSoNomor(false);
   };
+  // SO Parts terkait (Fase 2, 2026-10-29): SO service (jasa saja) memunculkan MR otomatis; parts-nya ada
+  // di SO terpisah, jadi mekanik/Septi menautkannya manual ke kunjungan lewat `visit.soPartsNomors`.
+  // Dipakai Fase 3 (Parts Used/Returned diambil dari DO semua SO tertaut) lewat visitSoNomors().
+  const [soPartsPick, setSoPartsPick] = useState("");
+  const soPartsCandidates = v => (salesOrders || []).filter(so => so.nomor !== v.soNomor && !(v.soPartsNomors || []).includes(so.nomor) && so.customerNama === v.customerNama && so.fulfillmentType !== "MR");
+  const updateVisitSoParts = (v, next, action, detail) => {
+    setVisits(prev => (prev || []).map(x => x.id === v.id ? {
+      ...x,
+      soPartsNomors: next
+    } : x));
+    setDetailVisit(d => d && d.id === v.id ? {
+      ...d,
+      soPartsNomors: next
+    } : d);
+    logAudit(store, session, {
+      module: "Mekanik Report",
+      docNomor: v.id,
+      action,
+      detail
+    });
+  };
+  const addSoParts = v => {
+    if (!soPartsPick) return alert("Pilih SO Parts dulu");
+    updateVisitSoParts(v, [...(v.soPartsNomors || []), soPartsPick], "Tautkan SO Parts", `SO Parts ${soPartsPick} ditautkan ke ${v.id}`);
+    setSoPartsPick("");
+  };
+  const removeSoParts = (v, nomor) => {
+    if (!window.confirm(`Lepas tautan SO Parts ${nomor} dari ${v.id}?`)) return;
+    updateVisitSoParts(v, (v.soPartsNomors || []).filter(n => n !== nomor), "Lepas SO Parts", `SO Parts ${nomor} dilepas dari ${v.id}`);
+  };
+  const renderSoPartsRow = v => {
+    const canEdit = isOwnerLike || isSepti || isMekanik;
+    const linked = v.soPartsNomors || [];
+    const cands = soPartsCandidates(v);
+    return React.createElement("div", {
+      style: {
+        gridColumn: "1 / -1"
+      }
+    }, React.createElement("span", {
+      style: {
+        color: theme.muted
+      }
+    }, "SO Parts:"), " ", linked.length === 0 && React.createElement("strong", {
+      style: {
+        color: theme.text
+      }
+    }, "-"), linked.map(n => React.createElement("span", {
+      key: n,
+      style: {
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        marginRight: 8
+      }
+    }, React.createElement("strong", {
+      style: {
+        color: theme.text
+      }
+    }, n), canEdit && React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => removeSoParts(v, n)
+    }, "×"))), canEdit && React.createElement("div", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        marginTop: 6,
+        flexWrap: "wrap"
+      }
+    }, React.createElement(Select, {
+      value: soPartsPick,
+      onChange: val => setSoPartsPick(val),
+      options: [{
+        value: "",
+        label: cands.length ? "— Pilih SO Parts untuk ditautkan —" : "— Tidak ada SO Parts lain untuk client ini —"
+      }, ...cands.map(so => ({
+        value: so.nomor,
+        label: `${so.nomor} — ${so.customerNama}${so.noPoClient ? " · PO " + so.noPoClient : ""}`
+      }))]
+    }), React.createElement(Btn, {
+      size: "sm",
+      onClick: () => addSoParts(v)
+    }, "+ Tautkan")));
+  };
+  // ── Parts Used / Parts Returned (Fase 3, 2026-10-29) ──────────────────────────────────────────
+  // Daftar part diambil otomatis dari DO semua SO yang tertaut ke kunjungan (SO service + SO Parts).
+  // Mekanik cukup menandai Digunakan / Tidak Digunakan + jumlahnya; part yang Digunakan otomatis memunculkan
+  // baris Parts Returned (part LAMA yang diganti, kondisi default Rusak). Disimpan di visit.partsUsed /
+  // visit.partsReturned (informasional: tidak mengubah stok — stok tetap dikelola Logistic lewat DO/Parts Use).
+  // Part yang dipasang tanpa DO boleh ditambah manual dan diberi penanda `manual` untuk direview kemudian.
+  const KONDISI_LAMA = ["Rusak", "Aus", "Patah", "Bocor"];
+  const [puManual, setPuManual] = useState({
+    partNumber: "",
+    partName: "",
+    qty: 1
+  });
+  const visitDoParts = v => {
+    const noms = visitSoNomors(v);
+    const out = [];
+    (deliveryOrders || []).filter(d => noms.includes(d.soNomor)).forEach(d => (d.items || []).forEach(it => {
+      if (!it.partNumber) return;
+      if ((parts || []).find(p => p.partNumber === it.partNumber)?.kategori === "Service") return;
+      out.push({
+        id: d.nomor + "|" + it.partNumber,
+        doNomor: d.nomor,
+        soNomor: d.soNomor,
+        partNumber: it.partNumber,
+        partName: it.nama || it.partName || "",
+        qtyDO: Number(it.qty) || 0
+      });
+    }));
+    return out;
+  };
+  const updateVisitParts = (vid, fn) => setVisits(prev => (prev || []).map(x => x.id === vid ? fn(x) : x));
+  // Tandai satu baris part (dari DO atau manual) sebagai Digunakan/Tidak Digunakan; menjaga baris Parts Returned
+  // yang terkait (usedId) tetap sinkron. Idempotent — aman dipanggil ulang (mis. dari Simpan DAR).
+  const markPartUsed = (vid, row, status, qtyUsed) => updateVisitParts(vid, x => {
+    const used = [...(x.partsUsed || [])];
+    let ret = [...(x.partsReturned || [])];
+    const rec = {
+      id: row.id,
+      doNomor: row.doNomor || "",
+      soNomor: row.soNomor || "",
+      partNumber: row.partNumber,
+      partName: row.partName || "",
+      qtyDO: row.qtyDO || 0,
+      qtyUsed: status === "Digunakan" ? qtyUsed : 0,
+      status,
+      manual: !!row.manual,
+      by: session.nama,
+      at: new Date().toISOString()
+    };
+    const i = used.findIndex(u => u.id === row.id);
+    if (i >= 0) used[i] = {
+      ...used[i],
+      ...rec
+    };
+    else used.push(rec);
+    if (status === "Digunakan") {
+      const ri = ret.findIndex(r => r.usedId === row.id);
+      if (ri >= 0) ret[ri] = {
+        ...ret[ri],
+        qty: qtyUsed
+      };
+      else ret.push({
+        id: "RT-" + uid(),
+        usedId: row.id,
+        partNumber: row.partNumber,
+        partName: row.partName || "",
+        qty: qtyUsed,
+        kondisi: "Rusak",
+        catatan: ""
+      });
+    } else ret = ret.filter(r => r.usedId !== row.id);
+    return {
+      ...x,
+      partsUsed: used,
+      partsReturned: ret
+    };
+  });
+  const updateReturned = (vid, id, patch) => updateVisitParts(vid, x => ({
+    ...x,
+    partsReturned: (x.partsReturned || []).map(r => r.id === id ? {
+      ...r,
+      ...patch
+    } : r)
+  }));
+  const removeReturned = (v, r) => {
+    if (!window.confirm(`Hapus baris Parts Returned ${r.partNumber || r.partName}?`)) return;
+    updateVisitParts(v.id, x => ({
+      ...x,
+      partsReturned: (x.partsReturned || []).filter(y => y.id !== r.id)
+    }));
+  };
+  const addManualPartUsed = v => {
+    if (!puManual.partNumber && !puManual.partName) return alert("Pilih part dulu");
+    const id = "M|" + puManual.partNumber;
+    if ((v.partsUsed || []).some(u => u.id === id)) return alert("Part ini sudah ada di daftar");
+    markPartUsed(v.id, {
+      id,
+      partNumber: puManual.partNumber,
+      partName: puManual.partName,
+      qtyDO: 0,
+      manual: true
+    }, "Digunakan", parseInt(puManual.qty) || 1);
+    setPuManual({
+      partNumber: "",
+      partName: "",
+      qty: 1
+    });
+  };
+  const renderPartsUsedPage = (v, canEdit) => {
+    const doRows = visitDoParts(v);
+    const used = v.partsUsed || [];
+    const ret = v.partsReturned || [];
+    const markOf = id => used.find(u => u.id === id);
+    const manualRows = used.filter(u => u.manual);
+    const chip = (label, active, onClick, color) => React.createElement("button", {
+      key: label,
+      type: "button",
+      disabled: !canEdit,
+      onClick,
+      style: {
+        padding: "10px 14px",
+        minHeight: 44,
+        borderRadius: 10,
+        border: `1px solid ${active ? color || theme.accentLight : theme.border}`,
+        background: active ? color || theme.accentLight : "transparent",
+        color: active ? "#fff" : theme.text,
+        fontSize: 14,
+        fontWeight: active ? 700 : 500,
+        cursor: canEdit ? "pointer" : "default"
+      }
+    }, label);
+    const stepBtn = (label, onClick) => React.createElement("button", {
+      type: "button",
+      disabled: !canEdit,
+      onClick,
+      style: {
+        width: 44,
+        height: 44,
+        borderRadius: 10,
+        border: `1px solid ${theme.border}`,
+        background: "transparent",
+        color: theme.text,
+        fontSize: 20,
+        cursor: canEdit ? "pointer" : "default"
+      }
+    }, label);
+    const stepper = (qty, max, onChange) => React.createElement("div", {
+      style: {
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 8
+      }
+    }, stepBtn("−", () => onChange(Math.max(1, qty - 1))), React.createElement("strong", {
+      style: {
+        minWidth: 28,
+        textAlign: "center",
+        color: theme.text,
+        fontSize: 16
+      }
+    }, qty), stepBtn("+", () => onChange(max ? Math.min(max, qty + 1) : qty + 1)));
+    const cardStyle = {
+      border: `1px solid ${theme.border}`,
+      borderRadius: 10,
+      padding: 12,
+      display: "flex",
+      flexDirection: "column",
+      gap: 10
+    };
+    const partCard = (row, mk) => React.createElement("div", {
+      key: row.id,
+      style: cardStyle
+    }, React.createElement("div", null, React.createElement("strong", {
+      style: {
+        color: theme.text
+      }
+    }, row.partNumber, row.partName ? " — " + row.partName : ""), React.createElement("div", {
+      style: {
+        fontSize: 12,
+        color: theme.muted
+      }
+    }, row.manual ? "⚠ Tanpa DO (manual) — perlu direview" : `DO ${row.doNomor} · dikirim ${row.qtyDO}`)), canEdit && React.createElement("div", {
+      style: {
+        display: "flex",
+        flexWrap: "wrap",
+        gap: 8,
+        alignItems: "center"
+      }
+    }, chip("Digunakan", mk?.status === "Digunakan", () => markPartUsed(v.id, row, "Digunakan", mk?.qtyUsed || row.qtyDO || 1), theme.green), chip("Tidak Digunakan", mk?.status === "Tidak Digunakan", () => markPartUsed(v.id, row, "Tidak Digunakan", 0), theme.red), mk?.status === "Digunakan" && stepper(mk.qtyUsed, row.manual ? 0 : row.qtyDO, q => markPartUsed(v.id, row, "Digunakan", q))), !canEdit && React.createElement("div", {
+      style: {
+        fontSize: 13,
+        color: theme.text
+      }
+    }, mk ? mk.status + (mk.status === "Digunakan" ? " · " + mk.qtyUsed : "") : "Belum ditandai"));
+    return React.createElement("div", {
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 14
+      }
+    }, React.createElement("p", {
+      style: {
+        margin: 0,
+        fontSize: 12,
+        color: theme.muted
+      }
+    }, "Daftar part diambil otomatis dari DO semua SO yang tertaut ke kunjungan ini. Tandai Digunakan atau Tidak Digunakan; part yang Digunakan otomatis muncul di Parts Returned (part lama yang diganti)."), React.createElement("h4", {
+      style: {
+        margin: 0,
+        color: theme.text
+      }
+    }, "PARTS USED"), doRows.length === 0 && manualRows.length === 0 && React.createElement("div", {
+      style: {
+        fontSize: 13,
+        color: theme.muted
+      }
+    }, "Belum ada DO untuk SO yang tertaut. Tautkan SO Parts di Detail Kunjungan, atau tambahkan part manual di bawah."), doRows.map(r => partCard(r, markOf(r.id))), manualRows.map(m => partCard({
+      id: m.id,
+      doNomor: "",
+      partNumber: m.partNumber,
+      partName: m.partName,
+      qtyDO: 0,
+      manual: true
+    }, m)), canEdit && React.createElement("div", {
+      style: cardStyle
+    }, React.createElement("div", {
+      style: {
+        fontSize: 13,
+        color: theme.muted,
+        fontWeight: 600
+      }
+    }, "Part dipasang tapi tidak ada di DO (jarang) — ditandai untuk review"), React.createElement(PartPicker, {
+      label: "Part",
+      value: puManual.partNumber,
+      parts: parts,
+      showDescription: true,
+      onChange: pn => {
+        const p = parts.find(x => x.partNumber === pn);
+        setPuManual(m => ({
+          ...m,
+          partNumber: pn,
+          partName: p?.partName || ""
+        }));
+      }
+    }), React.createElement("div", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        flexWrap: "wrap"
+      }
+    }, stepper(parseInt(puManual.qty) || 1, 0, q => setPuManual(m => ({
+      ...m,
+      qty: q
+    }))), React.createElement(Btn, {
+      size: "sm",
+      onClick: () => addManualPartUsed(v)
+    }, "+ Tambah Tanpa DO"))), React.createElement("h4", {
+      style: {
+        margin: "8px 0 0",
+        color: theme.text
+      }
+    }, "PARTS RETURNED (part lama yang diganti)"), ret.length === 0 && React.createElement("div", {
+      style: {
+        fontSize: 13,
+        color: theme.muted
+      }
+    }, "Belum ada. Muncul otomatis begitu sebuah part ditandai Digunakan."), ret.map(r => React.createElement("div", {
+      key: r.id,
+      style: cardStyle
+    }, React.createElement("div", {
+      style: {
+        display: "grid",
+        gridTemplateColumns: "1fr 1fr",
+        gap: 10
+      }
+    }, React.createElement(Input, {
+      label: "Part Number (lama)",
+      value: r.partNumber,
+      onChange: val => updateReturned(v.id, r.id, {
+        partNumber: val
+      }),
+      disabled: !canEdit
+    }), React.createElement(Input, {
+      label: "Nama Part",
+      value: r.partName,
+      onChange: val => updateReturned(v.id, r.id, {
+        partName: val
+      }),
+      disabled: !canEdit
+    })), React.createElement("div", {
+      style: {
+        display: "flex",
+        flexWrap: "wrap",
+        gap: 8,
+        alignItems: "center"
+      }
+    }, KONDISI_LAMA.map(k => chip(k, r.kondisi === k, () => updateReturned(v.id, r.id, {
+      kondisi: k
+    }), theme.red)), stepper(r.qty || 1, 0, q => updateReturned(v.id, r.id, {
+      qty: q
+    })), canEdit && React.createElement(Btn, {
+      size: "sm",
+      variant: "danger",
+      onClick: () => removeReturned(v, r)
+    }, "×")))));
+  };
   const [formType, setFormType] = useState(null); // 'dar' | 'partrec' | 'status' | 'bast'
   // Full-screen "page" takeover for DAR / Part Recommendation / Status Report / BAPP — clicking the
   // corresponding button in the Kunjungan Kerja table sets this instead of opening a small modal,
@@ -10831,6 +11223,7 @@ function MekanikReport({
     partNumber: "",
     partName: "",
     qty: 1,
+    doKey: "",
     manual: false,
     jamMulai: "",
     jamSelesai: "",
@@ -11282,7 +11675,12 @@ function MekanikReport({
       detail.partNumber = a.partNumber;
       detail.partName = a.partName;
       detail.qty = parseInt(a.qty) || 1;
-      detail.manual = true; // belum terhubung ke DO/Parts Used (Fase 3) — ditandai untuk review kemudian
+      const doRow = a.doKey ? visitDoParts(formVisit).find(r => r.id === a.doKey) : null;
+      if (doRow) {
+        detail.doNomor = doRow.doNomor;
+        detail.soNomor = doRow.soNomor;
+        detail.manual = false;
+      } else detail.manual = true; // part tidak ada di DO — ditandai untuk review kemudian
     }
     if (a.teks.trim()) detail.teks = a.teks.trim();
     const entry = {
@@ -11396,19 +11794,68 @@ function MekanikReport({
         gap: 10,
         alignItems: "end"
       }
-    }, React.createElement(PartPicker, {
-      label: "Part yang diganti",
-      value: a.partNumber,
-      parts: parts,
-      showDescription: true,
-      onChange: pn => {
-        const p = parts.find(x => x.partNumber === pn);
-        upd({
-          partNumber: pn,
-          partName: p?.partName || ""
-        });
-      }
-    }), React.createElement(Input, {
+    }, (() => {
+      const doRows = formVisit ? visitDoParts(formVisit) : [];
+      // Part yang diganti dipilih dari DO yang tertaut ke kunjungan ini; bila memang tidak ada di DO
+      // (jarang), pilih "Tidak ada di DO" lalu cari part manual — ditandai untuk review.
+      if (doRows.length > 0 && !a.manual) return React.createElement(Select, {
+        label: "Part yang diganti (dari DO)",
+        value: a.doKey,
+        onChange: val => {
+          if (val === "__manual") return upd({
+            manual: true,
+            doKey: "",
+            partNumber: "",
+            partName: ""
+          });
+          const r = doRows.find(x => x.id === val);
+          upd({
+            doKey: val,
+            partNumber: r ? r.partNumber : "",
+            partName: r ? r.partName : "",
+            qty: r ? Math.min(parseInt(a.qty) || 1, r.qtyDO || 1) : a.qty
+          });
+        },
+        options: [{
+          value: "",
+          label: "— Pilih part dari DO —"
+        }, ...doRows.map(r => ({
+          value: r.id,
+          label: `${r.partNumber} — ${r.partName} (DO ${r.doNomor}, qty ${r.qtyDO})`
+        })), {
+          value: "__manual",
+          label: "⚠ Tidak ada di DO (cari manual)"
+        }]
+      });
+      return React.createElement("div", {
+        style: {
+          display: "flex",
+          flexDirection: "column",
+          gap: 6
+        }
+      }, React.createElement(PartPicker, {
+        label: doRows.length ? "Part yang diganti (tanpa DO — ditandai review)" : "Part yang diganti (belum ada DO — ditandai review)",
+        value: a.partNumber,
+        parts: parts,
+        showDescription: true,
+        onChange: pn => {
+          const p = parts.find(x => x.partNumber === pn);
+          upd({
+            partNumber: pn,
+            partName: p?.partName || "",
+            doKey: ""
+          });
+        }
+      }), doRows.length > 0 && React.createElement(Btn, {
+        size: "sm",
+        variant: "ghost",
+        onClick: () => upd({
+          manual: false,
+          partNumber: "",
+          partName: ""
+        })
+      }, "← Pilih dari DO"));
+    })(), React.createElement(Input, {
       label: "Qty",
       type: "number",
       value: a.qty,
@@ -11498,6 +11945,37 @@ function MekanikReport({
       pekerjaan: darPekerjaanSummary(darForm.catatanHarian)
     } : darForm;
     darDraftRemove(formVisit?.id, editingDarId);
+    // "Mengganti" memakai part dari DO → otomatis menandai Parts Used (Digunakan) di kunjungan ini, dan
+    // baris Parts Returned (part lama) ikut muncul. Tanpa DO → baris manual (ditandai review).
+    const doRowsNow = formVisit ? visitDoParts(formVisit) : [];
+    const gantiQty = {};
+    darForm.catatanHarian.filter(c => c.jenis === "Mengganti" && c.detail && c.detail.partNumber).forEach(c => {
+      const d = c.detail;
+      const key = d.doNomor ? d.doNomor + "|" + d.partNumber : "M|" + d.partNumber;
+      gantiQty[key] = {
+        d,
+        qty: (gantiQty[key]?.qty || 0) + (parseInt(d.qty) || 1)
+      };
+    });
+    Object.entries(gantiQty).forEach(([key, {
+      d,
+      qty
+    }]) => {
+      const row = d.doNomor ? doRowsNow.find(r => r.id === key) : null;
+      const base = row || {
+        id: key,
+        doNomor: d.doNomor || "",
+        soNomor: d.soNomor || "",
+        partNumber: d.partNumber,
+        partName: d.partName || "",
+        qtyDO: 0,
+        manual: !d.doNomor
+      };
+      const existing = (visits.find(x => x.id === formVisit.id)?.partsUsed || []).find(u => u.id === key);
+      const cap = base.qtyDO || 0;
+      const q = Math.max(existing?.status === "Digunakan" ? existing.qtyUsed || 0 : 0, cap ? Math.min(cap, qty) : qty);
+      markPartUsed(formVisit.id, base, "Digunakan", q);
+    });
     if (editingDarId) {
       const arr = [...dars];
       const idx = arr.findIndex(d => d.id === editingDarId);
@@ -12229,7 +12707,8 @@ function MekanikReport({
       status: "📋 Status Report",
       bast: "📄 Berita Acara Penyelesaian Pekerjaan (BAPP)",
       inspection: "🔍 Inspection Report",
-      surattugas: "📜 Surat Perintah Tugas"
+      surattugas: "📜 Surat Perintah Tugas",
+      partsused: "🧰 Parts Used & Returned"
     }[type];
     return /*#__PURE__*/React.createElement("div", {
       style: {
@@ -12394,7 +12873,7 @@ function MekanikReport({
     }
   }, "Batal"), /*#__PURE__*/React.createElement(Btn, {
     onClick: saveDar
-  }, editingDarId ? "Simpan Perubahan" : "Simpan DAR")))), type === "partrec" && (() => {
+  }, editingDarId ? "Simpan Perubahan" : "Simpan DAR")))), type === "partsused" && renderPartsUsedPage(v, canEditVisit), type === "partrec" && (() => {
       const recDoc = visitRecDoc(v.id);
       const q = recSearch.trim().toLowerCase();
       // Same match set as PartPicker (PN / Part Name / Description) and same Service-excluded
@@ -13740,7 +14219,7 @@ function MekanikReport({
       label: "Mekanik",
       render: v => v.mekanikNamaList && v.mekanikNamaList.length ? v.mekanikNamaList.join(", ") : v.mekanikNama
     }],
-    actions: v => [openVisitPageBadge(v, "dar", visitDars(v.id).length ? theme.green : theme.muted, "DAR " + visitDars(v.id).length), openVisitPageBadge(v, "partrec", visitRecDoc(v.id) ? theme.purple : theme.muted, "Part Rec " + (visitRecDoc(v.id)?.items.length || 0)), openVisitPageBadge(v, "status", visitStatus(v.id).length ? theme.cyan : theme.muted, "Status " + visitStatus(v.id).length), openVisitPageBadge(v, "bast", visitBasts(v.id).length ? theme.green : theme.muted, "BAPP " + visitBasts(v.id).length), openVisitPageBadge(v, "inspection", visitInspections(v.id).length ? theme.cyan : theme.muted, "Inspection " + visitInspections(v.id).length), openVisitPageBadge(v, "surattugas", visitSuratTugas(v.id).length ? theme.purple : theme.muted, "ST " + visitSuratTugas(v.id).length)].map((el, idx) => /*#__PURE__*/React.cloneElement(el, {
+    actions: v => [openVisitPageBadge(v, "dar", visitDars(v.id).length ? theme.green : theme.muted, "DAR " + visitDars(v.id).length), openVisitPageBadge(v, "partrec", visitRecDoc(v.id) ? theme.purple : theme.muted, "Part Rec " + (visitRecDoc(v.id)?.items.length || 0)), openVisitPageBadge(v, "status", visitStatus(v.id).length ? theme.cyan : theme.muted, "Status " + visitStatus(v.id).length), openVisitPageBadge(v, "bast", visitBasts(v.id).length ? theme.green : theme.muted, "BAPP " + visitBasts(v.id).length), openVisitPageBadge(v, "inspection", visitInspections(v.id).length ? theme.cyan : theme.muted, "Inspection " + visitInspections(v.id).length), openVisitPageBadge(v, "surattugas", visitSuratTugas(v.id).length ? theme.purple : theme.muted, "ST " + visitSuratTugas(v.id).length), openVisitPageBadge(v, "partsused", (v.partsUsed || []).some(u => u.status === "Digunakan") ? theme.green : theme.muted, "Parts Used " + (v.partsUsed || []).filter(u => u.status === "Digunakan").length)].map((el, idx) => /*#__PURE__*/React.cloneElement(el, {
       key: idx
     })).concat([/*#__PURE__*/React.createElement(Btn, {
       key: "selesai",
@@ -13749,10 +14228,10 @@ function MekanikReport({
     }, "✓ Selesai")]),
     emptyMsg: "Belum ada kunjungan kerja on going"
   }) : /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. Kunjungan", "Tanggal", "Jenis", "Client", "Unit Terkait", "Lokasi", "Mekanik", "DAR", "Part Rec.", "Status", "BAPP", "Inspection", "Surat Tugas", "Aksi"],
+    headers: ["No. Kunjungan", "Tanggal", "Jenis", "Client", "Unit Terkait", "Lokasi", "Mekanik", "DAR", "Part Rec.", "Parts Used", "Status", "BAPP", "Inspection", "Surat Tugas", "Aksi"],
     rows: myVisitsOngoing.map(v => [visitIdCell(v), v.tanggal, /*#__PURE__*/React.createElement(Badge, {
       color: theme.purple
-    }, v.jenisBeritaAcara), v.customerNama, v.unitTerkait || "-", v.lokasi || "-", (v.mekanikNamaList && v.mekanikNamaList.length ? v.mekanikNamaList.join(", ") : v.mekanikNama), openVisitPageBadge(v, "dar", visitDars(v.id).length ? theme.green : theme.muted, visitDars(v.id).length + " entri"), openVisitPageBadge(v, "partrec", visitRecDoc(v.id) ? theme.purple : theme.muted, (visitRecDoc(v.id)?.items.length || 0) + " item"), openVisitPageBadge(v, "status", visitStatus(v.id).length ? theme.cyan : theme.muted, visitStatus(v.id).length + " entri"), openVisitPageBadge(v, "bast", visitBasts(v.id).length ? theme.green : theme.muted, visitBasts(v.id).length), openVisitPageBadge(v, "inspection", visitInspections(v.id).length ? theme.cyan : theme.muted, visitInspections(v.id).length + " entri"), openVisitPageBadge(v, "surattugas", visitSuratTugas(v.id).length ? theme.purple : theme.muted, visitSuratTugas(v.id).length + " entri"), /*#__PURE__*/React.createElement(Btn, {
+    }, v.jenisBeritaAcara), v.customerNama, v.unitTerkait || "-", v.lokasi || "-", (v.mekanikNamaList && v.mekanikNamaList.length ? v.mekanikNamaList.join(", ") : v.mekanikNama), openVisitPageBadge(v, "dar", visitDars(v.id).length ? theme.green : theme.muted, visitDars(v.id).length + " entri"), openVisitPageBadge(v, "partrec", visitRecDoc(v.id) ? theme.purple : theme.muted, (visitRecDoc(v.id)?.items.length || 0) + " item"), openVisitPageBadge(v, "partsused", (v.partsUsed || []).some(u => u.status === "Digunakan") ? theme.green : theme.muted, (v.partsUsed || []).filter(u => u.status === "Digunakan").length + " item"), openVisitPageBadge(v, "status", visitStatus(v.id).length ? theme.cyan : theme.muted, visitStatus(v.id).length + " entri"), openVisitPageBadge(v, "bast", visitBasts(v.id).length ? theme.green : theme.muted, visitBasts(v.id).length), openVisitPageBadge(v, "inspection", visitInspections(v.id).length ? theme.cyan : theme.muted, visitInspections(v.id).length + " entri"), openVisitPageBadge(v, "surattugas", visitSuratTugas(v.id).length ? theme.purple : theme.muted, visitSuratTugas(v.id).length + " entri"), /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       onClick: () => markVisitSelesai(v)
     }, "✓ Selesai")]),
@@ -13765,10 +14244,10 @@ function MekanikReport({
     storageKey: "mr_visits_selesai",
     defaultOpen: false
   }, /*#__PURE__*/React.createElement(Table, {
-    headers: ["No. Kunjungan", "Tanggal", "Selesai", "Jenis", "Client", "Unit Terkait", "Lokasi", "Mekanik", "DAR", "Part Rec.", "BAPP", "Inspection", "Surat Tugas"],
+    headers: ["No. Kunjungan", "Tanggal", "Selesai", "Jenis", "Client", "Unit Terkait", "Lokasi", "Mekanik", "DAR", "Part Rec.", "Parts Used", "BAPP", "Inspection", "Surat Tugas"],
     rows: myVisitsSelesai.map(v => [visitIdCell(v), v.tanggal, v.tanggalSelesai || "-", /*#__PURE__*/React.createElement(Badge, {
       color: theme.purple
-    }, v.jenisBeritaAcara), v.customerNama, v.unitTerkait || "-", v.lokasi || "-", (v.mekanikNamaList && v.mekanikNamaList.length ? v.mekanikNamaList.join(", ") : v.mekanikNama), openVisitPageBadge(v, "dar", visitDars(v.id).length ? theme.green : theme.muted, visitDars(v.id).length + " entri"), openVisitPageBadge(v, "partrec", visitRecDoc(v.id) ? theme.purple : theme.muted, (visitRecDoc(v.id)?.items.length || 0) + " item"), openVisitPageBadge(v, "bast", visitBasts(v.id).length ? theme.green : theme.muted, visitBasts(v.id).length), openVisitPageBadge(v, "inspection", visitInspections(v.id).length ? theme.cyan : theme.muted, visitInspections(v.id).length + " entri"), openVisitPageBadge(v, "surattugas", visitSuratTugas(v.id).length ? theme.purple : theme.muted, visitSuratTugas(v.id).length + " entri")]),
+    }, v.jenisBeritaAcara), v.customerNama, v.unitTerkait || "-", v.lokasi || "-", (v.mekanikNamaList && v.mekanikNamaList.length ? v.mekanikNamaList.join(", ") : v.mekanikNama), openVisitPageBadge(v, "dar", visitDars(v.id).length ? theme.green : theme.muted, visitDars(v.id).length + " entri"), openVisitPageBadge(v, "partrec", visitRecDoc(v.id) ? theme.purple : theme.muted, (visitRecDoc(v.id)?.items.length || 0) + " item"), openVisitPageBadge(v, "partsused", (v.partsUsed || []).some(u => u.status === "Digunakan") ? theme.green : theme.muted, (v.partsUsed || []).filter(u => u.status === "Digunakan").length + " item"), openVisitPageBadge(v, "bast", visitBasts(v.id).length ? theme.green : theme.muted, visitBasts(v.id).length), openVisitPageBadge(v, "inspection", visitInspections(v.id).length ? theme.cyan : theme.muted, visitInspections(v.id).length + " entri"), openVisitPageBadge(v, "surattugas", visitSuratTugas(v.id).length ? theme.purple : theme.muted, visitSuratTugas(v.id).length + " entri")]),
     onDelete: isOwnerLike ? i => deleteVisit(myVisitsSelesai[i]) : undefined,
     emptyMsg: "Belum ada kunjungan kerja selesai"
   }))), /*#__PURE__*/React.createElement(Modal, {
@@ -13968,7 +14447,7 @@ function MekanikReport({
     size: "sm",
     variant: "ghost",
     onClick: startEditSoNomor
-  }, "✏️"))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+  }, "✏️"))), renderSoPartsRow(detailVisit), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
     style: {
       color: theme.muted
     }
@@ -13976,7 +14455,15 @@ function MekanikReport({
     style: {
       color: theme.text
     }
-  }, itemRequisitions.filter(ir => ir.soNomor === detailVisit.soNomor).map(ir => ir.nomor).join(", ") || "-"))), /*#__PURE__*/React.createElement("div", {
+  }, itemRequisitions.filter(ir => visitSoNomors(detailVisit).includes(ir.soNomor)).map(ir => ir.nomor).join(", ") || "-")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: theme.muted
+    }
+  }, "No. DO:"), " ", /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: theme.text
+    }
+  }, (deliveryOrders || []).filter(d => visitSoNomors(detailVisit).includes(d.soNomor)).map(d => d.nomor).join(", ") || "-"))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "flex-end"
@@ -35723,8 +36210,12 @@ function DocumentTrailModule({
     const pos = [...(poLocal || []).map(p => ({ ...p, _tipe: "Lokal" })), ...(poOverseas || []).map(p => ({ ...p, _tipe: "Overseas" }))].filter(po => (po.irNomors || []).some(n => irNomors.includes(n)));
     const poNomors = pos.map(p => p.nomor);
     const grs = (goodsReceipts || []).filter(g => poNomors.includes(g.poNomor));
-    const dos = (deliveryOrders || []).filter(d => d.soNomor === so.nomor);
-    const mrVisits = (visits || []).filter(v => v.soNomor === so.nomor);
+    // SO Parts yang ditautkan manual ke MR dari SO service ini (Fase 2): DO-nya ikut dihitung di sini,
+    // dan sebaliknya SO Parts tersebut menampilkan MR yang menautkannya.
+    const linkedPartsNomors = (visits || []).filter(v => v.soNomor === so.nomor).flatMap(v => v.soPartsNomors || []);
+    const linkedPartsSOs = (salesOrders || []).filter(s => linkedPartsNomors.includes(s.nomor));
+    const dos = (deliveryOrders || []).filter(d => d.soNomor === so.nomor || linkedPartsNomors.includes(d.soNomor));
+    const mrVisits = (visits || []).filter(v => v.soNomor === so.nomor || (v.soPartsNomors || []).includes(so.nomor));
     const soInvoices = (invoices || []).filter(i => i.soNomor === so.nomor);
     const hasInvoice = soInvoices.length > 0;
     const top = so.termOfPayment || [];
@@ -35737,8 +36228,8 @@ function DocumentTrailModule({
     // SO MR-only (jasa lewat Mekanik Report) tanpa DO → DO tidak berlaku, walau item jasa punya partNumber.
     // Tetap berlaku bila sudah ada DO, atau fulfillmentType Parts/BOTH.
     const doApplicable = so.fulfillmentType === "MR" && dos.length === 0 ? false : ["Parts", "BOTH", undefined, null].includes(so.fulfillmentType) || dos.length > 0 || (so.items || []).some(it => it.partNumber);
-    const doDone = doApplicable ? dos.length > 0 && soFullyShipped(so) : null;
-    const mrApplicable = ["MR", "BOTH"].includes(so.fulfillmentType);
+    const doDone = doApplicable ? so.fulfillmentType === "MR" && linkedPartsSOs.length > 0 ? linkedPartsSOs.every(soFullyShipped) : dos.length > 0 && soFullyShipped(so) : null;
+    const mrApplicable = ["MR", "BOTH"].includes(so.fulfillmentType) || mrVisits.length > 0;
     const mrDone = mrApplicable ? mrVisits.some(v => v.status === "Selesai") : null;
     const invDone = soInvoices.length === 0 ? false : soInvoices.every(i => i.statusBayar === "Lunas");
     return {
