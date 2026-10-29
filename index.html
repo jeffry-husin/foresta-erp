@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-10-29.3";
+const APP_BUILD = "2026-10-29.4";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -716,6 +716,18 @@ const genDocNumber = (arr, typeCode, numberField = "nomor") => {
     return max;
   }, 0);
   return `${prefix}${String(maxSeq + 1).padStart(3, "0")}${suffix}`;
+};
+// Mekanik Report "No. Kunjungan": MR-###-<roman month>-<year>. ### is one running sequence over ALL
+// visits (never repeats, never resets per month/year); month/year come from the visit date.
+const genVisitNomor = (visits, dateStr) => {
+  const d = dateStr ? new Date(dateStr + "T00:00:00") : new Date();
+  const dd = isNaN(d.getTime()) ? new Date() : d;
+  const maxSeq = (visits || []).reduce((max, v) => {
+    const m = String(v && v.id || "").match(/^MR-(\d+)-/);
+    const n = m ? parseInt(m[1], 10) : 0;
+    return n > max ? n : max;
+  }, 0);
+  return `MR-${String(maxSeq + 1).padStart(3, "0")}-${DOC_ROMAN_MONTHS[dd.getMonth()]}-${dd.getFullYear()}`;
 };
 // Same numbering scheme as genDocNumber, but anchored to an explicit date instead of "now" and
 // fed by a shared running-counter object instead of scanning an array — used only by the
@@ -10967,7 +10979,7 @@ function MekanikReport({
     const mekanikUsernames = [primaryUsername, ...tambahanUsernames];
     const mekanikNamaList = mekanikUsernames.map(u => (employees.find(e => e.username === u) || {}).nama || u);
     const v = {
-      id: "VS-" + uid(),
+      id: genVisitNomor(visits, visitForm.tanggal),
       ...visitForm,
       customerNama: cust?.nama,
       noPoClient: so ? so.nomor : "",
