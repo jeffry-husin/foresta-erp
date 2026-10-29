@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-10-29.2";
+const APP_BUILD = "2026-10-29.3";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -656,6 +656,8 @@ const MONEY_COL_MIN = "17ch";
 // Only real currency codes count now.
 const CURRENCY_CODES = "IDR|USD|SGD|EUR|JPY|CNY|RMB|MYR|AUD|GBP|HKD|THB|KRW|CHF|SAR|AED|INR|TWD|NZD|CAD";
 const MONEY_PREFIX_RE = new RegExp("^\\s*-?\\s*(Rp\\.?|(" + CURRENCY_CODES + "))\\s*-?[\\d.,]+\\s*$");
+// Search helper: true if any item row's Part Number (or alt code fields) contains the needle (lowercase).
+const itemsHavePN = (items, needle) => !!needle && (items || []).some(it => it && [it.partNumber, it.unitCode, it.pn].filter(Boolean).some(x => String(x).toLowerCase().includes(needle)));
 const isMoneyText = c => typeof c === "string" && (MONEY_PREFIX_RE.test(c) || /^\s*-?\d{1,3}([.,]\d{3})+([.,]\d+)?\s*$/.test(c));
 // SECURITY (2026-09-04, external audit finding #6): Math.random() is not cryptographically strong
 // and its output space here (7 base-36 chars ≈ 3.7e10 combinations) isn't collision-resistant
@@ -19142,7 +19144,7 @@ function SalesOrderModule({
   // scans anyway, silently defeating the whole point of that earlier fix. Memoizing
   // salesOrdersFiltered itself (on salesOrders/soSearch only) keeps its reference stable across
   // unrelated re-renders, so the downstream memos can finally actually skip work.
-  const salesOrdersFiltered = React.useMemo(() => (soSearch.trim() ? salesOrders.filter(so => [so.nomor, so.customerNama, so.salesManagerNama, so.sourceNomor].filter(Boolean).some(x => String(x).toLowerCase().includes(soSearch.trim().toLowerCase()))) : salesOrders).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || "")), [salesOrders, soSearch]);
+  const salesOrdersFiltered = React.useMemo(() => (soSearch.trim() ? salesOrders.filter(so => [so.nomor, so.customerNama, so.salesManagerNama, so.sourceNomor].filter(Boolean).some(x => String(x).toLowerCase().includes(soSearch.trim().toLowerCase())) || itemsHavePN(so.items, soSearch.trim().toLowerCase())) : salesOrders).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || "")), [salesOrders, soSearch]);
   // PERF FIX (module was slow to open): soHasBecomePO/soIsCompleted/soFullyShipped each scan the
   // full itemRequisitions/poLocal/poOverseas/deliveryOrders/invoices arrays per SO. Below, the exact
   // same `.filter(so => ...)` expression using these was written out separately for count/rows/onEdit/
@@ -20481,7 +20483,7 @@ function ItemRequisitionModule({
   // and the IR list sections below each had their own separate search box.
   const [search, setSearch] = useState("");
   const irSearch = search;
-  const itemRequisitionsFiltered = (irSearch.trim() ? itemRequisitions.filter(r => [r.nomor, r.soNomor, r.soCustomerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(irSearch.trim().toLowerCase()))) : itemRequisitions).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  const itemRequisitionsFiltered = (irSearch.trim() ? itemRequisitions.filter(r => [r.nomor, r.soNomor, r.soCustomerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(irSearch.trim().toLowerCase())) || itemsHavePN(r.items, irSearch.trim().toLowerCase())) : itemRequisitions).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const [modal, setModal] = useState(false);
   const [detail, setDetail] = useState(null);
   const [manualModal, setManualModal] = useState(false);
@@ -24682,7 +24684,7 @@ function GoodsReceiptModule({
   // from before this 3-section redesign are filtered out here; their pending items live on in
   // Section 2 (Internal Delivery Order) instead of being duplicated in this final list.
   const goodsReceiptsFinal = goodsReceipts.filter(g => g.statusFinal === "Final - Diterima Workshop");
-  const goodsReceiptsFiltered = (grSearch.trim() ? goodsReceiptsFinal.filter(g => [g.nomor, g.poNomor, g.mekanikNama].filter(Boolean).some(x => String(x).toLowerCase().includes(grSearch.trim().toLowerCase()))) : goodsReceiptsFinal).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  const goodsReceiptsFiltered = (grSearch.trim() ? goodsReceiptsFinal.filter(g => [g.nomor, g.poNomor, g.mekanikNama].filter(Boolean).some(x => String(x).toLowerCase().includes(grSearch.trim().toLowerCase())) || itemsHavePN(g.items, grSearch.trim().toLowerCase())) : goodsReceiptsFinal).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const pendingGREdits = editRequests.filter(r => r.module === "Penerimaan Barang" && r.action === "Edit" && r.status === "Menunggu Approval Workshop");
   const [editGR, setEditGR] = useState(null); // the goodsReceipts record currently being edited (opens edit modal)
   const [editGRForm, setEditGRForm] = useState({
@@ -27666,7 +27668,7 @@ function DeliveryOrderModule({
   const [search, setSearch] = useState("");
   const doSearch = search;
   const soDOSearch = search;
-  const deliveryOrdersFiltered = (doSearch.trim() ? deliveryOrders.filter(d => [d.nomor, d.soNomor, d.customerNama, d.driver, d.ekspedisi].filter(Boolean).some(x => String(x).toLowerCase().includes(doSearch.trim().toLowerCase()))) : deliveryOrders).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  const deliveryOrdersFiltered = (doSearch.trim() ? deliveryOrders.filter(d => [d.nomor, d.soNomor, d.customerNama, d.driver, d.ekspedisi].filter(Boolean).some(x => String(x).toLowerCase().includes(doSearch.trim().toLowerCase())) || itemsHavePN(d.items, doSearch.trim().toLowerCase())) : deliveryOrders).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const [editDO, setEditDO] = useState(null);
   const [editDOForm, setEditDOForm] = useState({
     ekspedisi: "",
@@ -28773,7 +28775,7 @@ function InvoiceModule({
   const selectedSO = salesOrders.find(s => s.nomor === form.soNomor);
   const selectedSORemainingTermin = selectedSO ? remainingTermin(selectedSO) : null;
   const invSoSearch = search;
-  const invSoOngoingList = (invSoSearch.trim() ? availableSO.filter(so => [so.nomor, so.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(invSoSearch.trim().toLowerCase()))) : availableSO).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  const invSoOngoingList = (invSoSearch.trim() ? availableSO.filter(so => [so.nomor, so.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(invSoSearch.trim().toLowerCase())) || itemsHavePN(so.items, invSoSearch.trim().toLowerCase())) : availableSO).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const startInvoiceFromSO = so => {
     setForm({
       soNomor: so.nomor,
@@ -29320,7 +29322,7 @@ function InvoiceModule({
   const nonLongOverdueInvoices = invoices.filter(i => !i.longOverdue);
   const longOverdueInvoices = invoices.filter(i => i.longOverdue).slice().sort((a, b) => (a.tanggalJatuhTempo || "").localeCompare(b.tanggalJatuhTempo || ""));
   const filteredByStatus = filter === "Semua" ? nonLongOverdueInvoices : nonLongOverdueInvoices.filter(i => i.statusBayar === filter);
-  const filtered = (invSearch.trim() ? filteredByStatus.filter(i => [i.nomor, i.soNomor, i.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(invSearch.trim().toLowerCase()))) : filteredByStatus).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
+  const filtered = (invSearch.trim() ? filteredByStatus.filter(i => [i.nomor, i.soNomor, i.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(invSearch.trim().toLowerCase())) || itemsHavePN(i.items, invSearch.trim().toLowerCase())) : filteredByStatus).slice().sort((a, b) => (b.tanggal || "").localeCompare(a.tanggal || ""));
   const approvalColor = {
     "Menunggu Approval GM": theme.yellow,
     "Disetujui GM": theme.green,
