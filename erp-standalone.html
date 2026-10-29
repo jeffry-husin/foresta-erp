@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-10-29.11";
+const APP_BUILD = "2026-10-29.12";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -17397,7 +17397,11 @@ function QuotationPS({
     setPartRecs,
     employees,
     salesOrders,
-    setSalesOrders
+    setSalesOrders,
+    priceList,
+    kursRates,
+    poLocal,
+    poOverseas
   } = store;
   const partRecs = normalizePartRecs(partRecsRaw);
   const isOwnerLike = session.role === "owner" || session.role === "gm" || session.role === "finance_director";
@@ -17405,6 +17409,127 @@ function QuotationPS({
   // HO1/HO2/HO3 (owner/gm/finance_director) are all "super user" — all three must see the approval
   // box, pending revisions, and internal Sales Discount data, not just owner/gm.
   const isApprover = isOwnerLike;
+  // Acuan Harga (Price List, 2026-10-29): hanya informasi untuk Manager/Owner — memuat modal & margin.
+  // Harga akhir tetap diketik/diputuskan Manager Sales; panel ini tidak mengisi atau mengubah harga otomatis.
+  const canSeeAcuan = isOwnerLike || isAsil || session.role === "sales_manager";
+  const plCtx = React.useMemo(() => canSeeAcuan ? {
+    entryIdx: plBuildEntryIdx(priceList),
+    buyIdx: plBuildBuyIdx(poLocal, poOverseas),
+    quoteIdx: plBuildQuoteIdx(quotationsPS),
+    kursRates
+  } : null, [canSeeAcuan, priceList, poLocal, poOverseas, quotationsPS, kursRates]);
+  const acuanRowHint = it => {
+    if (!plCtx || !it || !it.partNumber) return null;
+    const r = plReference(it.partNumber, plCtx);
+    const h = Number(it.harga) || 0;
+    const bits = [];
+    if (r.ac.harga > 0) bits.push("Acuan " + fmt(r.ac.harga));
+    if (r.beliIDR && h > 0) bits.push("margin beli " + plPct(plMargin(h, r.beliIDR)));
+    else if (r.modal && h > 0) bits.push("margin modal " + plPct(plMargin(h, r.modal)));
+    if (bits.length === 0) return null;
+    const rugi = r.beliIDR && h > 0 && h < r.beliIDR;
+    return /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 10,
+        color: rugi ? theme.red : theme.muted
+      }
+    }, rugi ? "⚠ di bawah beli · " : "", bits.join(" · "));
+  };
+  const renderAcuanPanel = () => {
+    if (!plCtx || !itemForm.partNumber) return null;
+    const cust = (customers || []).find(c => c.id === form.customerId);
+    const custNama = cust ? cust.nama : "";
+    const r = plReference(itemForm.partNumber, plCtx, custNama);
+    const h = Number(itemForm.harga) || 0;
+    const pakai = (val, label) => /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => setItemForm(f => ({
+        ...f,
+        harga: Math.round(val)
+      }))
+    }, label || "Pakai");
+    const row = (label, content) => /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 8,
+        alignItems: "center",
+        flexWrap: "wrap",
+        fontSize: 12,
+        color: theme.text
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.muted,
+        minWidth: 118
+      }
+    }, label), content);
+    const warn = [];
+    if (h > 0 && r.beliIDR && h < r.beliIDR) warn.push({
+      c: theme.red,
+      t: "Harga di bawah harga beli PO terakhir (" + fmt(Math.round(r.beliIDR)) + ")"
+    });
+    else if (h > 0 && r.modal && h < r.modal) warn.push({
+      c: theme.yellow,
+      t: "Harga di bawah modal Price List (" + fmt(r.modal) + ")"
+    });
+    if (h > 0 && r.ac.harga > 0 && h < r.ac.harga * 0.9) warn.push({
+      c: theme.yellow,
+      t: "Harga lebih dari 10% di bawah acuan Price List"
+    });
+    const nothing = !r.entry && !r.buy && r.n === 0;
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        border: `1px dashed ${theme.border}`,
+        borderRadius: 8,
+        padding: 10,
+        marginBottom: 10,
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+        background: theme.surface
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12,
+        fontWeight: 700,
+        color: theme.text
+      }
+    }, "ACUAN HARGA ", /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontWeight: 400,
+        color: theme.muted
+      }
+    }, "(hanya referensi — keputusan harga di Manager Sales)")), nothing && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12,
+        color: theme.muted
+      }
+    }, "Belum ada data Price List, pembelian, maupun penawaran untuk part ini."), r.entry && row("Price List", r.ac.harga > 0 ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("strong", null, fmt(r.ac.harga)), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.muted
+      }
+    }, r.ac.dasar), pakai(r.ac.harga)) : /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.muted
+      }
+    }, "ada di Price List tapi belum ada harga jual")), r.n > 0 && row("Histori penawaran", /*#__PURE__*/React.createElement("span", null, r.n, "x · min ", fmt(r.min), " · median ", fmt(r.med), " · max ", fmt(r.max), " · jadi SO ", r.so, "x")), r.lastClient && row("Terakhir ke client ini", /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("strong", null, fmt(r.lastClient.h)), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.muted
+      }
+    }, r.lastClient.tgl, " · ", r.lastClient.nomor), pakai(r.lastClient.h))), r.lastAny && (!r.lastClient || r.lastAny.nomor !== r.lastClient.nomor) && row("Terakhir (semua client)", /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("strong", null, fmt(r.lastAny.h)), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: theme.muted
+      }
+    }, r.lastAny.tgl, " · ", r.lastAny.cust), pakai(r.lastAny.h))), (r.modal || r.beliIDR) && row("Modal / Beli", /*#__PURE__*/React.createElement("span", null, r.modal ? "Modal PL " + fmt(r.modal) : "", r.modal && r.beliIDR ? " · " : "", r.beliIDR ? "Beli PO " + fmt(Math.round(r.beliIDR)) + " (" + r.buy.last.nomor + (r.buy.last.cur !== "IDR" ? ", " + fmtNum(r.buy.last.harga) + " " + r.buy.last.cur + ", belum termasuk freight & bea" : "") + ")" : "")), h > 0 && (r.modal || r.beliIDR) && row("Margin harga ini", /*#__PURE__*/React.createElement("span", null, r.modal ? "vs modal " + plPct(plMargin(h, r.modal)) : "", r.modal && r.beliIDR ? " · " : "", r.beliIDR ? "vs beli " + plPct(plMargin(h, r.beliIDR)) : "")), warn.map((w, i) => /*#__PURE__*/React.createElement("div", {
+      key: i,
+      style: {
+        fontSize: 12,
+        color: w.c,
+        fontWeight: 600
+      }
+    }, "⚠ ", w.t)));
+  };
   // See QuotationUnit's liveNama for why: customerNama is a point-in-time snapshot, so a client
   // rename in Database Client needs to be resolved live via customerId, not read from the stored
   // snapshot, otherwise QUOTATION CLOSED (and every other list here) keeps showing the old name.
@@ -18917,7 +19042,7 @@ function QuotationPS({
   }), /*#__PURE__*/React.createElement(Btn, {
     onClick: addItem,
     size: "sm"
-  }, "+ Add")), form.items.length > 0 && /*#__PURE__*/React.createElement(Table, {
+  }, "+ Add")), renderAcuanPanel(), form.items.length > 0 && /*#__PURE__*/React.createElement(Table, {
     headers: ["No", "Part Number", "Part Name", "Description", "Qty", "Harga", "Subtotal", ""],
     rows: form.items.map((it, i) => [/*#__PURE__*/React.createElement("div", {
       style: {
@@ -18983,7 +19108,13 @@ function QuotationPS({
         fontSize: 13,
         width: 70
       }
-    }), /*#__PURE__*/React.createElement("input", {
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 2
+      }
+    }, /*#__PURE__*/React.createElement("input", {
       type: "number",
       value: it.harga ?? "",
       onChange: e => updateItemHarga(i, e.target.value),
@@ -18997,7 +19128,7 @@ function QuotationPS({
         fontSize: 13,
         width: 120
       }
-    }), fmt(it.subtotal), /*#__PURE__*/React.createElement(Btn, {
+    }), acuanRowHint(it)), fmt(it.subtotal), /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "danger",
       onClick: () => removeItem(i)
@@ -33325,6 +33456,91 @@ async function plReadWorkbookAOA(file) {
   return out;
 }
 const PL_FIELDS = [["partName", "Nama"], ["tipeCrane", "Tipe Crane"], ["satuan", "Satuan"], ["modal", "Modal"], ["hargaLama", "Harga Lama"], ["hargaBaru", "Harga Baru"], ["hargaPembulatan", "Harga Pembulatan"], ["supplier", "Supplier"], ["catatan", "Catatan"]];
+// Indeks harga beli (PO terakhir per Part No) dan histori penawaran — dipakai Price List dan form Penawaran PS.
+function plBuildBuyIdx(poLocal, poOverseas) {
+  const m = new Map();
+  const add = (p, cur) => (p.items || []).forEach(it => {
+    const k = plNorm(it.partNumber);
+    if (!k || !(it.harga > 0)) return;
+    const rec = m.get(k) || {
+      n: 0,
+      last: null
+    };
+    rec.n++;
+    if (!rec.last || (p.tanggal || "") > (rec.last.tanggal || "")) rec.last = {
+      harga: it.harga,
+      cur,
+      tanggal: p.tanggal,
+      nomor: p.nomor,
+      supplier: p.supplierNama
+    };
+    m.set(k, rec);
+  });
+  (poLocal || []).forEach(p => add(p, "IDR"));
+  (poOverseas || []).forEach(p => add(p, p.currency));
+  return m;
+}
+function plBuildQuoteIdx(quotationsPS) {
+  const m = new Map();
+  (quotationsPS || []).forEach(q => (q.items || []).forEach(it => {
+    const k = plNorm(it.partNumber);
+    if (!k || !(it.harga > 0)) return;
+    if (!m.has(k)) m.set(k, []);
+    m.get(k).push({
+      h: it.harga,
+      tgl: q.tanggal,
+      cust: q.customerNama,
+      so: q.status === "Sudah jadi SO",
+      nomor: q.nomor
+    });
+  }));
+  return m;
+}
+function plBuildEntryIdx(priceList) {
+  const m = new Map();
+  (priceList || []).forEach(e => plTokens(e.partNumber).map(plNorm).forEach(t => {
+    if (!m.has(t)) m.set(t, e);
+  }));
+  return m;
+}
+// Acuan harga untuk satu Part No: entri Price List, harga beli PO terakhir (IDR, kurs hedging/spot), dan histori penawaran.
+function plReference(partNumber, ctx, customerNama) {
+  const toks = plTokens(partNumber).map(plNorm);
+  let entry = null,
+    buy = null,
+    qs = [];
+  toks.forEach(t => {
+    if (!entry && ctx.entryIdx.has(t)) entry = ctx.entryIdx.get(t);
+    const b = ctx.buyIdx.get(t);
+    if (b && (!buy || b.n > buy.n)) buy = b;
+    const q = ctx.quoteIdx.get(t);
+    if (q && q.length > qs.length) qs = q;
+  });
+  const ac = entry ? plHargaAcuan(entry) : {
+    harga: 0,
+    dasar: ""
+  };
+  const kd = buy && buy.last ? kursDipakai(ctx.kursRates, buy.last.cur) : null;
+  const beliIDR = buy && buy.last && kd && kd.kurs > 0 ? buy.last.harga * kd.kurs : null;
+  const hs = qs.map(x => x.h).sort((a, b) => a - b);
+  const med = hs.length ? hs.length % 2 ? hs[hs.length >> 1] : (hs[hs.length / 2 - 1] + hs[hs.length / 2]) / 2 : null;
+  const bySort = qs.slice().sort((a, b) => (b.tgl || "").localeCompare(a.tgl || ""));
+  return {
+    entry,
+    ac,
+    modal: entry && Number(entry.modal) > 0 ? Number(entry.modal) : null,
+    buy,
+    kd,
+    beliIDR,
+    n: qs.length,
+    min: hs.length ? hs[0] : null,
+    max: hs.length ? hs[hs.length - 1] : null,
+    med,
+    so: qs.filter(x => x.so).length,
+    lastAny: bySort[0] || null,
+    lastClient: customerNama ? bySort.find(x => x.cust === customerNama) || null : null
+  };
+}
 function PriceListModule({
   store,
   session
