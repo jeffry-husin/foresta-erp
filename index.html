@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-10-29.1";
+const APP_BUILD = "2026-10-29.2";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -28167,7 +28167,7 @@ function DeliveryOrderModule({
           nama: detail.createdBy
         },
         disetujuiLabel: "Penerima",
-        sizeBoost: 2,
+        sizeBoost: 4,
         colWidths: ["28%", "58%", "14%"],
         uniformFont: true
       });
@@ -34191,7 +34191,7 @@ function printDocument({
     <style>
       @page { size: A4 portrait; margin: 12mm; }
       body { font-family: 'Segoe UI', Arial, sans-serif; margin: 20px; color: #1a1a1a; }
-      ${uniformFont ? "* { font-family: 'Segoe UI', Arial, sans-serif; color: #000 !important; font-weight: 700 !important; }" : ""}
+      ${uniformFont ? "* { font-family: Arial, Helvetica, sans-serif !important; color: #000 !important; font-weight: 700 !important; letter-spacing: 0.4px; -webkit-font-smoothing: none; text-rendering: optimizeSpeed; background: none !important; } img.co-logo { display: none !important; } th, td { border-bottom: 2px solid #000 !important; } .header { border-bottom: 3px solid #000 !important; } .doctitle { color: #000 !important; }" : ""}
       .header { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 3px solid #1a1a1a; padding-bottom: 16px; margin-bottom: 24px; }
       .company { font-size: ${fs(20)}px; font-weight: 800; white-space: nowrap; }
       .doctitle { font-size: ${fs(26)}px; font-weight: 800; text-align: right; color: #2563eb; }
@@ -34205,7 +34205,7 @@ function printDocument({
     <body>
       <div class="header">
         <div style="display:flex;gap:12px;align-items:flex-start;">
-          ${co.logo ? `<img src="${co.logo}" style="max-height:56px;max-width:120px;object-fit:contain;" />` : ""}
+          ${co.logo ? `<img class="co-logo" src="${co.logo}" style="max-height:56px;max-width:120px;object-fit:contain;" />` : ""}
           <div>
             <div class="company">${escapeHtml(co.nama)}</div>
             ${co.alamat ? `<div style="font-size:${fs(12)}px;color:#666;margin-top:2px;white-space:pre-line;">${escapeHtml(co.alamat)}</div>` : ""}
@@ -34305,7 +34305,7 @@ function printSlipGaji(r, periode, company) {
     <body>
       <div class="header">
         <div style="display:flex;gap:12px;align-items:flex-start;">
-          ${co.logo ? `<img src="${co.logo}" style="max-height:56px;max-width:120px;object-fit:contain;" />` : ""}
+          ${co.logo ? `<img class="co-logo" src="${co.logo}" style="max-height:56px;max-width:120px;object-fit:contain;" />` : ""}
           <div>
             <div class="company">${escapeHtml(co.nama)}</div>
             ${co.alamat ? `<div style="font-size:12px;color:#666;margin-top:2px;white-space:pre-line;">${escapeHtml(co.alamat)}</div>` : ""}
