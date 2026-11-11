@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-11-05.1";
+const APP_BUILD = "2026-11-11.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -5469,6 +5469,7 @@ function PriceBreakdownBox({
   subtotal,
   diskon,
   diskonLabel = "Diskon",
+  netSubtotal = false,
   pajak,
   pajakLabel = "PPN",
   total
@@ -5494,7 +5495,13 @@ function PriceBreakdownBox({
       flexDirection: "column",
       gap: 4
     }
-  }, row("Subtotal", subtotal || 0), diskon > 0 && row(diskonLabel, diskon, true), row(pajakLabel, pajak || 0), /*#__PURE__*/React.createElement("div", {
+  }, row("Subtotal", subtotal || 0), diskon > 0 && row(diskonLabel, diskon, true), diskon > 0 && netSubtotal && /*#__PURE__*/React.createElement("div", {
+    style: {
+      borderTop: `1px solid ${theme.border}`,
+      paddingTop: 4,
+      marginTop: 2
+    }
+  }, row("Sub Total", (subtotal || 0) - diskon)), row(pajakLabel, pajak || 0), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
@@ -16745,6 +16752,7 @@ function QuotationUnit({
     subtotal: detail.subtotal,
     diskon: detail.clientDiskon,
     diskonLabel: detail.clientDiskonPersen ? `Discount (${detail.clientDiskonPersen}%)` : "Discount",
+    netSubtotal: true,
     pajak: detail.pajak,
     total: detail.total
   }), detail.rejectReason && /*#__PURE__*/React.createElement("p", {
@@ -16818,6 +16826,7 @@ function QuotationUnit({
       // Discount (`detail.clientDiskon`) appears here.
       diskon: detail.clientDiskon || 0,
       diskonLabel: detail.clientDiskonPersen ? `Discount (${detail.clientDiskonPersen}%)` : "Discount",
+      netSubtotal: true,
       pajak: detail.pajak,
       pajakLabel: "PPN",
       total: detail.total,
@@ -18277,6 +18286,7 @@ function QuotationPS({
     // separate client-visible Discount (`clientDiskon`).
     diskon: q.clientDiskon || 0,
     diskonLabel: q.clientDiskonPersen ? `Discount (${q.clientDiskonPersen}%)` : "Discount",
+    netSubtotal: true,
     pajak: q.pajak,
     pajakLabel: "PPN",
     total: q.total,
@@ -18965,6 +18975,7 @@ function QuotationPS({
     subtotal: detail.subtotal,
     diskon: detail.clientDiskon,
     diskonLabel: detail.clientDiskonPersen ? `Discount (${detail.clientDiskonPersen}%)` : "Discount",
+    netSubtotal: true,
     pajak: detail.pajak,
     total: detail.total
   }), detail.rejectReason && /*#__PURE__*/React.createElement("p", {
@@ -30870,20 +30881,29 @@ function InvoiceModule({
       width: 150
     }
   }), /*#__PURE__*/React.createElement(ExportExcelBtn, {
-    onClick: () => exportToExcel(filtered.map(i => ({
-      nomor: i.nomor,
-      tanggal: i.tanggal,
-      noSO: i.soNomor,
-      noPOClient: i.noPoClient || "-",
-      client: i.customerNama,
-      tipePembayaran: i.tipePembayaran,
-      jatuhTempo: i.tanggalJatuhTempo || "-",
-      noFakturPajak: i.noFakturPajak || "-",
-      total: i.total,
-      terbayar: i.terbayar || 0,
-      statusBayar: i.statusBayar,
-      statusApproval: i.statusApproval
-    })), "Invoice.xlsx", "Invoice")
+    onClick: () => {
+      // Export mencakup juga invoice yang ditandai Long Overdue (section terpisah di layar),
+      // dengan filter status & pencarian yang sama.
+      const q = invSearch.trim().toLowerCase();
+      const longRows = longOverdueInvoices.filter(i => (filter === "Semua" || i.statusBayar === filter) && (!q || [i.nomor, i.soNomor, i.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(q)) || itemsHavePN(i.items, q)));
+      const all = [...filtered.map(i => ({ i, lo: false })), ...longRows.map(i => ({ i, lo: true }))];
+      exportToExcel(all.map(({ i, lo }) => ({
+        nomor: i.nomor,
+        tanggal: i.tanggal,
+        noSO: i.soNomor,
+        noPOClient: i.noPoClient || "-",
+        client: i.customerNama,
+        tipePembayaran: i.tipePembayaran,
+        jatuhTempo: i.tanggalJatuhTempo || "-",
+        noFakturPajak: i.noFakturPajak || "-",
+        total: i.total,
+        terbayar: i.terbayar || 0,
+        statusBayar: i.statusBayar,
+        statusApproval: i.statusApproval,
+        longOverdue: lo ? "Ya" : "Tidak",
+        ditandaiOleh: lo && i.longOverdueMarkedBy ? `${i.longOverdueMarkedBy} (${i.longOverdueMarkedAt})` : ""
+      })), "Invoice.xlsx", "Invoice");
+    }
   }), (isFinance || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
     onClick: () => setModal(true)
@@ -36197,6 +36217,7 @@ function printDocument({
   extraTotalRows,
   diskon,
   diskonLabel = "Diskon",
+  netSubtotal = false,
   pajak,
   pajakLabel = "Pajak",
   uangMuka,
@@ -36357,6 +36378,7 @@ function printDocument({
         <div class="row"><span>Subtotal</span><span>${fmtMoney(subtotal, currency)}</span></div>
         ${(extraTotalRows || []).map(([k, v]) => `<div class="row"><span>${escapeHtml(k)}</span><span>${fmtMoney(v, currency)}</span></div>`).join("")}
         ${diskon ? `<div class="row"><span>${escapeHtml(diskonLabel)}</span><span>-${fmtMoney(diskon, currency)}</span></div>` : ""}
+        ${diskon && netSubtotal ? `<div class="row" style="border-top:1px solid #333;margin-top:2px;padding-top:4px;"><span>Sub Total</span><span>${fmtMoney((subtotal || 0) - diskon, currency)}</span></div>` : ""}
         ${pajak ? `<div class="row"><span>${escapeHtml(pajakLabel)}</span><span>${fmtMoney(pajak, currency)}</span></div>` : ""}
         ${uangMuka ? `<div class="row"><span>${escapeHtml(uangMukaLabel)}</span><span>-${fmtMoney(uangMuka, currency)}</span></div>` : ""}
         <div class="row final"><span>TOTAL</span><span>${fmtMoney(total, currency)}</span></div>

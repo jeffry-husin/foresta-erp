@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-11-02.1";
+const APP_BUILD = "2026-11-11.1";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -523,8 +523,10 @@ const DAR_JENIS = [
   { id: "Induksi" },
   { id: "Check Kondisi", opts: ["Crane", "HPU", "System Hydraulic", "System Electric"], multi: true },
   { id: "Mengganti", part: true },
+  { id: "Membongkar", bongkar: true },
   { id: "Pemasangan" },
-  { id: "Service / Inspection" },
+  { id: "Service" },
+  { id: "Inspection" },
   { id: "Training" },
   { id: "Test Run" },
   { id: "Menunggu", opts: ["Alat Angkut", "Other"], other: true },
@@ -534,6 +536,10 @@ const DAR_JENIS = [
   { id: "Libur" },
   { id: "Other", teksWajib: true }
 ];
+// Membongkar: komponen yang bisa dipilih (banyak sekaligus). Cylinder wajib pilih sub-jenisnya; hasilnya disimpan
+// sebagai teks datar di detail.pilih, mis. "Cylinder Swing", "Arm Boom".
+const DAR_BONGKAR_KOMPONEN = ["Cylinder", "Arm Boom", "Column", "Cabin"];
+const DAR_BONGKAR_CYLINDER = ["Swing", "Main Boom", "Outer Boom", "Telescopic", "Grapple"];
 const darAktivitasText = a => {
   const d = a.detail || {};
   const jenis = a.jenis || "Other";
@@ -5463,6 +5469,7 @@ function PriceBreakdownBox({
   subtotal,
   diskon,
   diskonLabel = "Diskon",
+  netSubtotal = false,
   pajak,
   pajakLabel = "PPN",
   total
@@ -5488,7 +5495,13 @@ function PriceBreakdownBox({
       flexDirection: "column",
       gap: 4
     }
-  }, row("Subtotal", subtotal || 0), diskon > 0 && row(diskonLabel, diskon, true), row(pajakLabel, pajak || 0), /*#__PURE__*/React.createElement("div", {
+  }, row("Subtotal", subtotal || 0), diskon > 0 && row(diskonLabel, diskon, true), diskon > 0 && netSubtotal && /*#__PURE__*/React.createElement("div", {
+    style: {
+      borderTop: `1px solid ${theme.border}`,
+      paddingTop: 4,
+      marginTop: 2
+    }
+  }, row("Sub Total", (subtotal || 0) - diskon)), row(pajakLabel, pajak || 0), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
@@ -6777,7 +6790,7 @@ function MasterPart({
       color: p.kategori === "Service" ? theme.cyan : theme.purple
     }, p.kategori), p.subKategori ? /*#__PURE__*/React.createElement(Badge, {
       color: theme.accent
-    }, p.subKategori) : "-", p.satuan, p.brand || "-", /*#__PURE__*/React.createElement(Badge, {
+    }, p.subKategori) : "-", p.satuan, p.brand || "-", [p.ukPanjang, p.ukLebar, p.ukTinggi].some(x => x !== undefined && x !== "" && x !== null) ? [p.ukPanjang, p.ukLebar, p.ukTinggi].map(x => x || "-").join(" × ") + " " + (p.ukSatuan || "mm") : "-", /*#__PURE__*/React.createElement(Badge, {
       color: p.asal === "Overseas" ? theme.yellow : theme.green
     }, p.asal), (p.suppliers || []).length ? /*#__PURE__*/React.createElement("span", {
       style: {
@@ -7336,7 +7349,7 @@ function MasterPart({
     variant: "danger",
     onClick: () => rejectEditRequest(req)
   }, "✗ Tolak"))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement(Table, {
-    headers: canSeePrice ? ["Part Number", "Part Name", "Description", "Kategori", "Sub-Kategori", "Satuan", "Brand", "Asal", "Supplier", "Harga Beli", "Harga Jual", "Stok", "Teralokasi", "Free Stock"] : ["Part Number", "Part Name", "Description", "Kategori", "Sub-Kategori", "Satuan", "Brand", "Asal", "Supplier", "Stok", "Teralokasi", "Free Stock"],
+    headers: canSeePrice ? ["Part Number", "Part Name", "Description", "Kategori", "Sub-Kategori", "Satuan", "Brand", "Ukuran (P × L × T/Ø)", "Asal", "Supplier", "Harga Beli", "Harga Jual", "Stok", "Teralokasi", "Free Stock"] : ["Part Number", "Part Name", "Description", "Kategori", "Sub-Kategori", "Satuan", "Brand", "Ukuran (P × L × T/Ø)", "Asal", "Supplier", "Stok", "Teralokasi", "Free Stock"],
     rows: partRows,
     onEdit: onEdit,
     onDelete: onDelete
@@ -7431,7 +7444,58 @@ function MasterPart({
       satuan: v
     }),
     placeholder: "Unit/Meter/Set"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      gridColumn: "1/-1",
+      display: "grid",
+      gridTemplateColumns: "repeat(4, 1fr)",
+      gap: 10,
+      padding: "8px 10px",
+      border: "1px dashed " + theme.border,
+      borderRadius: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      gridColumn: "1/-1",
+      fontSize: 11,
+      color: theme.textMuted || "#888"
+    }
+  }, "📏 Data Ukuran (internal — tidak tampil di dokumen cetak/PDF)"), /*#__PURE__*/React.createElement(Input, {
+    label: "Panjang",
+    type: "number",
+    value: form.ukPanjang || "",
+    onChange: v => setForm({
+      ...form,
+      ukPanjang: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Lebar",
+    type: "number",
+    value: form.ukLebar || "",
+    onChange: v => setForm({
+      ...form,
+      ukLebar: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Tinggi / Diameter",
+    type: "number",
+    value: form.ukTinggi || "",
+    onChange: v => setForm({
+      ...form,
+      ukTinggi: v
+    })
   }), /*#__PURE__*/React.createElement(Select, {
+    label: "Satuan Ukuran",
+    value: form.ukSatuan || "mm",
+    onChange: v => setForm({
+      ...form,
+      ukSatuan: v
+    }),
+    options: ["mm", "cm", "m", "inch"].map(s => ({
+      value: s,
+      label: s
+    }))
+  })), /*#__PURE__*/React.createElement(Select, {
     label: "Asal Barang",
     value: form.asal,
     onChange: v => setForm({
@@ -11696,6 +11760,10 @@ function MekanikReport({
     if (!def) return alert("Pilih jenis aktivitas dulu");
     if (def.teksWajib && !a.teks.trim()) return alert("Isi keterangan aktivitas");
     if (def.part && !a.partName && !a.partNumber) return alert("Pilih part yang diganti");
+    if (def.bongkar) {
+      if (a.pilih.length === 0 && !a.cylOn) return alert("Pilih minimal satu komponen yang dibongkar");
+      if (a.cylOn && !a.pilih.some(x => x.startsWith("Cylinder "))) return alert("Cylinder dipilih — pilih jenis Cylinder-nya (Swing, Main Boom, Outer Boom, Telescopic, Grapple)");
+    }
     if (def.opts && !def.multi && a.pilih.length === 0) return alert("Pilih salah satu opsi");
     if (def.multi && a.pilih.length === 0) return alert("Pilih minimal satu yang dicek");
     if (def.other && a.pilih.includes("Other") && !a.teks.trim()) return alert("Isi keterangan untuk Other");
@@ -11704,7 +11772,7 @@ function MekanikReport({
       detail.dari = a.dari.trim();
       detail.menuju = a.menuju.trim();
     }
-    if (def.opts) detail.pilih = [...a.pilih];
+    if (def.opts || def.bongkar) detail.pilih = [...a.pilih];
     if (def.part) {
       detail.partNumber = a.partNumber;
       detail.partName = a.partName;
@@ -11814,7 +11882,36 @@ function MekanikReport({
       })
     })), def && def.opts && React.createElement("div", {
       style: wrap
-    }, def.opts.map(o => chip(o, a.pilih.includes(o), () => togglePilih(o)))), def && (def.teksWajib || def.other && a.pilih.includes("Other")) && React.createElement(Input, {
+    }, def.opts.map(o => chip(o, a.pilih.includes(o), () => togglePilih(o)))), def && def.bongkar && React.createElement("div", {
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 10
+      }
+    }, React.createElement("div", {
+      style: wrap
+    }, DAR_BONGKAR_KOMPONEN.map(k => k === "Cylinder" ? chip(k, !!a.cylOn, () => upd({
+      cylOn: !a.cylOn,
+      pilih: a.cylOn ? a.pilih.filter(x => !x.startsWith("Cylinder ")) : a.pilih
+    })) : chip(k, a.pilih.includes(k), () => upd({
+      pilih: a.pilih.includes(k) ? a.pilih.filter(x => x !== k) : [...a.pilih, k]
+    })))), a.cylOn && React.createElement("div", {
+      style: {
+        paddingLeft: 12,
+        borderLeft: `3px solid ${theme.accentLight}`
+      }
+    }, React.createElement("p", {
+      style: {
+        margin: "0 0 8px",
+        color: theme.muted,
+        fontSize: 12,
+        fontWeight: 600
+      }
+    }, "Jenis Cylinder (pilih satu atau lebih)"), React.createElement("div", {
+      style: wrap
+    }, DAR_BONGKAR_CYLINDER.map(c => chip(c, a.pilih.includes("Cylinder " + c), () => upd({
+      pilih: a.pilih.includes("Cylinder " + c) ? a.pilih.filter(x => x !== "Cylinder " + c) : [...a.pilih, "Cylinder " + c]
+    })))))), def && (def.teksWajib || def.other && a.pilih.includes("Other")) && React.createElement(Input, {
       label: def.teksWajib ? "Keterangan" : "Keterangan Other",
       value: a.teks,
       onChange: v => upd({
@@ -11896,7 +11993,7 @@ function MekanikReport({
       onChange: v => upd({
         qty: v
       })
-    })), def && !def.teksWajib && !def.other && !def.fields && !def.opts && !def.part && React.createElement("div", {
+    })), def && !def.teksWajib && !def.other && !def.fields && !def.opts && !def.part && !def.bongkar && React.createElement("div", {
       style: {
         fontSize: 12,
         color: theme.muted
@@ -16655,6 +16752,7 @@ function QuotationUnit({
     subtotal: detail.subtotal,
     diskon: detail.clientDiskon,
     diskonLabel: detail.clientDiskonPersen ? `Discount (${detail.clientDiskonPersen}%)` : "Discount",
+    netSubtotal: true,
     pajak: detail.pajak,
     total: detail.total
   }), detail.rejectReason && /*#__PURE__*/React.createElement("p", {
@@ -16728,6 +16826,7 @@ function QuotationUnit({
       // Discount (`detail.clientDiskon`) appears here.
       diskon: detail.clientDiskon || 0,
       diskonLabel: detail.clientDiskonPersen ? `Discount (${detail.clientDiskonPersen}%)` : "Discount",
+      netSubtotal: true,
       pajak: detail.pajak,
       pajakLabel: "PPN",
       total: detail.total,
@@ -18187,6 +18286,7 @@ function QuotationPS({
     // separate client-visible Discount (`clientDiskon`).
     diskon: q.clientDiskon || 0,
     diskonLabel: q.clientDiskonPersen ? `Discount (${q.clientDiskonPersen}%)` : "Discount",
+    netSubtotal: true,
     pajak: q.pajak,
     pajakLabel: "PPN",
     total: q.total,
@@ -18875,6 +18975,7 @@ function QuotationPS({
     subtotal: detail.subtotal,
     diskon: detail.clientDiskon,
     diskonLabel: detail.clientDiskonPersen ? `Discount (${detail.clientDiskonPersen}%)` : "Discount",
+    netSubtotal: true,
     pajak: detail.pajak,
     total: detail.total
   }), detail.rejectReason && /*#__PURE__*/React.createElement("p", {
@@ -30780,20 +30881,29 @@ function InvoiceModule({
       width: 150
     }
   }), /*#__PURE__*/React.createElement(ExportExcelBtn, {
-    onClick: () => exportToExcel(filtered.map(i => ({
-      nomor: i.nomor,
-      tanggal: i.tanggal,
-      noSO: i.soNomor,
-      noPOClient: i.noPoClient || "-",
-      client: i.customerNama,
-      tipePembayaran: i.tipePembayaran,
-      jatuhTempo: i.tanggalJatuhTempo || "-",
-      noFakturPajak: i.noFakturPajak || "-",
-      total: i.total,
-      terbayar: i.terbayar || 0,
-      statusBayar: i.statusBayar,
-      statusApproval: i.statusApproval
-    })), "Invoice.xlsx", "Invoice")
+    onClick: () => {
+      // Export mencakup juga invoice yang ditandai Long Overdue (section terpisah di layar),
+      // dengan filter status & pencarian yang sama.
+      const q = invSearch.trim().toLowerCase();
+      const longRows = longOverdueInvoices.filter(i => (filter === "Semua" || i.statusBayar === filter) && (!q || [i.nomor, i.soNomor, i.customerNama].filter(Boolean).some(x => String(x).toLowerCase().includes(q)) || itemsHavePN(i.items, q)));
+      const all = [...filtered.map(i => ({ i, lo: false })), ...longRows.map(i => ({ i, lo: true }))];
+      exportToExcel(all.map(({ i, lo }) => ({
+        nomor: i.nomor,
+        tanggal: i.tanggal,
+        noSO: i.soNomor,
+        noPOClient: i.noPoClient || "-",
+        client: i.customerNama,
+        tipePembayaran: i.tipePembayaran,
+        jatuhTempo: i.tanggalJatuhTempo || "-",
+        noFakturPajak: i.noFakturPajak || "-",
+        total: i.total,
+        terbayar: i.terbayar || 0,
+        statusBayar: i.statusBayar,
+        statusApproval: i.statusApproval,
+        longOverdue: lo ? "Ya" : "Tidak",
+        ditandaiOleh: lo && i.longOverdueMarkedBy ? `${i.longOverdueMarkedBy} (${i.longOverdueMarkedAt})` : ""
+      })), "Invoice.xlsx", "Invoice");
+    }
   }), (isFinance || isOwnerLike) && /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
     onClick: () => setModal(true)
@@ -36107,6 +36217,7 @@ function printDocument({
   extraTotalRows,
   diskon,
   diskonLabel = "Diskon",
+  netSubtotal = false,
   pajak,
   pajakLabel = "Pajak",
   uangMuka,
@@ -36267,6 +36378,7 @@ function printDocument({
         <div class="row"><span>Subtotal</span><span>${fmtMoney(subtotal, currency)}</span></div>
         ${(extraTotalRows || []).map(([k, v]) => `<div class="row"><span>${escapeHtml(k)}</span><span>${fmtMoney(v, currency)}</span></div>`).join("")}
         ${diskon ? `<div class="row"><span>${escapeHtml(diskonLabel)}</span><span>-${fmtMoney(diskon, currency)}</span></div>` : ""}
+        ${diskon && netSubtotal ? `<div class="row" style="border-top:1px solid #333;margin-top:2px;padding-top:4px;"><span>Sub Total</span><span>${fmtMoney((subtotal || 0) - diskon, currency)}</span></div>` : ""}
         ${pajak ? `<div class="row"><span>${escapeHtml(pajakLabel)}</span><span>${fmtMoney(pajak, currency)}</span></div>` : ""}
         ${uangMuka ? `<div class="row"><span>${escapeHtml(uangMukaLabel)}</span><span>-${fmtMoney(uangMuka, currency)}</span></div>` : ""}
         <div class="row final"><span>TOTAL</span><span>${fmtMoney(total, currency)}</span></div>
