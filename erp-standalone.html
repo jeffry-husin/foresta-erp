@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-11-11.1";
+const APP_BUILD = "2026-11-11.2";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -1924,6 +1924,10 @@ const ALL_MODULES = [{
   icon: "🏭",
   label: "Operation Cost"
 }, {
+  id: "rfq",
+  icon: "📨",
+  label: "Request for Quotation"
+}, {
   id: "quotation_unit",
   icon: "📄",
   label: "Unit Quotation"
@@ -2091,7 +2095,7 @@ const SIDEBAR_GROUPS = [{
 }, {
   key: "sales",
   label: "SALES",
-  moduleIds: ["quotation_unit", "quotation_ps", "price_list", "sales_activity", "client_history", "price_analysis", "client_analysis", "komisi"]
+  moduleIds: ["rfq", "quotation_unit", "quotation_ps", "price_list", "sales_activity", "client_history", "price_analysis", "client_analysis", "komisi"]
 }, {
   key: "operation",
   label: "OPERATION",
@@ -2140,6 +2144,9 @@ function getAllowedModules(role, customModules) {
   // Price List (acuan harga penawaran, memuat modal & margin) — Manager Sales/Service selalu mendapatkannya
   // walau daftar modul custom-nya tidak memuat; Owner/GM/Finance Director lewat role ALL atau diatur manual.
   if ((role === "sales_manager" || role === "service_manager") && !list.includes("price_list")) list = [...list, "price_list"];
+  // Request for Quotation (email/PDF client -> draft Parts & Service Quotation): same audience as the
+  // PS Quotation it feeds — Sales/Service Manager and the Super Users — regardless of custom list.
+  if ((role === "sales_manager" || role === "service_manager" || role === "owner" || role === "gm" || role === "finance_director") && !list.includes("rfq")) list = [...list, "rfq"];
   // Uang Makan (own monthly meal allowance report) is available to every user regardless of role
   // or custom module config, same rationale as Form Cuti — it's a self-service view of their own
   // data (Owner/GM/HRD Payroll additionally see everyone's, enforced inside UangMakanModule itself
@@ -3259,6 +3266,7 @@ function useStore() {
   const [partRequests, setPartRequests] = usePersisted("erp_part_requests", []); // New part requests (mekanik -> Asil -> GM approval)
   const [quotationsUnit, setQuotationsUnit] = usePersisted("erp_quot_unit", []); // Unit Quotation (Sales Manager)
   const [quotationsPS, setQuotationsPS] = usePersisted("erp_quot_ps", []); // Parts & Service Quotation (Asil)
+  const [rfqs, setRfqs] = usePersisted("erp_rfq", []); // Request for Quotation: email/PDF client -> draft Parts & Service Quotation
   const [salesOrders, setSalesOrders] = usePersisted("erp_sales_orders", []); // Sales Order (Epy, drawn from approved Quotation)
   const [itemRequisitions, setItemRequisitions] = usePersisted("erp_item_req", []); // Item Requisition (Pipin, when stock insufficient)
   const [poLocal, setPoLocal] = usePersisted("erp_po_local", []); // Purchase Order Lokal (Erni)
@@ -3610,6 +3618,8 @@ function useStore() {
     setSuratTugas,
     priceList,
     setPriceList,
+    rfqs,
+    setRfqs,
     kursRates,
     setKursRates,
     dinasCatatan,
@@ -17480,6 +17490,745 @@ function QuotationUnit({
 // ════════════════════════════════════════════════════════════════════════════
 // PARTS & SERVICE QUOTATION — by Asil, can pull from mechanic Part Recommendations
 // ════════════════════════════════════════════════════════════════════════════
+// ============================================================================
+// REQUEST FOR QUOTATION (RFQ) — client's email text / PDF / image -> item list -> draft Parts &
+// Service Quotation. Extraction has two paths: (1) AI via the Supabase Edge Function `parse-rfq`
+// (handles messy emails, scanned PDFs, photos), (2) a built-in rule-based parser (no setup, works
+// on clean "PN ... qty" lines and anything containing a known Master Part number). Either way the
+// result lands in an editable REVIEW table — nothing becomes a quotation until the user confirms.
+// ============================================================================
+let __rfqPdfJsPromise = null;
+function rfqLoadPdfJs() {
+  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  if (__rfqPdfJsPromise) return __rfqPdfJsPromise;
+  __rfqPdfJsPromise = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+    s.onload = () => {
+      try {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+        resolve(window.pdfjsLib);
+      } catch (e) {
+        reject(e);
+      }
+    };
+    s.onerror = () => {
+      __rfqPdfJsPromise = null;
+      reject(new Error("Gagal memuat pembaca PDF"));
+    };
+    document.head.appendChild(s);
+  });
+  return __rfqPdfJsPromise;
+}
+// Text-based PDFs only; scanned PDFs return "" (caller then falls back to the AI path with the raw file).
+async function rfqExtractPdfText(file) {
+  const lib = await rfqLoadPdfJs();
+  const buf = await file.arrayBuffer();
+  const pdf = await lib.getDocument({
+    data: buf
+  }).promise;
+  let out = "";
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const tc = await page.getTextContent();
+    // Rebuild lines from text-item Y positions so table rows stay on one line.
+    const rows = [];
+    tc.items.forEach(it => {
+      const y = Math.round(it.transform[5]);
+      let row = rows.find(r => Math.abs(r.y - y) <= 2);
+      if (!row) {
+        row = {
+          y,
+          cells: []
+        };
+        rows.push(row);
+      }
+      row.cells.push({
+        x: it.transform[4],
+        t: it.str
+      });
+    });
+    rows.sort((a, b) => b.y - a.y);
+    rows.forEach(r => {
+      out += r.cells.sort((a, b) => a.x - b.x).map(c => c.t).join("  ").replace(/\s+$/g, "") + "\n";
+    });
+    out += "\n";
+  }
+  return out.trim();
+}
+function rfqFileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result).split(",")[1] || "");
+    fr.onerror = () => reject(new Error("Gagal membaca file"));
+    fr.readAsDataURL(file);
+  });
+}
+const rfqNormPN = s => String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+// Rule-based fallback parser. Strongest signal = a Master Part number appearing in a line; otherwise a
+// PN-looking token (letters+digits, >=5 chars) on a line is treated as an unmatched item.
+function rfqParseLocal(text, parts) {
+  const idx = new Map();
+  (parts || []).forEach(p => {
+    const k = rfqNormPN(p.partNumber);
+    if (k.length >= 4 && !idx.has(k)) idx.set(k, p);
+  });
+  const keys = [...idx.keys()].filter(k => k.length >= 5);
+  const UNITS = "pcs|pc|unit|units|set|sets|ea|buah|bh|nos|lot|roll|mtr|meter|kg|ltr|liter|pack|box|lbr|batang|btg";
+  const qtyRe = new RegExp("(?:qty|quantity|jumlah|jml)?\\s*[:=]?\\s*(\\d{1,5}(?:[.,]\\d+)?)\\s*(?:" + UNITS + ")\\b", "i");
+  const xQtyRe = /(?:\bx\s*(\d{1,5})\b|\b(\d{1,5})\s*x\b)/i;
+  const lines = String(text || "").split(/\r?\n/).map(l => l.replace(/ /g, " ").trim()).filter(Boolean);
+  const items = [];
+  lines.forEach(line => {
+    const norm = rfqNormPN(line);
+    let part = null,
+      pnRaw = "";
+    for (const k of keys) {
+      if (norm.includes(k)) {
+        const p = idx.get(k);
+        // avoid a short PN matching inside a longer unrelated one: keep the longest match
+        if (!part || k.length > rfqNormPN(part.partNumber).length) part = p;
+      }
+    }
+    if (!part) {
+      // contact/bank lines never contain requested items
+      if (/\b(telp|tel|phone|hp|wa|fax|npwp|rek|rekening|email|e-mail|www|alamat|address)\b/i.test(line)) return;
+      let m = line.match(/\b(?=[A-Z0-9\-\/\.]*\d)(?=[A-Z0-9\-\/\.]*[A-Z])[A-Z0-9][A-Z0-9\-\/\.]{4,}\b/i);
+      // bare long digit strings are only accepted as a PN when the line also states a quantity
+      if (!m && (qtyRe.test(line) || xQtyRe.test(line))) m = line.match(/\b\d{6,}\b/);
+      if (!m) return;
+      pnRaw = m[0];
+      // skip dates / phone-ish / email fragments
+      if (/^\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}$/.test(pnRaw) || /@/.test(line) && line.indexOf(pnRaw) > line.indexOf("@")) return;
+    }
+    // remove the PN text from the line before reading the qty so PN digits aren't read as qty
+    let rest = line;
+    const pnText = part ? part.partNumber : pnRaw;
+    const at = rest.toUpperCase().indexOf(String(pnText).toUpperCase());
+    if (at >= 0) rest = rest.slice(0, at) + " " + rest.slice(at + String(pnText).length);
+    let qty = null;
+    let m2 = rest.match(qtyRe);
+    if (m2) qty = parseFloat(m2[1].replace(",", "."));else {
+      m2 = rest.match(xQtyRe);
+      if (m2) qty = parseFloat(m2[1] || m2[2]);else {
+        // trailing/leading bare small integer in a table-like row ("1  PN  desc  4")
+        const nums = rest.split(/\s{2,}|\t|\|/).map(s => s.trim()).filter(s => /^\d{1,4}$/.test(s));
+        if (nums.length) qty = parseInt(nums[nums.length - 1], 10);
+      }
+    }
+    const desc = rest.replace(qtyRe, " ").replace(xQtyRe, " ").replace(/^\s*\d+[.)]?\s+/, "").replace(/\s{2,}/g, " ").trim();
+    items.push({
+      partNumber: part ? part.partNumber : pnRaw,
+      partName: part ? part.partName : desc,
+      partDescription: part ? part.description || "" : "",
+      qty: qty && qty > 0 ? qty : 1,
+      harga: part ? part.hargaJual || 0 : 0,
+      kategori: part ? part.kategori || "Parts" : "Parts",
+      matched: !!part
+    });
+  });
+  return items;
+}
+async function rfqCallAI({
+  text,
+  file
+}) {
+  const {
+    data: sessionData
+  } = await sb.auth.getSession();
+  const accessToken = sessionData?.session?.access_token;
+  if (!accessToken) throw new Error("Sesi login tidak valid, silakan login ulang.");
+  const body = {
+    text: text || ""
+  };
+  if (file) {
+    body.file = {
+      base64: await rfqFileToBase64(file),
+      mime: file.type || "application/pdf",
+      name: file.name
+    };
+  }
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/parse-rfq`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      apikey: SUPABASE_ANON_KEY
+    },
+    body: JSON.stringify(body)
+  });
+  const result = await res.json().catch(() => ({}));
+  if (res.status === 404) throw new Error("FUNCTION_NOT_DEPLOYED");
+  if (!res.ok) throw new Error(result.error || `Ekstraksi AI gagal (${res.status})`);
+  return result;
+}
+function RFQModule({
+  store,
+  session,
+  onCreateQuotation
+}) {
+  const h = React.createElement;
+  const {
+    rfqs,
+    setRfqs,
+    customers,
+    parts
+  } = store;
+  const [search, setSearch] = useState("");
+  const [edit, setEdit] = useState(null); // null = list view; object = editor
+  const [busy, setBusy] = useState("");
+  const [msg, setMsg] = useState("");
+  const fileRef = useRef(null);
+  const list = (rfqs || []).slice().sort((a, b) => String(b.nomor).localeCompare(String(a.nomor)));
+  const q = search.trim().toLowerCase();
+  const shown = q ? list.filter(r => [r.nomor, r.customerNama, r.refClient, r.sumber].filter(Boolean).some(x => String(x).toLowerCase().includes(q)) || itemsHavePN(r.items, q)) : list;
+  const newRFQ = () => {
+    setMsg("");
+    fileRef.current = null;
+    setEdit({
+      id: null,
+      tanggal: today(),
+      customerId: "",
+      sumber: "Email",
+      refClient: "",
+      text: "",
+      fileName: "",
+      items: [],
+      status: "Draft",
+      catatan: ""
+    });
+  };
+  const openRFQ = r => {
+    setMsg("");
+    fileRef.current = null;
+    setEdit({
+      ...r,
+      items: (r.items || []).map(it => ({
+        ...it
+      }))
+    });
+  };
+  const setField = (k, v) => setEdit(e => ({
+    ...e,
+    [k]: v
+  }));
+  const matchToMaster = it => {
+    const k = rfqNormPN(it.partNumber);
+    const p = k ? (parts || []).find(x => rfqNormPN(x.partNumber) === k) : null;
+    return p ? {
+      ...it,
+      partNumber: p.partNumber,
+      partName: p.partName,
+      partDescription: p.description || "",
+      harga: p.hargaJual || 0,
+      kategori: p.kategori || "Parts",
+      matched: true
+    } : {
+      ...it,
+      matched: false
+    };
+  };
+  const onPickFile = async ev => {
+    const f = ev.target.files && ev.target.files[0];
+    ev.target.value = "";
+    if (!f) return;
+    fileRef.current = f;
+    setField("fileName", f.name);
+    setMsg("");
+    const isPdf = /pdf$/i.test(f.type) || /\.pdf$/i.test(f.name);
+    const isText = /^text\//i.test(f.type) || /\.(txt|eml|csv)$/i.test(f.name);
+    try {
+      if (isPdf) {
+        setBusy("Membaca PDF…");
+        const t = await rfqExtractPdfText(f);
+        if (t && t.replace(/\s/g, "").length > 40) {
+          setEdit(e => ({
+            ...e,
+            text: (e.text ? e.text + "\n\n" : "") + t,
+            sumber: e.sumber === "Email" ? "PDF" : e.sumber
+          }));
+          setMsg("Teks PDF terbaca. Klik Ekstrak untuk menyusun daftar item.");
+        } else {
+          setMsg("PDF ini tampaknya hasil scan (tidak ada teks). Gunakan \"Ekstrak dengan AI\" — AI akan membaca langsung dari gambar PDF.");
+        }
+      } else if (isText) {
+        const t = await f.text();
+        setEdit(e => ({
+          ...e,
+          text: (e.text ? e.text + "\n\n" : "") + t
+        }));
+        fileRef.current = null;
+      } else if (/^image\//i.test(f.type)) {
+        setMsg("Gambar/foto dibaca oleh AI. Klik \"Ekstrak dengan AI\".");
+      } else {
+        fileRef.current = null;
+        setMsg("Format file tidak didukung. Gunakan PDF, gambar, atau .txt/.eml — atau paste teks email di kolom teks.");
+      }
+    } catch (e) {
+      setMsg("Gagal membaca file: " + e.message);
+    }
+    setBusy("");
+  };
+  const mergeItems = newItems => {
+    setEdit(e => ({
+      ...e,
+      items: [...(e.items || []), ...newItems]
+    }));
+  };
+  const extractLocal = () => {
+    if (!edit.text.trim()) return alert("Paste teks email atau unggah PDF dulu.");
+    const found = rfqParseLocal(edit.text, parts);
+    if (found.length === 0) {
+      setMsg("Parser bawaan tidak menemukan item. Coba \"Ekstrak dengan AI\", atau tambahkan item manual di bawah.");
+      return;
+    }
+    mergeItems(found);
+    setMsg(`Parser bawaan menemukan ${found.length} baris. Periksa tabel di bawah — angka qty & part number harus dicek manual.`);
+  };
+  const extractAI = async () => {
+    if (!edit.text.trim() && !fileRef.current) return alert("Paste teks email atau unggah PDF/gambar dulu.");
+    setBusy("AI sedang membaca…");
+    setMsg("");
+    try {
+      const r = await rfqCallAI({
+        text: edit.text,
+        file: fileRef.current
+      });
+      const found = (r.items || []).map(it => matchToMaster({
+        partNumber: String(it.partNumber || "").trim(),
+        partName: String(it.description || it.partName || "").trim(),
+        partDescription: "",
+        qty: parseFloat(it.qty) || 1,
+        unit: it.unit || "",
+        harga: 0,
+        kategori: "Parts"
+      }));
+      if (found.length === 0) setMsg("AI tidak menemukan item permintaan di dokumen ini.");else {
+        mergeItems(found);
+        setMsg(`AI menemukan ${found.length} item.${r.notes ? " Catatan AI: " + r.notes : ""} Periksa tabel di bawah sebelum membuat quotation.`);
+      }
+      if (r.clientName && !edit.customerId) {
+        const nm = String(r.clientName).toLowerCase();
+        const c = (customers || []).find(c => String(c.nama).toLowerCase() === nm) || (customers || []).find(c => String(c.nama).toLowerCase().includes(nm) || nm.includes(String(c.nama).toLowerCase()));
+        if (c) setField("customerId", c.id);
+      }
+      if (r.clientRef && !edit.refClient) setField("refClient", r.clientRef);
+    } catch (e) {
+      if (e.message === "FUNCTION_NOT_DEPLOYED") {
+        setMsg("Fungsi AI (parse-rfq) belum dipasang di Supabase. Memakai parser bawaan sebagai gantinya.");
+        if (edit.text.trim()) {
+          const found = rfqParseLocal(edit.text, parts);
+          if (found.length) mergeItems(found);
+        } else setMsg("Fungsi AI (parse-rfq) belum dipasang di Supabase, dan file scan/gambar tidak bisa dibaca parser bawaan. Lihat panduan pemasangan, atau ketik item manual.");
+      } else setMsg("Ekstraksi AI gagal: " + e.message);
+    }
+    setBusy("");
+  };
+  const updItem = (i, patch) => setEdit(e => ({
+    ...e,
+    items: e.items.map((it, j) => j === i ? patch.partNumber !== undefined ? matchToMaster({
+      ...it,
+      ...patch
+    }) : {
+      ...it,
+      ...patch
+    } : it)
+  }));
+  const delItem = i => setEdit(e => ({
+    ...e,
+    items: e.items.filter((_, j) => j !== i)
+  }));
+  const addBlank = () => mergeItems([{
+    partNumber: "",
+    partName: "",
+    partDescription: "",
+    qty: 1,
+    harga: 0,
+    kategori: "Parts",
+    matched: false
+  }]);
+  const saveRFQ = (silent, overrides) => {
+    const cust = (customers || []).find(c => c.id === edit.customerId);
+    const nomor = edit.nomor || genDocNumber(rfqs || [], "RFQ");
+    const rec = {
+      ...edit,
+      ...(overrides || {}),
+      nomor,
+      id: edit.id || "RFQ-" + uid(),
+      customerNama: cust ? cust.nama : edit.customerNama || "",
+      createdByNama: edit.createdByNama || session.nama,
+      createdByUsername: edit.createdByUsername || session.username,
+      updatedAt: new Date().toISOString()
+    };
+    setRfqs(prev => {
+      const arr = prev || [];
+      const i = arr.findIndex(x => x.id === rec.id);
+      if (i < 0) return [...arr, rec];
+      const c = [...arr];
+      c[i] = rec;
+      return c;
+    });
+    logAudit(store, session, {
+      module: "Request for Quotation",
+      docNomor: nomor,
+      action: edit.id ? "Edit" : "Tambah",
+      detail: `${(rec.items || []).length} item`
+    });
+    setEdit(rec);
+    if (!silent) setMsg("RFQ tersimpan: " + nomor);
+    return rec;
+  };
+  const makeQuotation = () => {
+    const items = (edit.items || []).filter(it => String(it.partNumber || "").trim() || String(it.partName || "").trim());
+    if (items.length === 0) return alert("Belum ada item. Ekstrak dulu atau tambah item manual.");
+    if (!edit.customerId) return alert("Pilih Client dulu supaya quotation terhubung ke Database Client.");
+    const unmatched = items.filter(it => !it.matched).length;
+    if (unmatched > 0 && !window.confirm(`${unmatched} item belum ada di Master Part (ditandai ⚠). Item tetap dimasukkan ke quotation tapi harga harus diisi manual. Lanjutkan?`)) return;
+    const rec = saveRFQ(true, {
+      status: "Quotation Dibuat",
+      quotationRequestedAt: new Date().toISOString()
+    });
+    onCreateQuotation({
+      clientNama: rec.customerNama,
+      customerId: rec.customerId,
+      items,
+      catatan: rec.refClient ? `Ref. RFQ client: ${rec.refClient}` : "",
+      rfqId: rec.id
+    });
+  };
+  const cellInput = (value, onChange, w, type) => h("input", {
+    type: type || "text",
+    value: value ?? "",
+    onChange: e => onChange(e.target.value),
+    style: {
+      width: w,
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 6,
+      padding: "6px 8px",
+      color: theme.text,
+      fontSize: 13,
+      fontFamily: "inherit"
+    }
+  });
+  // ---------- editor ----------
+  if (edit) {
+    const custOptions = [{
+      value: "",
+      label: "-- Pilih Client --"
+    }, ...(customers || []).map(c => ({
+      value: c.id,
+      label: c.nama
+    }))];
+    const th = {
+      textAlign: "left",
+      padding: "8px 6px",
+      fontSize: 12,
+      color: theme.muted,
+      borderBottom: `1px solid ${theme.border}`
+    };
+    const td = {
+      padding: "6px 6px",
+      verticalAlign: "top",
+      borderBottom: `1px solid ${theme.border}22`
+    };
+    return h("div", {
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 14
+      }
+    }, h("div", {
+      style: {
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        flexWrap: "wrap",
+        gap: 8
+      }
+    }, h("div", {
+      style: {
+        display: "flex",
+        gap: 10,
+        alignItems: "center"
+      }
+    }, h(Btn, {
+      variant: "ghost",
+      onClick: () => setEdit(null)
+    }, "← Kembali"), h("h2", {
+      style: {
+        margin: 0,
+        fontSize: 20,
+        color: theme.text
+      }
+    }, edit.nomor ? `RFQ ${edit.nomor}` : "RFQ Baru"), edit.status && h(Badge, {
+      color: edit.status === "Draft" ? theme.yellow : theme.green
+    }, edit.status))), h("div", {
+      style: {
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+        gap: 12
+      }
+    }, h(Select, {
+      label: "Client",
+      value: edit.customerId,
+      onChange: v => setField("customerId", v),
+      options: custOptions
+    }), h(Input, {
+      label: "Tanggal Diterima",
+      type: "date",
+      value: edit.tanggal,
+      onChange: v => setField("tanggal", v)
+    }), h(Select, {
+      label: "Sumber",
+      value: edit.sumber,
+      onChange: v => setField("sumber", v),
+      options: ["Email", "PDF", "WhatsApp", "Telepon", "Lainnya"].map(s => ({
+        value: s,
+        label: s
+      }))
+    }), h(Input, {
+      label: "No. Ref / RFQ dari Client",
+      value: edit.refClient,
+      onChange: v => setField("refClient", v)
+    })), h("div", {
+      style: {
+        background: theme.surface,
+        border: `1px solid ${theme.border}`,
+        borderRadius: 10,
+        padding: 14,
+        display: "flex",
+        flexDirection: "column",
+        gap: 10
+      }
+    }, h("div", {
+      style: {
+        fontSize: 13,
+        fontWeight: 700,
+        color: theme.text
+      }
+    }, "1. Isi permintaan client"), h(Input, {
+      label: "Paste isi email / pesan dari client",
+      multiline: true,
+      rows: 8,
+      value: edit.text,
+      onChange: v => setField("text", v),
+      placeholder: "Paste teks email di sini, atau unggah PDF/gambar di bawah…"
+    }), h("div", {
+      style: {
+        display: "flex",
+        gap: 8,
+        flexWrap: "wrap",
+        alignItems: "center"
+      }
+    }, h("label", {
+      style: {
+        cursor: "pointer"
+      }
+    }, h("input", {
+      type: "file",
+      accept: ".pdf,.txt,.eml,.csv,image/*",
+      onChange: onPickFile,
+      style: {
+        display: "none"
+      }
+    }), h("span", {
+      style: {
+        display: "inline-block",
+        padding: "8px 14px",
+        borderRadius: 8,
+        border: `1px solid ${theme.border}`,
+        color: theme.text,
+        fontSize: 13,
+        fontWeight: 600
+      }
+    }, "📎 Unggah PDF / gambar / .eml")), edit.fileName && h("span", {
+      style: {
+        fontSize: 12,
+        color: theme.muted
+      }
+    }, edit.fileName), h("div", {
+      style: {
+        flex: 1
+      }
+    }), h(Btn, {
+      variant: "ghost",
+      disabled: !!busy,
+      onClick: extractLocal
+    }, "Ekstrak (parser bawaan)"), h(Btn, {
+      disabled: !!busy,
+      onClick: extractAI
+    }, "✨ Ekstrak dengan AI")), busy && h("div", {
+      style: {
+        fontSize: 12,
+        color: theme.accentLight || theme.accent
+      }
+    }, "⏳ ", busy), msg && h("div", {
+      style: {
+        fontSize: 12,
+        color: theme.muted,
+        whiteSpace: "pre-wrap"
+      }
+    }, msg)), h("div", {
+      style: {
+        background: theme.surface,
+        border: `1px solid ${theme.border}`,
+        borderRadius: 10,
+        padding: 14,
+        display: "flex",
+        flexDirection: "column",
+        gap: 8
+      }
+    }, h("div", {
+      style: {
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center"
+      }
+    }, h("div", {
+      style: {
+        fontSize: 13,
+        fontWeight: 700,
+        color: theme.text
+      }
+    }, "2. Review item (", (edit.items || []).length, ")"), h(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: addBlank
+    }, "+ Tambah Item")), (edit.items || []).length === 0 ? h("div", {
+      style: {
+        fontSize: 13,
+        color: theme.muted,
+        padding: 8
+      }
+    }, "Belum ada item. Ekstrak dari isi permintaan di atas, atau tambah manual.") : h("div", {
+      style: {
+        overflowX: "auto"
+      }
+    }, h("table", {
+      style: {
+        width: "100%",
+        borderCollapse: "collapse"
+      }
+    }, h("thead", null, h("tr", null, h("th", {
+      style: th
+    }, "#"), h("th", {
+      style: th
+    }, "Part Number"), h("th", {
+      style: th
+    }, "Nama / Deskripsi"), h("th", {
+      style: th
+    }, "Qty"), h("th", {
+      style: th
+    }, "Master Part"), h("th", {
+      style: th
+    }, ""))), h("tbody", null, edit.items.map((it, i) => h("tr", {
+      key: i
+    }, h("td", {
+      style: td
+    }, i + 1), h("td", {
+      style: td
+    }, cellInput(it.partNumber, v => updItem(i, {
+      partNumber: v
+    }), 160)), h("td", {
+      style: td
+    }, cellInput(it.partName, v => updItem(i, {
+      partName: v
+    }), 300)), h("td", {
+      style: td
+    }, cellInput(it.qty, v => updItem(i, {
+      qty: v
+    }), 70, "number")), h("td", {
+      style: td
+    }, it.matched ? h(Badge, {
+      color: theme.green
+    }, "✓ Ada") : h(Badge, {
+      color: theme.yellow
+    }, "⚠ Tidak ada")), h("td", {
+      style: td
+    }, h(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => delItem(i)
+    }, "🗑️"))))))), h("div", {
+      style: {
+        fontSize: 11,
+        color: theme.muted
+      }
+    }, "Mengubah Part Number mencocokkan ulang ke Master Part (nama & harga jual terisi otomatis). Harga akhir tetap diputuskan di Parts & Service Quotation.")), h(Input, {
+      label: "Catatan internal",
+      multiline: true,
+      value: edit.catatan,
+      onChange: v => setField("catatan", v)
+    }), h("div", {
+      style: {
+        display: "flex",
+        gap: 8,
+        justifyContent: "flex-end",
+        flexWrap: "wrap"
+      }
+    }, h(Btn, {
+      variant: "ghost",
+      onClick: () => saveRFQ(false)
+    }, "💾 Simpan RFQ"), h(Btn, {
+      onClick: makeQuotation
+    }, "➡️ Buat Parts & Service Quotation")));
+  }
+  // ---------- list ----------
+  return h("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, h("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      flexWrap: "wrap",
+      gap: 8
+    }
+  }, h("h2", {
+    style: {
+      margin: 0,
+      fontSize: 22,
+      color: theme.text
+    }
+  }, "Request for Quotation"), h(Btn, {
+    onClick: newRFQ
+  }, "+ RFQ Baru")), h("div", {
+    style: {
+      fontSize: 12,
+      color: theme.muted,
+      background: theme.surface,
+      padding: "8px 14px",
+      borderRadius: 8,
+      border: `1px dashed ${theme.border}`
+    }
+  }, "Masukkan email / PDF permintaan harga dari client → item dibaca otomatis → periksa → jadi draft Parts & Service Quotation."), h(Input, {
+    label: "Cari (nomor, client, part number)",
+    value: search,
+    onChange: setSearch
+  }), h(Table, {
+    headers: ["Nomor", "Tanggal", "Client", "Sumber", "Ref Client", "Item", "Status", ""],
+    emptyMsg: "Belum ada RFQ. Klik + RFQ Baru.",
+    rows: shown.map(r => [h("span", {
+      style: {
+        fontWeight: 600,
+        color: theme.accentLight || theme.accent,
+        cursor: "pointer"
+      },
+      onClick: () => openRFQ(r)
+    }, r.nomor), fmtDateRev(r.tanggal), r.customerNama || "-", r.sumber || "-", r.refClient || "-", (r.items || []).length, h(Badge, {
+      color: r.status === "Draft" ? theme.yellow : theme.green
+    }, r.status || "Draft"), h(Btn, {
+      size: "sm",
+      variant: "ghost",
+      onClick: () => openRFQ(r)
+    }, "Buka")])
+  }));
+}
 function QuotationPS({
   store,
   session,
@@ -17743,7 +18492,9 @@ function QuotationPS({
   // pre-select the matching Database Client so the user doesn't have to look it up again.
   React.useEffect(() => {
     if (!pendingSQClient) return;
-    const cust = (customers || []).find(c => c.nama === pendingSQClient);
+    // Either a plain client name (Maintenance Schedule) or an RFQ payload {clientNama, customerId, items, catatan, rfqId}
+    const rfqPayload = typeof pendingSQClient === "object" ? pendingSQClient : null;
+    const cust = rfqPayload ? (customers || []).find(c => c.id === rfqPayload.customerId) || (customers || []).find(c => c.nama === rfqPayload.clientNama) : (customers || []).find(c => c.nama === pendingSQClient);
     openCreate();
     if (cust) {
       setForm(f => ({
@@ -17751,7 +18502,26 @@ function QuotationPS({
         customerId: cust.id
       }));
     } else {
-      alert(`Client "${pendingSQClient}" tidak ditemukan di Database Client — pilih manual.`);
+      alert(`Client "${rfqPayload ? rfqPayload.clientNama || "" : pendingSQClient}" tidak ditemukan di Database Client — pilih manual.`);
+    }
+    if (rfqPayload) {
+      setForm(f => ({
+        ...f,
+        items: (rfqPayload.items || []).map(it => {
+          const qty = parseFloat(it.qty) || 1;
+          const harga = parseFloat(it.harga) || 0;
+          return {
+            partNumber: it.partNumber,
+            partName: it.partName,
+            partDescription: it.partDescription || "",
+            qty,
+            harga,
+            subtotal: qty * harga,
+            kategori: it.kategori || "Parts"
+          };
+        }),
+        catatan: rfqPayload.catatan || ""
+      }));
     }
     clearPendingSQClient();
   }, [pendingSQClient]);
@@ -50051,6 +50821,15 @@ function App() {
           onRequestSO: nomor => {
             setPendingSOQuot(nomor);
             setActive("sales_order");
+          }
+        });
+      case "rfq":
+        return /*#__PURE__*/React.createElement(RFQModule, {
+          store: store,
+          session: session,
+          onCreateQuotation: payload => {
+            setPendingSQClient(payload);
+            setActive("quotation_ps");
           }
         });
       case "quotation_ps":
