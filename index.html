@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-11-17.3";
+const APP_BUILD = "2026-11-17.4";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -29938,20 +29938,14 @@ function DeliveryOrderModule({
   }, /*#__PURE__*/React.createElement(PrintBtn, {
     onClick: () => {
       const so = salesOrders.find(s => s.nomor === detail.soNomor);
-      return printSuratJalan({
-        company: store.companySettings,
-        nomor: detail.nomor,
-        tanggal: detail.tanggal,
-        poNo: so?.noPoClient || "",
-        customerNama: detail.customerNama,
-        customerAlamat: customers.find(c => c.nama === detail.customerNama)?.alamat || "",
-        items: detail.items.map(it => [it.partNumber || "-", it.nama, fmtNum(it.qty), it.satuan || it.unit || ""]),
-        catatan: detail.catatan,
-        infoLines: [["Ekspedisi", so?.shippingEkspedisi || detail.ekspedisi || ""], ["No. Resi", detail.noResi || ""], ["Nama Driver", detail.driver || ""], ["No. Mobil", detail.noKendaraan || ""], ["No. Telp", detail.noTelp || ""]].filter(r => r[1]),
-        dibuatOleh: detail.createdBy
-      });
+      return printSuratJalan(sjArgsFor(detail, so, customers, store));
     }
-  })))), /*#__PURE__*/React.createElement(Modal, {
+  }), /*#__PURE__*/React.createElement(Btn, {
+    onClick: () => {
+      const so = salesOrders.find(s => s.nomor === detail.soNomor);
+      return exportSuratJalanExcel(sjArgsFor(detail, so, customers, store));
+    }
+  }, "📊 Excel Surat Jalan (untuk dot matrix)")))), /*#__PURE__*/React.createElement(Modal, {
     open: modal,
     title: "Buat Delivery Order",
     onClose: () => setModal(false),
@@ -37217,6 +37211,315 @@ function printDocument({
     </body></html>
   `);
   win.document.close();
+}
+// Shared argument builder for the Surat Jalan print + Excel export.
+function sjArgsFor(detail, so, customers, store) {
+  return {
+    company: store.companySettings,
+    nomor: detail.nomor,
+    tanggal: detail.tanggal,
+    poNo: so?.noPoClient || "",
+    customerNama: detail.customerNama,
+    customerAlamat: customers.find(c => c.nama === detail.customerNama)?.alamat || "",
+    items: detail.items.map(it => [it.partNumber || "-", it.nama, fmtNum(it.qty), it.satuan || it.unit || "PCS"]),
+    rawQty: detail.items.map(it => it.qty),
+    catatan: detail.catatan,
+    infoLines: [["Ekspedisi", so?.shippingEkspedisi || detail.ekspedisi || ""], ["No. Resi", detail.noResi || ""], ["Nama Driver", detail.driver || ""], ["No. Mobil", detail.noKendaraan || ""], ["No. Telp", detail.noTelp || ""]].filter(r => r[1]),
+    dibuatOleh: detail.createdBy
+  };
+}
+// Excel export of the Surat Jalan using the SAME layout/fonts as the office's Excel template
+// ("Excel.xls" / SURAT JALAN AMP.xls). Per Jef 2026-11-17: the template printed from Excel is crisp
+// on the dot-matrix printer, while the browser print of the same layout is a blurry bitmap — Excel
+// (GDI) hands the printer real text, Chrome rasterizes it. So the reliable path for dot-matrix is:
+// download this .xlsx and print it from Excel (A4 portrait, 100% / fit to 1 page wide).
+async function exportSuratJalanExcel({
+  company,
+  nomor,
+  tanggal,
+  poNo,
+  customerNama,
+  customerAlamat,
+  items,
+  rawQty,
+  catatan,
+  infoLines,
+  dibuatOleh
+}) {
+  try {
+    const XLSX = await loadXLSXLibrary();
+    const co = {
+      ...COMPANY_INFO,
+      ...(company || {})
+    };
+    const thin = {
+      style: "thin",
+      color: {
+        rgb: "000000"
+      }
+    };
+    const med = {
+      style: "medium",
+      color: {
+        rgb: "000000"
+      }
+    };
+    const box = {
+      top: thin,
+      bottom: thin,
+      left: thin,
+      right: thin
+    };
+    const ws = {};
+    const merges = [];
+    const rowH = [];
+    // cols: A=0 B=1(NO) C=2(PART NO) D=3(DESC) E:F=4-5(QTY) G:I=6-8(UNIT)
+    const put = (r, c, v, font, align, border, numFmt) => {
+      const a = XLSX.utils.encode_cell({
+        r,
+        c
+      });
+      ws[a] = {
+        t: typeof v === "number" ? "n" : "s",
+        v: v === undefined || v === null ? "" : v,
+        s: {
+          font: {
+            name: font?.name || "Arial",
+            sz: font?.sz || 12,
+            bold: !!font?.bold
+          },
+          alignment: {
+            horizontal: align || "left",
+            vertical: "center",
+            wrapText: false
+          },
+          ...(border ? {
+            border
+          } : {})
+        }
+      };
+    };
+    const merge = (r, c1, c2) => merges.push({
+      s: {
+        r,
+        c: c1
+      },
+      e: {
+        r,
+        c: c2
+      }
+    });
+    // Letterhead (Tahoma 16 bold / 12)
+    put(0, 1, String(co.nama || "").toUpperCase(), {
+      name: "Tahoma",
+      sz: 16,
+      bold: true
+    });
+    const addr = String(co.alamat || "").split("\n").filter(Boolean);
+    const lines = [...addr.slice(0, 2), co.telepon ? "Telp. " + co.telepon : "", co.email ? "email : " + co.email : ""].filter(Boolean);
+    lines.forEach((l, i) => put(1 + i, 1, l, {
+      name: "Tahoma",
+      sz: 12
+    }));
+    // Title block
+    for (let c = 4; c <= 8; c++) put(3, c, c === 4 ? "SURAT JALAN" : "", {
+      name: "Tahoma",
+      sz: 18
+    }, "center", {
+      bottom: med
+    });
+    merge(3, 4, 8);
+    put(4, 4, "No : " + nomor, {
+      sz: 13
+    }, "center");
+    merge(4, 4, 8);
+    // Date / PO No boxes
+    [4, 5].forEach(c => {
+      put(6, c, c === 4 ? "Date" : "", {
+        sz: 12,
+        bold: true
+      }, "center", box);
+      put(7, c, c === 4 ? fmtDateRev(tanggal) : "", {
+        sz: 12
+      }, "center", box);
+    });
+    [6, 7, 8].forEach(c => {
+      put(6, c, c === 6 ? "PO No" : "", {
+        sz: 12,
+        bold: true
+      }, "center", box);
+      put(7, c, c === 6 ? poNo || "" : "", {
+        sz: 12
+      }, "center", box);
+    });
+    merge(6, 4, 5);
+    merge(6, 6, 8);
+    merge(7, 4, 5);
+    merge(7, 6, 8);
+    // Customer block (Arial 14 bold)
+    put(7, 1, customerNama || "", {
+      sz: 13,
+      bold: true
+    });
+    // wrap the address to ~46 chars/line (the printable width is limited), max 4 lines
+    const wrapTxt = (t, n) => {
+      const out = [];
+      let cur = "";
+      String(t || "").replace(/\s+/g, " ").trim().split(" ").forEach(w => {
+        if ((cur + " " + w).trim().length > n && cur) {
+          out.push(cur);
+          cur = w;
+        } else cur = (cur + " " + w).trim();
+      });
+      if (cur) out.push(cur);
+      return out;
+    };
+    wrapTxt(customerAlamat, 46).slice(0, 4).forEach((l, i) => put(9 + i, 1, l, {
+      sz: 12,
+      bold: true
+    }));
+    // Item table
+    const H = 14;
+    ["NO", "PART NUMBER", "ITEM DESCRIPTIONS", "QTY", "", "UNIT", "", ""].forEach((h, i) => put(H, 1 + i, h, {
+      sz: 13
+    }, "center", box));
+    merge(H, 4, 5);
+    merge(H, 6, 8);
+    const N = Math.max(items.length, 12);
+    for (let i = 0; i < N; i++) {
+      const r = H + 1 + i;
+      const it = items[i];
+      const bd = {
+        left: thin,
+        right: thin,
+        ...(i === N - 1 ? {
+          bottom: thin
+        } : {})
+      };
+      put(r, 1, it ? String(i + 1) : "", {
+        sz: 12
+      }, "center", bd);
+      put(r, 2, it ? String(it[0]) : "", {
+        sz: 12
+      }, "center", bd);
+      put(r, 3, it ? String(it[1]) : "", {
+        sz: 12
+      }, "left", bd);
+      const q = it ? Number(rawQty?.[i]) : NaN;
+      put(r, 4, it ? isNaN(q) ? String(it[2]) : q : "", {
+        sz: 12
+      }, "center", bd);
+      put(r, 5, "", {
+        sz: 12
+      }, "center", bd);
+      put(r, 6, it ? String(it[3] || "PCS") : "", {
+        sz: 12
+      }, "center", bd);
+      put(r, 7, "", {
+        sz: 12
+      }, "center", bd);
+      put(r, 8, "", {
+        sz: 12
+      }, "center", bd);
+      merge(r, 4, 5);
+      merge(r, 6, 8);
+      rowH[r] = {
+        hpt: 21
+      };
+    }
+    let r = H + N + 2;
+    (infoLines || []).forEach(([k, v]) => {
+      put(r, 1, k + " : " + v, {
+        sz: 12
+      });
+      r++;
+    });
+    if (catatan) {
+      put(r, 1, "Catatan: " + String(catatan).replace(/\s*\n\s*/g, " "), {
+        sz: 12
+      });
+      r++;
+    }
+    r += 1;
+    put(r, 1, "Delivery By :", {
+      sz: 13
+    });
+    put(r, 4, "Received By :", {
+      sz: 13
+    }, "center");
+    r += 4;
+    put(r, 1, dibuatOleh || "", {
+      sz: 12,
+      bold: true
+    }, "left", {
+      top: thin
+    });
+    put(r, 2, "", {
+      sz: 12
+    }, "left", {
+      top: thin
+    });
+    put(r, 4, "", {
+      sz: 12
+    }, "left", {
+      top: thin
+    });
+    put(r, 5, "", {
+      sz: 12
+    }, "left", {
+      top: thin
+    });
+    ws["!ref"] = XLSX.utils.encode_range({
+      s: {
+        r: 0,
+        c: 0
+      },
+      e: {
+        r,
+        c: 8
+      }
+    });
+    ws["!merges"] = merges;
+    // Total width ~83 chars so the sheet fits A4 portrait at 100% (xlsx-js-style cannot write
+    // fit-to-page), the template itself is ~136 and relies on Excel scaling.
+    ws["!cols"] = [1, 5, 17, 30, 7, 5, 1, 8, 9].map(w => ({
+      wch: w
+    }));
+    rowH[0] = {
+      hpt: 20
+    };
+    rowH[3] = {
+      hpt: 34
+    };
+    rowH[H] = {
+      hpt: 30
+    };
+    ws["!rows"] = rowH;
+    ws["!pageSetup"] = {
+      orientation: "portrait",
+      paperSize: 9,
+      fitToWidth: 1,
+      fitToHeight: 0
+    };
+    ws["!sheetPr"] = {
+      pageSetUpPr: {
+        fitToPage: true
+      }
+    };
+    ws["!margins"] = {
+      left: 0.4,
+      right: 0.4,
+      top: 0.5,
+      bottom: 0.5,
+      header: 0.3,
+      footer: 0.3
+    };
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "SURAT JALAN");
+    XLSX.writeFile(wb, "SURAT JALAN " + String(nomor).replace(/[\\/:*?"<>|]/g, "-") + ".xlsx");
+  } catch (e) {
+    alert("Gagal export Surat Jalan: " + e.message);
+  }
 }
 // SURAT JALAN (Delivery Order) print — layout copied from the office's Excel Surat Jalan
 // ("SURAT JALAN AGRICINAL.pdf") because that layout prints legibly on the dot-matrix printer:
