@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-11-11.2";
+const APP_BUILD = "2026-11-12.2";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -831,10 +831,8 @@ const daysSince = dateStr => {
   return Math.floor((new Date(today() + "T00:00:00") - d) / 86400000);
 };
 // Look up a saved digital signature (data URL) for a given username, for use on printed docs.
-const getSignature = (store, username) => {
-  const emp = (store?.employees || []).find(e => e.username === username);
-  return emp?.signature || null;
-};
+// Per Jef 2026-11-12: dokumen tidak lagi memakai tanda tangan/stempel gambar — selalu null.
+const getSignature = (store, username) => null;
 // Auto-record a Sales Activity entry when a sales user creates a quotation or a new client,
 // so the Sales Activity feed fills itself in without requiring a manual log entry.
 const logSalesActivity = (store, session, {
@@ -3348,18 +3346,21 @@ function useStore() {
   };
   const [kpiTargets, setKpiTargets] = usePersisted("erp_kpi_targets", {}); // { [nama]: {revenueTarget, newContactsTarget, followupTarget, quotationsTarget} }
   const [companySettings, setCompanySettings] = usePersisted("erp_company_settings", {
-    nama: "PT Heavy Equipment Solutions",
-    alamat: "Jl. Industri Raya No. 88, Jakarta",
-    telepon: "021-5550-0000",
-    email: "info@heavyequipment.co.id",
+    nama: "PT SENTRA MULIA MANDIRI",
+    alamat: "JL. TAMAN SARI X NO.10\nJAKARTA BARAT 11150",
+    telepon: "0877 7579 0855",
+    email: "smuliamandiri@yahoo.com",
     npwp: "",
     logo: "",
     // Per Jef 2026-09-18: these used to be hardcoded straight into InvoiceModule's print call
     // (bankInfoText) — editable here now so changing the bank account doesn't need a code change.
     // Updated 2026-09-18 to the new Maybank account per Jef's request.
-    bankNama: "Maybank Cabang Fatmawati",
-    bankAtasNama: "PT Foresta Transtek",
-    bankNoRekening: "2741001446"
+    bankNama: "BCA CAB, MANGGA BESAR VIII",
+    bankAtasNama: "PT SENTRA MULIA MANDIRI",
+    bankNoRekening: "6980199990",
+    // Per Jef 2026-11-12: direktur penanda tangan dokumen (Invoice dll.) kini dari Setting Perusahaan.
+    direkturNama: "Benny Gunawan",
+    direkturJabatan: "DIREKTUR"
   });
   // Real login accounts (Supabase `profiles`) — shared so any module can reference the actual
   // user/role/username list (Database Client access assignment, User Management, Cuti-on-behalf,
@@ -12836,7 +12837,7 @@ function MekanikReport({
       partyExtra: `Lokasi: ${b.millName || b.lokasiManual || "-"}`,
       extraInfoRows: [["No. PO / Sales Order", b.soNomor || "-"], ["No. Delivery Order", b.doNomor || "-"], ["Jenis Pekerjaan", jenisText || "-"], ["Nama Unit", b.unitName || "-"], ["Model", b.model || "-"], ["SN Unit", b.snUnit || "-"], ["Engine", b.engine || "-"], ["SN Engine", b.snEngine || "-"], ["Crane", b.crane || "-"], ["SN Crane", b.snCrane || "-"], ["Grapple", b.grapple || "-"], ["SN Grapple", b.snGrapple || "-"], ["Kondisi", kondisiText || "-"]],
       itemHeaders: ["Keterangan", "Detail"],
-      items: [["Pekerjaan telah diselesaikan oleh", "PT FORESTA TRANSTEK"]],
+      items: [["Pekerjaan telah diselesaikan oleh", (store.companySettings?.nama || "PT SENTRA MULIA MANDIRI").toUpperCase()]],
       showPrice: false,
       catatan: b.catatan,
       dibuatOleh: {
@@ -32114,15 +32115,17 @@ function InvoiceModule({
       // Per Jef 2026-09-18: was hardcoded here — now reads from Setting Perusahaan (erp_company_settings)
       // so the bank account can be updated without a code change. Falls back to the current Maybank
       // account if companySettings hasn't been saved with these fields yet (pre-existing installs).
-      bankInfoText: `${store.companySettings?.bankNama || "Maybank Cabang Fatmawati"}<br/>A/N ${store.companySettings?.bankAtasNama || "PT Foresta Transtek"}<br/>A/C ${store.companySettings?.bankNoRekening || "2741001446"}`,
+      // Baris dipisah "\n" (bukan <br/>): printDocument meng-escape teks ini, jadi <br/> akan tercetak
+      // mentah. printDocument mengubah "\n" jadi <br/> setelah di-escape.
+      bankInfoText: `${store.companySettings?.bankNama || ""}\nA/N ${store.companySettings?.bankAtasNama || store.companySettings?.nama || ""}\nA/C ${store.companySettings?.bankNoRekening || ""}`,
       hideCreatedBy: true,
       disetujuiAlign: "left",
       showMateraiSpace: true,
       materaiSpasi: 6,
       disetujuiLabel: "Disetujui Oleh",
       disetujuiOleh: {
-        nama: "Effendi Husin",
-        jabatan: "DIREKTUR"
+        nama: store.companySettings?.direkturNama || "Benny Gunawan",
+        jabatan: store.companySettings?.direkturJabatan || "DIREKTUR"
       }
     })
   })), detail.statusApproval !== "Disetujui GM" && /*#__PURE__*/React.createElement("p", {
@@ -35981,7 +35984,7 @@ function UangMakanModule({
   const totalSemua = activeRows.reduce((s, r) => s + r.total, 0);
   const periodeLabel = selMulai && selSelesai ? `${selMulai} s/d ${selSelesai}` : "-";
   const exportRows = () => exportToExcelStyled(XLSX => buildStyledSheet(XLSX, {
-    titleRows: ["PT. FORESTA TRANSTEK", "Laporan Rekapitulasi Harian"],
+    titleRows: [(store.companySettings?.nama || "PT SENTRA MULIA MANDIRI").toUpperCase(), "Laporan Rekapitulasi Harian"],
     headers: ["Nama", "Jabatan", "Periode", "Riil Hari", "½ Hari", "Absen Hari", "Rate Harian", "Uang Makan", "Uang Kerajinan", "Total"],
     rows: activeRows.map(r => [r.emp.nama, r.emp.jabatan || "-", periodeLabel, r.riilHari, r.setengahHari || 0, r.absenHari, r.rate, r.uangMakan, r.uangKerajinan, r.total]),
     moneyCols: [6, 7, 8, 9],
@@ -36942,10 +36945,10 @@ function TicketingModule({
 // Opens a new window with print-friendly HTML; browser's "Save as PDF" handles export.
 // ════════════════════════════════════════════════════════════════════════════
 const COMPANY_INFO = {
-  nama: "PT Heavy Equipment Solutions",
-  alamat: "Jl. Industri Raya No. 88, Jakarta",
-  telepon: "021-5550-0000",
-  email: "info@heavyequipment.co.id"
+  nama: "PT SENTRA MULIA MANDIRI",
+  alamat: "JL. TAMAN SARI X NO.10\nJAKARTA BARAT 11150",
+  telepon: "0877 7579 0855",
+  email: "smuliamandiri@yahoo.com"
 };
 // Fixed print column widths (% of table width, each set sums to 100), keyed by the item header row, so a
 // document type prints with identical column widths every time regardless of its content. Money columns
@@ -37121,7 +37124,7 @@ function printDocument({
     <body>
       <div class="header">
         <div style="display:flex;gap:12px;align-items:flex-start;">
-          ${co.logo ? `<img class="co-logo" src="${co.logo}" style="max-height:56px;max-width:120px;object-fit:contain;" />` : ""}
+          ${co.logo ? `<img class="co-logo" src="${co.logo}" style="max-height:64px;max-width:200px;object-fit:contain;" />` : ""}
           <div>
             <div class="company">${escapeHtml(co.nama)}</div>
             ${co.alamat ? `<div class="co-line" style="font-size:${fs(12)}px;color:#666;margin-top:2px;white-space:pre-line;">${escapeHtml(co.alamat)}</div>` : ""}
@@ -37154,14 +37157,14 @@ function printDocument({
         <div class="row final"><span>TOTAL</span><span>${fmtMoney(total, currency)}</span></div>
       </div>
       ${terbilangText ? `<div style="text-align:right;font-size:${fs(11)}px;color:#666;font-style:italic;margin-top:4px;">Terbilang: ${terbilangText}</div>` : ""}` : ""}
-      ${bankInfoText ? `<div style="margin-top:16px;background:#f5f5f5;border-radius:8px;padding:10px 14px;font-size:${fs(12)}px;"><strong>Informasi Pembayaran:</strong><br/>${escapeHtml(bankInfoText)}</div>` : ""}
+      ${bankInfoText ? `<div style="margin-top:16px;background:#f5f5f5;border-radius:8px;padding:10px 14px;font-size:${fs(12)}px;"><strong>Informasi Pembayaran:</strong><br/>${escapeHtml(bankInfoText).replace(/\n/g, "<br/>")}</div>` : ""}
       ${paymentTermsHtml}
       ${catatan ? `<div class="note-row" style="margin-top:24px;font-size:${fs(12)}px;color:#666;white-space:pre-wrap;word-break:break-word;"><strong>Catatan:</strong> ${escapeHtml(catatan)}</div>` : ""}
       <div class="sig-row" style="margin-top:20px;display:flex;justify-content:${disetujuiAlign === "left" ? "flex-start" : hideCreatedBy ? "center" : "space-between"};font-size:${fs(12)}px;">
         ${hideCreatedBy ? "" : `<div style="text-align:center;width:200px;">${escapeHtml(dibuatOlehLabel)}<br/><br/>${sigBlock(dibuatOleh)}</div>`}
         <div style="text-align:center;width:200px;">${escapeHtml(disetujuiLabel)}${showMateraiSpace ? Array(materaiSpasi).fill("<br/>").join("") : "<br/>"}${sigBlock(disetujuiOleh, showMateraiSpace)}</div>
       </div>
-      <div class="disc" style="margin-top:40px;text-align:center;font-style:italic;font-size:${fs(7)}px;color:#888;border-top:1px solid #ddd;padding-top:10px;line-height:1.5;">
+      <div class="disc" style="margin-top:40px;text-align:center;font-style:italic;font-size:${fs(10)}px;color:#555;border-top:1px solid #ddd;padding-top:10px;line-height:1.5;">
         <span class="disc-t">DISCLAIMER</span><br/>
         "Dokumen ini telah diterbitkan dan ditandatangani secara elektronik melalui sistem PT. SENTRA MULIA MANDIRI sehingga sah dan mengikat secara hukum tanpa memerlukan tanda tangan basah maupun stempel perusahaan, sesuai dengan ketentuan UU ITE No. 11 Tahun 2008.<br/>
         Lampiran ini merupakan bukti sah dan hanya berlaku sesuai dengan nomor, tanggal, serta syarat dan ketentuan yang tercantum di dalamnya.<br/>
@@ -37222,7 +37225,7 @@ function printSlipGaji(r, periode, company) {
     <body>
       <div class="header">
         <div style="display:flex;gap:12px;align-items:flex-start;">
-          ${co.logo ? `<img class="co-logo" src="${co.logo}" style="max-height:56px;max-width:120px;object-fit:contain;" />` : ""}
+          ${co.logo ? `<img class="co-logo" src="${co.logo}" style="max-height:64px;max-width:200px;object-fit:contain;" />` : ""}
           <div>
             <div class="company">${escapeHtml(co.nama)}</div>
             ${co.alamat ? `<div style="font-size:12px;color:#666;margin-top:2px;white-space:pre-line;">${escapeHtml(co.alamat)}</div>` : ""}
@@ -37262,7 +37265,7 @@ function printSlipGaji(r, periode, company) {
         ____________________<br/>
         HRD Manager
       </div>
-      <div style="margin-top:40px;text-align:center;font-style:italic;font-size:7px;color:#888;border-top:1px solid #ddd;padding-top:10px;line-height:1.5;">
+      <div style="margin-top:40px;text-align:center;font-style:italic;font-size:10px;color:#555;border-top:1px solid #ddd;padding-top:10px;line-height:1.5;">
         DISCLAIMER<br/>
         "Dokumen ini telah diterbitkan dan ditandatangani secara elektronik melalui sistem PT. SENTRA MULIA MANDIRI sehingga sah dan mengikat secara hukum tanpa memerlukan tanda tangan basah maupun stempel perusahaan, sesuai dengan ketentuan UU ITE No. 11 Tahun 2008.<br/>
         Lampiran ini merupakan bukti sah dan hanya berlaku sesuai dengan nomor, tanggal, serta syarat dan ketentuan yang tercantum di dalamnya.<br/>
@@ -48896,9 +48899,11 @@ function CompanySettingsModule({
   // touching them won't accidentally persist an empty value over the real account.
   useEffect(() => {
     setForm({
-      bankNama: "Maybank Cabang Fatmawati",
-      bankAtasNama: "PT Foresta Transtek",
-      bankNoRekening: "2741001446",
+      bankNama: "BCA CAB, MANGGA BESAR VIII",
+      bankAtasNama: "PT SENTRA MULIA MANDIRI",
+      bankNoRekening: "6980199990",
+      direkturNama: "Benny Gunawan",
+      direkturJabatan: "DIREKTUR",
       ...companySettings
     });
   }, [companySettings]);
@@ -49118,7 +49123,7 @@ function CompanySettingsModule({
       ...form,
       bankAtasNama: v
     }),
-    placeholder: "mis: PT. FORESTA TRANSTEK"
+    placeholder: "mis: PT SENTRA MULIA MANDIRI"
   }), /*#__PURE__*/React.createElement(Input, {
     label: "No. Rekening (A/C)",
     value: form.bankNoRekening || "",
@@ -49126,7 +49131,39 @@ function CompanySettingsModule({
       ...form,
       bankNoRekening: v
     })
-  })))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+  })))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      borderTop: `1px solid ${theme.border}`,
+      paddingTop: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 10px",
+      color: theme.muted,
+      fontSize: 13,
+      fontWeight: 600
+    }
+  }, "DIREKTUR (penanda tangan dokumen, mis. Invoice)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Nama Direktur",
+    value: form.direkturNama || "",
+    onChange: v => setForm({
+      ...form,
+      direkturNama: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Jabatan",
+    value: form.direkturJabatan || "",
+    onChange: v => setForm({
+      ...form,
+      direkturJabatan: v
+    })
+  }))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
     style: {
       fontSize: 13,
       color: theme.muted,
@@ -51219,21 +51256,7 @@ function App() {
       fontFamily: "inherit",
       marginBottom: 6
     }
-  }, themeMode === "dark" ? "☀️ Mode Terang" : "🌙 Mode Gelap"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setSignatureOpen(true),
-    style: {
-      width: "100%",
-      background: theme.surface,
-      border: `1px solid ${theme.border}`,
-      borderRadius: 6,
-      padding: "8px",
-      color: theme.muted,
-      fontSize: 12,
-      cursor: "pointer",
-      fontFamily: "inherit",
-      marginBottom: 6
-    }
-  }, "✍️ Tanda Tangan")), /*#__PURE__*/React.createElement("button", {
+  }, themeMode === "dark" ? "☀️ Mode Terang" : "🌙 Mode Gelap")), /*#__PURE__*/React.createElement("button", {
     onClick: logout,
     style: {
       width: "100%",
@@ -51318,11 +51341,6 @@ function App() {
     open: changePwOpen,
     onClose: () => setChangePwOpen(false),
     session: session
-  }), /*#__PURE__*/React.createElement(SignatureModal, {
-    open: signatureOpen,
-    onClose: () => setSignatureOpen(false),
-    session: session,
-    store: store
   }));
 }
 const root = ReactDOM.createRoot(document.getElementById('root'));

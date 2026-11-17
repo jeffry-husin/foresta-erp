@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-11-11.2";
+const APP_BUILD = "2026-11-17.3";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -831,10 +831,8 @@ const daysSince = dateStr => {
   return Math.floor((new Date(today() + "T00:00:00") - d) / 86400000);
 };
 // Look up a saved digital signature (data URL) for a given username, for use on printed docs.
-const getSignature = (store, username) => {
-  const emp = (store?.employees || []).find(e => e.username === username);
-  return emp?.signature || null;
-};
+// Per Jef 2026-11-12: dokumen tidak lagi memakai tanda tangan/stempel gambar — selalu null.
+const getSignature = (store, username) => null;
 // Auto-record a Sales Activity entry when a sales user creates a quotation or a new client,
 // so the Sales Activity feed fills itself in without requiring a manual log entry.
 const logSalesActivity = (store, session, {
@@ -3348,18 +3346,21 @@ function useStore() {
   };
   const [kpiTargets, setKpiTargets] = usePersisted("erp_kpi_targets", {}); // { [nama]: {revenueTarget, newContactsTarget, followupTarget, quotationsTarget} }
   const [companySettings, setCompanySettings] = usePersisted("erp_company_settings", {
-    nama: "PT Heavy Equipment Solutions",
-    alamat: "Jl. Industri Raya No. 88, Jakarta",
-    telepon: "021-5550-0000",
-    email: "info@heavyequipment.co.id",
+    nama: "PT SENTRA MULIA MANDIRI",
+    alamat: "JL. TAMAN SARI X NO.10\nJAKARTA BARAT 11150",
+    telepon: "0877 7579 0855",
+    email: "smuliamandiri@yahoo.com",
     npwp: "",
     logo: "",
     // Per Jef 2026-09-18: these used to be hardcoded straight into InvoiceModule's print call
     // (bankInfoText) — editable here now so changing the bank account doesn't need a code change.
     // Updated 2026-09-18 to the new Maybank account per Jef's request.
-    bankNama: "Maybank Cabang Fatmawati",
-    bankAtasNama: "PT Foresta Transtek",
-    bankNoRekening: "2741001446"
+    bankNama: "BCA CAB, MANGGA BESAR VIII",
+    bankAtasNama: "PT SENTRA MULIA MANDIRI",
+    bankNoRekening: "6980199990",
+    // Per Jef 2026-11-12: direktur penanda tangan dokumen (Invoice dll.) kini dari Setting Perusahaan.
+    direkturNama: "Benny Gunawan",
+    direkturJabatan: "DIREKTUR"
   });
   // Real login accounts (Supabase `profiles`) — shared so any module can reference the actual
   // user/role/username list (Database Client access assignment, User Management, Cuti-on-behalf,
@@ -5053,6 +5054,31 @@ function tableCellSortValue(node) {
   }
   return text.toLowerCase();
 }
+// Per Jef 2026-11-17: every list in the ERP should show the NEWEST on top by default. Rather than
+// touching ~150 call sites, Table applies a default ordering: if it has a primary document-date
+// column (header starts with Tanggal/Tgl/Waktu/Date/Dibuat, but not birth/due/expiry/"terakhir"
+// style date columns) whose cells all parse as dates, rows sort by that date descending; same-day
+// rows fall back to the document number (largest number sequence first, so ...-0020 above ...-0019
+// and -R6 above -R5). Clicking a column header still overrides it; a call site can opt out with
+// defaultSort={false}.
+function tableDateKey(node) {
+  const text = tableCellText(node).trim();
+  let m = text.match(/^(\d{1,2})-([A-Za-z]{3})-(\d{2}|\d{4})/);
+  if (m) {
+    const mi = REV_MONTHS.indexOf(m[2].toUpperCase());
+    if (mi === -1) return null;
+    const yr = m[3].length === 2 ? 2000 + parseInt(m[3], 10) : parseInt(m[3], 10);
+    return yr * 10000 + (mi + 1) * 100 + parseInt(m[1], 10);
+  }
+  m = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return parseInt(m[1], 10) * 10000 + parseInt(m[2], 10) * 100 + parseInt(m[3], 10);
+  return null;
+}
+const TABLE_DATE_HEADER_RE = /^(tanggal|tgl|waktu|date|dibuat)/i;
+const TABLE_DATE_HEADER_EXCLUDE_RE = /lahir|masuk|jatuh|tempo|due|expired|berlaku|selesai|terakhir|bayar|visit|kunjungan/i;
+function tableNumberSeq(node) {
+  return (tableCellText(node).match(/\d+/g) || []).map(Number);
+}
 function Table({
   headers,
   rows,
@@ -5062,7 +5088,8 @@ function Table({
   pageSize = 100,
   search = false,
   resizable = false,
-  storageKey
+  storageKey,
+  defaultSort = true
 }) {
   // Optional drag-to-resize columns (opt-in via `resizable: true` + a unique `storageKey`) — first
   // built for Sales Activity's SUPER USER-only request to control column widths themselves,
@@ -5163,7 +5190,37 @@ function Table({
     if (na !== nb) return na ? -1 : 1; // numbers always sort ahead of placeholder/text values
     return va < vb ? -1 : va > vb ? 1 : 0;
   };
-  const sortedRows = sortCol === null ? searchedRows : searchedRows.slice().sort((a, b) => {
+  // Default "newest first" ordering (see tableDateKey above) — only when no header has been clicked.
+  let defaultOrderedRows = searchedRows;
+  if (defaultSort && sortCol === null && searchedRows.length > 1) {
+    const dateIdx = headers.findIndex(h => typeof h === "string" && TABLE_DATE_HEADER_RE.test(h.trim()) && !TABLE_DATE_HEADER_EXCLUDE_RE.test(h));
+    if (dateIdx !== -1) {
+      const keyed = searchedRows.map(r => ({
+        r,
+        d: tableDateKey(r.row[dateIdx])
+      }));
+      const nonEmpty = keyed.filter(x => tableCellText(x.r.row[dateIdx]).trim() !== "" && tableCellText(x.r.row[dateIdx]).trim() !== "-");
+      // Only apply when every filled cell is a recognizable date — otherwise leave the caller's order.
+      if (nonEmpty.length > 0 && nonEmpty.every(x => x.d !== null)) {
+        defaultOrderedRows = keyed.slice().sort((a, b) => {
+          if (a.d !== b.d) {
+            if (a.d === null) return 1;
+            if (b.d === null) return -1;
+            return b.d - a.d;
+          }
+          const sa = tableNumberSeq(a.r.row[0]),
+            sb = tableNumberSeq(b.r.row[0]);
+          for (let i = 0; i < Math.max(sa.length, sb.length); i++) {
+            const x = sa[i] ?? -1,
+              y = sb[i] ?? -1;
+            if (x !== y) return y - x;
+          }
+          return 0;
+        }).map(x => x.r);
+      }
+    }
+  }
+  const sortedRows = sortCol === null ? defaultOrderedRows : searchedRows.slice().sort((a, b) => {
     const va = tableCellSortValue(a.row[sortCol]);
     const vb = tableCellSortValue(b.row[sortCol]);
     const cmp = compareSortValues(va, vb);
@@ -12836,7 +12893,7 @@ function MekanikReport({
       partyExtra: `Lokasi: ${b.millName || b.lokasiManual || "-"}`,
       extraInfoRows: [["No. PO / Sales Order", b.soNomor || "-"], ["No. Delivery Order", b.doNomor || "-"], ["Jenis Pekerjaan", jenisText || "-"], ["Nama Unit", b.unitName || "-"], ["Model", b.model || "-"], ["SN Unit", b.snUnit || "-"], ["Engine", b.engine || "-"], ["SN Engine", b.snEngine || "-"], ["Crane", b.crane || "-"], ["SN Crane", b.snCrane || "-"], ["Grapple", b.grapple || "-"], ["SN Grapple", b.snGrapple || "-"], ["Kondisi", kondisiText || "-"]],
       itemHeaders: ["Keterangan", "Detail"],
-      items: [["Pekerjaan telah diselesaikan oleh", "PT FORESTA TRANSTEK"]],
+      items: [["Pekerjaan telah diselesaikan oleh", (store.companySettings?.nama || "PT SENTRA MULIA MANDIRI").toUpperCase()]],
       showPrice: false,
       catatan: b.catatan,
       dibuatOleh: {
@@ -29881,26 +29938,17 @@ function DeliveryOrderModule({
   }, /*#__PURE__*/React.createElement(PrintBtn, {
     onClick: () => {
       const so = salesOrders.find(s => s.nomor === detail.soNomor);
-      return printDocument({
+      return printSuratJalan({
         company: store.companySettings,
-        docTitle: "DELIVERY ORDER",
         nomor: detail.nomor,
         tanggal: detail.tanggal,
-        partyLabel: "Kepada:",
-        partyName: detail.customerNama,
-        partyExtra: customers.find(c => c.nama === detail.customerNama)?.alamat || "",
-        itemHeaders: ["Part Number", "Nama Barang", "Qty"],
-        items: detail.items.map(it => [it.partNumber || "-", it.nama, fmtNum(it.qty)]),
-        showPrice: false,
+        poNo: so?.noPoClient || "",
+        customerNama: detail.customerNama,
+        customerAlamat: customers.find(c => c.nama === detail.customerNama)?.alamat || "",
+        items: detail.items.map(it => [it.partNumber || "-", it.nama, fmtNum(it.qty), it.satuan || it.unit || ""]),
         catatan: detail.catatan,
-        extraInfoRows: [["No. PO", so?.noPoClient || "-"], ["Ekspedisi", so?.shippingEkspedisi || detail.ekspedisi || "-"], ...(detail.noResi ? [["No. Resi", detail.noResi]] : []), ...(detail.driver ? [["Nama Driver", detail.driver]] : []), ...(detail.noKendaraan ? [["No. Mobil", detail.noKendaraan]] : []), ...(detail.noTelp ? [["No. Telp", detail.noTelp]] : [])],
-        dibuatOleh: {
-          nama: detail.createdBy
-        },
-        disetujuiLabel: "Penerima",
-        sizeBoost: 4,
-        colWidths: ["28%", "58%", "14%"],
-        uniformFont: true
+        infoLines: [["Ekspedisi", so?.shippingEkspedisi || detail.ekspedisi || ""], ["No. Resi", detail.noResi || ""], ["Nama Driver", detail.driver || ""], ["No. Mobil", detail.noKendaraan || ""], ["No. Telp", detail.noTelp || ""]].filter(r => r[1]),
+        dibuatOleh: detail.createdBy
       });
     }
   })))), /*#__PURE__*/React.createElement(Modal, {
@@ -32114,15 +32162,17 @@ function InvoiceModule({
       // Per Jef 2026-09-18: was hardcoded here — now reads from Setting Perusahaan (erp_company_settings)
       // so the bank account can be updated without a code change. Falls back to the current Maybank
       // account if companySettings hasn't been saved with these fields yet (pre-existing installs).
-      bankInfoText: `${store.companySettings?.bankNama || "Maybank Cabang Fatmawati"}<br/>A/N ${store.companySettings?.bankAtasNama || "PT Foresta Transtek"}<br/>A/C ${store.companySettings?.bankNoRekening || "2741001446"}`,
+      // Baris dipisah "\n" (bukan <br/>): printDocument meng-escape teks ini, jadi <br/> akan tercetak
+      // mentah. printDocument mengubah "\n" jadi <br/> setelah di-escape.
+      bankInfoText: `${store.companySettings?.bankNama || ""}\nA/N ${store.companySettings?.bankAtasNama || store.companySettings?.nama || ""}\nA/C ${store.companySettings?.bankNoRekening || ""}`,
       hideCreatedBy: true,
       disetujuiAlign: "left",
       showMateraiSpace: true,
       materaiSpasi: 6,
       disetujuiLabel: "Disetujui Oleh",
       disetujuiOleh: {
-        nama: "Effendi Husin",
-        jabatan: "DIREKTUR"
+        nama: store.companySettings?.direkturNama || "Benny Gunawan",
+        jabatan: store.companySettings?.direkturJabatan || "DIREKTUR"
       }
     })
   })), detail.statusApproval !== "Disetujui GM" && /*#__PURE__*/React.createElement("p", {
@@ -35981,7 +36031,7 @@ function UangMakanModule({
   const totalSemua = activeRows.reduce((s, r) => s + r.total, 0);
   const periodeLabel = selMulai && selSelesai ? `${selMulai} s/d ${selSelesai}` : "-";
   const exportRows = () => exportToExcelStyled(XLSX => buildStyledSheet(XLSX, {
-    titleRows: ["PT. FORESTA TRANSTEK", "Laporan Rekapitulasi Harian"],
+    titleRows: [(store.companySettings?.nama || "PT SENTRA MULIA MANDIRI").toUpperCase(), "Laporan Rekapitulasi Harian"],
     headers: ["Nama", "Jabatan", "Periode", "Riil Hari", "½ Hari", "Absen Hari", "Rate Harian", "Uang Makan", "Uang Kerajinan", "Total"],
     rows: activeRows.map(r => [r.emp.nama, r.emp.jabatan || "-", periodeLabel, r.riilHari, r.setengahHari || 0, r.absenHari, r.rate, r.uangMakan, r.uangKerajinan, r.total]),
     moneyCols: [6, 7, 8, 9],
@@ -36942,10 +36992,10 @@ function TicketingModule({
 // Opens a new window with print-friendly HTML; browser's "Save as PDF" handles export.
 // ════════════════════════════════════════════════════════════════════════════
 const COMPANY_INFO = {
-  nama: "PT Heavy Equipment Solutions",
-  alamat: "Jl. Industri Raya No. 88, Jakarta",
-  telepon: "021-5550-0000",
-  email: "info@heavyequipment.co.id"
+  nama: "PT SENTRA MULIA MANDIRI",
+  alamat: "JL. TAMAN SARI X NO.10\nJAKARTA BARAT 11150",
+  telepon: "0877 7579 0855",
+  email: "smuliamandiri@yahoo.com"
 };
 // Fixed print column widths (% of table width, each set sums to 100), keyed by the item header row, so a
 // document type prints with identical column widths every time regardless of its content. Money columns
@@ -37088,26 +37138,22 @@ function printDocument({
       ${uniformFont ? `/* DO typography copied from the office's Surat Jalan Excel template (SURAT JALAN AMP.xls):
          letterhead Tahoma 16 bold / 12; title Tahoma 18; customer name+address Arial 14 bold; No/header/
          signature Arial 13; table body + info Arial 12; Up/Catatan Calibri-sized per template; disclaimer Calibri 11. */
-      * { font-family: Arial, sans-serif !important; color: #000 !important; font-weight: 400 !important; background: none !important; }
+      * { font-family: Arial, Helvetica, sans-serif !important; color: #000 !important; font-weight: 700 !important; background: none !important; -webkit-text-stroke: 0.3px #000; }
       img.co-logo { display: none !important; }
       th, td { border-bottom: 2px solid #000 !important; }
       .header { border-bottom: 3px solid #000 !important; }
-      .company { font-family: Tahoma, Arial, sans-serif !important; font-size: 16pt !important; font-weight: 700 !important; }
-      .co-line { font-family: Tahoma, Arial, sans-serif !important; font-size: 12pt !important; }
-      .doctitle { font-family: Tahoma, Arial, sans-serif !important; font-size: 18pt !important; font-weight: 400 !important; }
-      .doc-meta { font-size: 13pt !important; }
-      .doc-meta strong { font-weight: 400 !important; }
+      .company { font-size: 14pt !important; }
+      .co-line { font-size: 11pt !important; }
+      .doctitle { font-size: 16pt !important; }
+      .doc-meta { font-size: 12pt !important; }
       .party-label { font-size: 12pt !important; }
-      .party-name, .party-extra { font-size: 14pt !important; font-weight: 700 !important; }
-      .xr-k { font-size: 12pt !important; font-weight: 700 !important; }
-      .xr-v { font-size: 12pt !important; font-weight: 400 !important; }
-      th { font-size: 13pt !important; font-weight: 400 !important; }
-      td { font-size: 12pt !important; font-weight: 400 !important; }
+      .party-name, .party-extra { font-size: 13pt !important; }
+      .xr-k, .xr-v { font-size: 12pt !important; }
+      th { font-size: 12pt !important; }
+      td { font-size: 12pt !important; }
       .note-row { font-size: 12pt !important; }
-      .note-row strong { font-weight: 700 !important; }
-      .sig-row { font-size: 13pt !important; }
-      .disc { font-family: Calibri, Arial, sans-serif !important; font-size: 11pt !important; }
-      .disc-t { font-size: 12pt !important; }` : ""}
+      .sig-row { font-size: 12pt !important; }
+      .disc { display: none !important; }` : ""}
       .header { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 3px solid #1a1a1a; padding-bottom: 16px; margin-bottom: 24px; }
       .company { font-size: ${fs(20)}px; font-weight: 800; white-space: nowrap; }
       .doctitle { font-size: ${fs(26)}px; font-weight: 800; text-align: right; color: #2563eb; }
@@ -37121,7 +37167,7 @@ function printDocument({
     <body>
       <div class="header">
         <div style="display:flex;gap:12px;align-items:flex-start;">
-          ${co.logo ? `<img class="co-logo" src="${co.logo}" style="max-height:56px;max-width:120px;object-fit:contain;" />` : ""}
+          ${co.logo ? `<img class="co-logo" src="${co.logo}" style="max-height:64px;max-width:200px;object-fit:contain;" />` : ""}
           <div>
             <div class="company">${escapeHtml(co.nama)}</div>
             ${co.alamat ? `<div class="co-line" style="font-size:${fs(12)}px;color:#666;margin-top:2px;white-space:pre-line;">${escapeHtml(co.alamat)}</div>` : ""}
@@ -37154,18 +37200,106 @@ function printDocument({
         <div class="row final"><span>TOTAL</span><span>${fmtMoney(total, currency)}</span></div>
       </div>
       ${terbilangText ? `<div style="text-align:right;font-size:${fs(11)}px;color:#666;font-style:italic;margin-top:4px;">Terbilang: ${terbilangText}</div>` : ""}` : ""}
-      ${bankInfoText ? `<div style="margin-top:16px;background:#f5f5f5;border-radius:8px;padding:10px 14px;font-size:${fs(12)}px;"><strong>Informasi Pembayaran:</strong><br/>${escapeHtml(bankInfoText)}</div>` : ""}
+      ${bankInfoText ? `<div style="margin-top:16px;background:#f5f5f5;border-radius:8px;padding:10px 14px;font-size:${fs(12)}px;"><strong>Informasi Pembayaran:</strong><br/>${escapeHtml(bankInfoText).replace(/\n/g, "<br/>")}</div>` : ""}
       ${paymentTermsHtml}
       ${catatan ? `<div class="note-row" style="margin-top:24px;font-size:${fs(12)}px;color:#666;white-space:pre-wrap;word-break:break-word;"><strong>Catatan:</strong> ${escapeHtml(catatan)}</div>` : ""}
       <div class="sig-row" style="margin-top:20px;display:flex;justify-content:${disetujuiAlign === "left" ? "flex-start" : hideCreatedBy ? "center" : "space-between"};font-size:${fs(12)}px;">
         ${hideCreatedBy ? "" : `<div style="text-align:center;width:200px;">${escapeHtml(dibuatOlehLabel)}<br/><br/>${sigBlock(dibuatOleh)}</div>`}
         <div style="text-align:center;width:200px;">${escapeHtml(disetujuiLabel)}${showMateraiSpace ? Array(materaiSpasi).fill("<br/>").join("") : "<br/>"}${sigBlock(disetujuiOleh, showMateraiSpace)}</div>
       </div>
-      <div class="disc" style="margin-top:40px;text-align:center;font-style:italic;font-size:${fs(7)}px;color:#888;border-top:1px solid #ddd;padding-top:10px;line-height:1.5;">
+      ${uniformFont ? "" : `<div class="disc" style="margin-top:40px;text-align:center;font-style:italic;font-size:${fs(10)}px;color:#555;border-top:1px solid #ddd;padding-top:10px;line-height:1.5;">
         <span class="disc-t">DISCLAIMER</span><br/>
         "Dokumen ini telah diterbitkan dan ditandatangani secara elektronik melalui sistem PT. SENTRA MULIA MANDIRI sehingga sah dan mengikat secara hukum tanpa memerlukan tanda tangan basah maupun stempel perusahaan, sesuai dengan ketentuan UU ITE No. 11 Tahun 2008.<br/>
         Lampiran ini merupakan bukti sah dan hanya berlaku sesuai dengan nomor, tanggal, serta syarat dan ketentuan yang tercantum di dalamnya.<br/>
         Segala bentuk perubahan, pemalsuan, atau penggunaan dokumen di luar peruntukan tanpa persetujuan tertulis dari PT. SENTRA MULIA MANDIRI adalah tidak sah."
+      </div>`}
+      ${"<scr" + "ipt>window.onload = () => window.print();</scr" + "ipt>"}
+    </body></html>
+  `);
+  win.document.close();
+}
+// SURAT JALAN (Delivery Order) print — layout copied from the office's Excel Surat Jalan
+// ("SURAT JALAN AGRICINAL.pdf") because that layout prints legibly on the dot-matrix printer:
+// plain Arial, solid black, boxed table (NO | PART NUMBER | ITEM DESCRIPTIONS | QTY | UNIT),
+// boxed Date / PO No, "Delivery By / Received By" footer, no logo, no disclaimer.
+function printSuratJalan({
+  company,
+  nomor,
+  tanggal,
+  poNo,
+  customerNama,
+  customerAlamat,
+  items,
+  catatan,
+  infoLines,
+  dibuatOleh
+}) {
+  const win = window.open("", "_blank");
+  if (!win) {
+    alert("Popup diblokir browser. Izinkan popup untuk mencetak dokumen.");
+    return;
+  }
+  const co = {
+    ...COMPANY_INFO,
+    ...(company || {})
+  };
+  const e = escapeHtml;
+  const MIN_ROWS = 14;
+  const rows = items.map((r, i) => `<tr><td class="c">${i + 1}</td><td>${e(r[0])}</td><td>${e(r[1])}</td><td class="c">${e(r[2])}</td><td class="c">${e(r[3])}</td></tr>`).join("") + Array.from({
+    length: Math.max(0, MIN_ROWS - items.length)
+  }, () => `<tr><td class="c">&nbsp;</td><td></td><td></td><td></td><td></td></tr>`).join("");
+  const coLines = [...String(co.alamat || "").split("\n").filter(Boolean), [co.telepon ? "Telp. " + co.telepon : "", co.email ? "email : " + co.email : ""].filter(Boolean).join("   ")].filter(Boolean).map(l => `<div class="cl">${e(l)}</div>`).join("");
+  const infoHtml = (infoLines || []).length ? `<div class="info">${infoLines.map(([k, v]) => `<span>${e(k)} : <b>${e(v)}</b></span>`).join("&nbsp;&nbsp;&nbsp;")}</div>` : "";
+  win.document.write(`
+    <html><head><title>SURAT JALAN - ${e(nomor)}</title>
+    <style>
+      @page { size: A4 portrait; margin: 12mm; }
+      * { font-family: Arial, Helvetica, sans-serif; color: #000; box-sizing: border-box; }
+      body { margin: 0; font-size: 11pt; }
+      .top { display: flex; justify-content: space-between; align-items: flex-start; }
+      .cn { font-size: 14pt; font-weight: 700; }
+      .cl { font-size: 10pt; }
+      .right { width: 46%; }
+      .title { font-size: 16pt; text-align: center; border-bottom: 2px solid #000; padding-bottom: 2px; }
+      .no { text-align: center; margin: 6px 0; font-size: 11pt; }
+      .meta { width: 100%; border-collapse: separate; border-spacing: 6px 0; margin: 0 -6px; }
+      .meta td, .meta th { border: 2px solid #000; text-align: center; font-size: 10pt; padding: 2px 4px; height: 22px; }
+      .to { margin: 22px 0 6px 20px; font-weight: 700; font-size: 11pt; }
+      .cust { font-weight: 700; font-size: 12pt; line-height: 1.7; white-space: pre-line; margin-bottom: 14px; }
+      table.items { width: 100%; border-collapse: collapse; border: 2px solid #000; }
+      table.items th { border: 2px solid #000; font-weight: 400; font-size: 11pt; padding: 6px; }
+      table.items td { border-left: 2px solid #000; border-right: 2px solid #000; padding: 3px 6px; font-size: 11pt; height: 24px; }
+      table.items tbody tr:last-child td { border-bottom: 2px solid #000; }
+      table.items tbody tr:first-child td { border-top: 2px solid #000; }
+      .c { text-align: center; }
+      .info { margin-top: 8px; font-size: 11pt; }
+      .note { margin-top: 8px; font-size: 11pt; white-space: pre-wrap; }
+      .sig { display: flex; justify-content: space-between; margin-top: 12px; font-size: 11pt; }
+      .sig .col { width: 200px; }
+      .sigline { margin-top: 70px; border-top: 2px solid #000; padding-top: 2px; font-weight: 700; min-height: 18px; }
+      @media print { body { margin: 0; } }
+    </style></head>
+    <body>
+      <div class="top">
+        <div><div class="cn">${e(co.nama)}</div>${coLines}</div>
+        <div class="right">
+          <div class="title">SURAT JALAN</div>
+          <div class="no">No : ${e(nomor)}</div>
+          <table class="meta"><tr><th>Date</th><th>PO No</th></tr><tr><td>${fmtDateRev(tanggal)}</td><td>${e(poNo)}</td></tr></table>
+        </div>
+      </div>
+      <div class="to">To :</div>
+      <div class="cust">${e(customerNama)}${customerAlamat ? "\n" + e(customerAlamat) : ""}</div>
+      <table class="items">
+        <colgroup><col style="width:6%"/><col style="width:20%"/><col style="width:48%"/><col style="width:12%"/><col style="width:14%"/></colgroup>
+        <thead><tr><th>NO</th><th>PART NUMBER</th><th>ITEM DESCRIPTIONS</th><th>QTY</th><th>UNIT</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      ${infoHtml}
+      ${catatan ? `<div class="note"><b>Catatan:</b> ${e(catatan)}</div>` : ""}
+      <div class="sig">
+        <div class="col">Delivery By :<div class="sigline">${e(dibuatOleh || "")}</div></div>
+        <div class="col">Received By :<div class="sigline">&nbsp;</div></div>
       </div>
       ${"<scr" + "ipt>window.onload = () => window.print();</scr" + "ipt>"}
     </body></html>
@@ -37222,7 +37356,7 @@ function printSlipGaji(r, periode, company) {
     <body>
       <div class="header">
         <div style="display:flex;gap:12px;align-items:flex-start;">
-          ${co.logo ? `<img class="co-logo" src="${co.logo}" style="max-height:56px;max-width:120px;object-fit:contain;" />` : ""}
+          ${co.logo ? `<img class="co-logo" src="${co.logo}" style="max-height:64px;max-width:200px;object-fit:contain;" />` : ""}
           <div>
             <div class="company">${escapeHtml(co.nama)}</div>
             ${co.alamat ? `<div style="font-size:12px;color:#666;margin-top:2px;white-space:pre-line;">${escapeHtml(co.alamat)}</div>` : ""}
@@ -37262,7 +37396,7 @@ function printSlipGaji(r, periode, company) {
         ____________________<br/>
         HRD Manager
       </div>
-      <div style="margin-top:40px;text-align:center;font-style:italic;font-size:7px;color:#888;border-top:1px solid #ddd;padding-top:10px;line-height:1.5;">
+      <div style="margin-top:40px;text-align:center;font-style:italic;font-size:10px;color:#555;border-top:1px solid #ddd;padding-top:10px;line-height:1.5;">
         DISCLAIMER<br/>
         "Dokumen ini telah diterbitkan dan ditandatangani secara elektronik melalui sistem PT. SENTRA MULIA MANDIRI sehingga sah dan mengikat secara hukum tanpa memerlukan tanda tangan basah maupun stempel perusahaan, sesuai dengan ketentuan UU ITE No. 11 Tahun 2008.<br/>
         Lampiran ini merupakan bukti sah dan hanya berlaku sesuai dengan nomor, tanggal, serta syarat dan ketentuan yang tercantum di dalamnya.<br/>
@@ -48896,9 +49030,11 @@ function CompanySettingsModule({
   // touching them won't accidentally persist an empty value over the real account.
   useEffect(() => {
     setForm({
-      bankNama: "Maybank Cabang Fatmawati",
-      bankAtasNama: "PT Foresta Transtek",
-      bankNoRekening: "2741001446",
+      bankNama: "BCA CAB, MANGGA BESAR VIII",
+      bankAtasNama: "PT SENTRA MULIA MANDIRI",
+      bankNoRekening: "6980199990",
+      direkturNama: "Benny Gunawan",
+      direkturJabatan: "DIREKTUR",
       ...companySettings
     });
   }, [companySettings]);
@@ -49118,7 +49254,7 @@ function CompanySettingsModule({
       ...form,
       bankAtasNama: v
     }),
-    placeholder: "mis: PT. FORESTA TRANSTEK"
+    placeholder: "mis: PT SENTRA MULIA MANDIRI"
   }), /*#__PURE__*/React.createElement(Input, {
     label: "No. Rekening (A/C)",
     value: form.bankNoRekening || "",
@@ -49126,7 +49262,39 @@ function CompanySettingsModule({
       ...form,
       bankNoRekening: v
     })
-  })))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+  })))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      borderTop: `1px solid ${theme.border}`,
+      paddingTop: 14
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 10px",
+      color: theme.muted,
+      fontSize: 13,
+      fontWeight: 600
+    }
+  }, "DIREKTUR (penanda tangan dokumen, mis. Invoice)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Nama Direktur",
+    value: form.direkturNama || "",
+    onChange: v => setForm({
+      ...form,
+      direkturNama: v
+    })
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "Jabatan",
+    value: form.direkturJabatan || "",
+    onChange: v => setForm({
+      ...form,
+      direkturJabatan: v
+    })
+  }))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
     style: {
       fontSize: 13,
       color: theme.muted,
@@ -51219,21 +51387,7 @@ function App() {
       fontFamily: "inherit",
       marginBottom: 6
     }
-  }, themeMode === "dark" ? "☀️ Mode Terang" : "🌙 Mode Gelap"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setSignatureOpen(true),
-    style: {
-      width: "100%",
-      background: theme.surface,
-      border: `1px solid ${theme.border}`,
-      borderRadius: 6,
-      padding: "8px",
-      color: theme.muted,
-      fontSize: 12,
-      cursor: "pointer",
-      fontFamily: "inherit",
-      marginBottom: 6
-    }
-  }, "✍️ Tanda Tangan")), /*#__PURE__*/React.createElement("button", {
+  }, themeMode === "dark" ? "☀️ Mode Terang" : "🌙 Mode Gelap")), /*#__PURE__*/React.createElement("button", {
     onClick: logout,
     style: {
       width: "100%",
@@ -51318,11 +51472,6 @@ function App() {
     open: changePwOpen,
     onClose: () => setChangePwOpen(false),
     session: session
-  }), /*#__PURE__*/React.createElement(SignatureModal, {
-    open: signatureOpen,
-    onClose: () => setSignatureOpen(false),
-    session: session,
-    store: store
   }));
 }
 const root = ReactDOM.createRoot(document.getElementById('root'));
