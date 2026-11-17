@@ -141,7 +141,7 @@ function MobileCardList({
 // silently working on stale code (which is what made bugs like "Master Part
 // randomly missing for some users" look inconsistent — they were on old builds).
 // ════════════════════════════════════════════════════════════════════════════
-const APP_BUILD = "2026-11-17.4";
+const APP_BUILD = "2026-11-17.5";
 (function () {
   function showUpdateBanner() {
     if (document.getElementById("app-update-banner")) return;
@@ -8758,6 +8758,13 @@ function CustomerDB({
     jabatan: "",
     noHp: ""
   });
+  // Index of the PIC currently being edited in the Client form (null = adding a new PIC).
+  const [editPicIdx, setEditPicIdx] = useState(null);
+  useEffect(() => {
+    if (!modal) {
+      setEditPicIdx(null);
+    }
+  }, [modal]);
   const [conflicts, setConflicts] = useState(null);
   const [importSummary, setImportSummary] = useState(null);
   const [reviewReq, setReviewReq] = useState(null);
@@ -8965,22 +8972,55 @@ function CustomerDB({
   };
   const addPic = () => {
     if (!picForm.nama) return alert("Nama PIC wajib diisi");
-    setForm(f => ({
-      ...f,
-      pics: [...(f.pics || []), {
-        ...picForm
-      }]
-    }));
+    if (editPicIdx !== null) {
+      // Save edits to the existing PIC in place (keeps its position in the list).
+      setForm(f => ({
+        ...f,
+        pics: (f.pics || []).map((p, j) => j === editPicIdx ? {
+          ...p,
+          ...picForm
+        } : p)
+      }));
+      setEditPicIdx(null);
+    } else {
+      setForm(f => ({
+        ...f,
+        pics: [...(f.pics || []), {
+          ...picForm
+        }]
+      }));
+    }
     setPicForm({
       nama: "",
       jabatan: "",
       noHp: ""
     });
   };
-  const removePic = i => setForm(f => ({
-    ...f,
-    pics: f.pics.filter((_, j) => j !== i)
-  }));
+  const startEditPic = i => {
+    const p = (form.pics || [])[i];
+    if (!p) return;
+    setPicForm({
+      nama: p.nama || "",
+      jabatan: p.jabatan || "",
+      noHp: p.noHp || ""
+    });
+    setEditPicIdx(i);
+  };
+  const cancelEditPic = () => {
+    setEditPicIdx(null);
+    setPicForm({
+      nama: "",
+      jabatan: "",
+      noHp: ""
+    });
+  };
+  const removePic = i => {
+    if (editPicIdx !== null) cancelEditPic();
+    setForm(f => ({
+      ...f,
+      pics: f.pics.filter((_, j) => j !== i)
+    }));
+  };
   const save = () => {
     if (!form.nama) return alert("Nama client wajib diisi");
     // Owner/GM/Finance Director must explicitly pick which Sales Manager this client belongs to —
@@ -9765,16 +9805,34 @@ function CustomerDB({
       noHp: v
     }),
     placeholder: "No. HP"
-  }), /*#__PURE__*/React.createElement(Btn, {
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     onClick: addPic
-  }, "+ Add")), form.pics && form.pics.length > 0 && /*#__PURE__*/React.createElement(Table, {
+  }, editPicIdx !== null ? "✓ Simpan" : "+ Add"), editPicIdx !== null && /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    variant: "secondary",
+    onClick: cancelEditPic
+  }, "Batal"))), form.pics && form.pics.length > 0 && /*#__PURE__*/React.createElement(Table, {
     headers: ["Nama", "Jabatan", "No. HP", ""],
-    rows: form.pics.map((p, i) => [p.nama, p.jabatan, p.noHp, /*#__PURE__*/React.createElement(Btn, {
+    rows: form.pics.map((p, i) => [p.nama, p.jabatan, p.noHp, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement(Btn, {
+      size: "sm",
+      variant: "secondary",
+      onClick: () => startEditPic(i)
+    }, "✏️"), /*#__PURE__*/React.createElement(Btn, {
       size: "sm",
       variant: "danger",
       onClick: () => removePic(i)
-    }, "×")])
+    }, "×"))])
   })), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
